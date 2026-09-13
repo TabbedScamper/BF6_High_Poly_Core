@@ -1,0 +1,12 @@
+out-build/
+build*/
+out/
+*.log
+*.obj
+*.pdb
+*.ilk
+*.ppm
+__pycache__/
+*.pyc
+imgui.ini
+.vs/

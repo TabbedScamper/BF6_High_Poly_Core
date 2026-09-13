@@ -27,6 +27,8 @@
 
 #include "installed_sound_wave.h"
 #include "source.h"
+#include "oodle.h"
+#include "cas.h"
 #include "meshset.h"
 #include "depot.h"
 #include "decals.h"
@@ -1020,6 +1022,9 @@ struct MeshHandle {
     };
     std::vector<Surface> surfaces;
     std::vector<uint16_t>               palette;   // mesh-wide bone palette
+    // Reference-decoded meshes only: texture ids index this table of resource
+    // names (there is no context texture table behind them).
+    std::vector<std::string>            texture_names;
 };
 
 static void fill_surface_profile(bf6_ctx* c, const bf6::MaterialBinding& mb,
@@ -1210,78 +1215,20 @@ int bf6_catalogue(bf6_ctx* c, const char* search, bf6_cat_entry* out, int out_ma
     return total;
 }
 
-static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod,
-                                      const char* placing_bundle,
-                                      const char* fallback_bundle,
-                                      const char* variation,
-                                      bool armory_index) {
-    if (!c || !res_name) return nullptr;
-    const std::string placing = placing_bundle ? placing_bundle : "";
-    const std::string fallback = fallback_bundle ? fallback_bundle : "";
-    const std::string variant = variation ? variation : "";
-    std::string err;
-    std::vector<uint8_t> d = c->src.get_res(res_name, err);
-    if (d.empty()) return nullptr;
-    bf6::MeshSet ms = bf6::meshset_parse(d.data(), d.size(), err);
-    if (!ms.ok || ms.lods.empty()) return nullptr;
-    if (lod < 0 || lod >= (int)ms.lods.size()) lod = 0;
+// What a live read decided, for building a mesh reference.
+struct MeshCapture {
+    int lod = 0;
+    std::string chunk_guid;              // empty: geometry stored inline in the MeshSet
+    std::set<uint16_t> hidden;           // destruction parts removed at spawn
+    std::vector<int> uv_channel;         // primary UV channel applied per section
+};
 
-    // The vertex/index bytes live in the LOD's chunk (try both guid spellings).
-    static const char* H = "0123456789abcdef";
-    const auto& cid = ms.lods[lod].chunk_id;
-    std::string fwd, rev;
-    for (int i = 0; i < 16; i++) { fwd += H[cid[i] >> 4]; fwd += H[cid[i] & 0xF]; }
-    for (int i = 15; i >= 0; i--) { rev += H[cid[i] >> 4]; rev += H[cid[i] & 0xF]; }
-    std::vector<uint8_t> chunk = c->src.get_chunk(fwd, err);
-    if (chunk.empty()) chunk = c->src.get_chunk(rev, err);
-
-    // NO CHUNK IS NOT ALWAYS A MISSING CHUNK. A LOD whose ChunkId is all zeros
-    // stores its geometry INSIDE the MeshSet, and returning null for those loses
-    // every gadget and projectile that ships that way - 9 of the 10,571 mesh
-    // resources in one level's mount, all under common/hardware. See
-    // meshset_inline_lod for the base recovery and its measurement.
-    const uint8_t* geom = chunk.data();
-    size_t geom_len = chunk.size();
-    if (chunk.empty() &&
-        !bf6::meshset_inline_lod(ms, lod, d.data(), d.size(), &geom, &geom_len))
-        return nullptr;
-
-    auto secs = bf6::meshset_read_lod(ms, lod, geom, geom_len, err);
-    if (secs.empty()) return nullptr;
-
-    // ---- DROP THE PARTS THE GAME HIDES AT SPAWN ---------------------------
-    //
-    // A destructible prop carries its own damaged state inside its intact
-    // mesh - the cracked windscreen, the crushed panel, the deflated tyre -
-    // tagged per vertex and hidden until the piece breaks. Left in, every
-    // parked car is drawn with its own wreck interpenetrating it, which is not
-    // subtle: it reads as bodywork that is stretched, doubled and corrupt, and
-    // it looks like a geometry bug rather than a missing filter.
-    //
-    // Skinned meshes are exempt: there the same per-vertex element is a
-    // SKELETON BONE, a different and differently sized index space, and
-    // indexing the part table with a bone id would cull arbitrary pieces of
-    // every aircraft.
-    // The part table lives in the prop EBX, so this needs the type schema.
-    // A context opened without one can still read geometry, and silently
-    // skipping the filter is better than refusing the mesh.
-    //
-    // THE PART INDEX IS CHECKED FIRST, and that ordering is the whole cost of
-    // this feature. Asking the question needs the prop's EBX partition read and
-    // parsed, and a map places about 1,450 distinct assets - so doing it for
-    // every one of them would put seconds onto a load that is already the thing
-    // people complain about. A mesh with no per-vertex part index cannot be
-    // filtered whatever its table says, and that test is free: the index was
-    // already decoded with the geometry.
-    // Every section's state key by material name, taken BEFORE the shadow
-    // filter below: a visual section's variation can resolve through its
-    // _ZOnly twin's key (reference: _candidate_keys, SHADERS.md 5.2), and the
-    // twin is exactly what the filter is about to remove.
-    std::map<std::string, uint64_t> twin_keys;
-    // Read keys from the cheap section headers, including skipped pass twins.
-    // Their vertex buffers do not need to be decoded to resolve materials.
-    for (const auto& g : ms.lods[lod].sections) twin_keys.emplace(g.material, g.state_key);
-
+// Section filtering and assembly shared by the live reader and the reference
+// decoder, so both produce identical geometry. hidden_for is asked for the
+// destruction parts hidden at spawn only when the mesh carries part indices.
+static MeshHandle* assemble_mesh_geometry(bf6::MeshSet& ms, std::vector<bf6::MeshGeomSection>& secs,
+        const std::function<std::set<uint16_t>()>& hidden_for,
+        std::set<uint16_t>* hidden_used, float lo[3], float hi[3]) {
     // Pass membership is authoritative. A backdrop's visible opaque material
     // can be named M_Shadow; discarding it by name removes the whole building.
     // Suppress dedicated depth/shadow twins only when no visual pass uses them.
@@ -1298,9 +1245,9 @@ static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod
     for (const auto& g : secs)
         if (!g.parts.empty() && g.parts.size() == g.positions.size() / 3) { has_parts = true; break; }
 
-    if (has_parts && ms.mesh_type != 1 && c->types) {
-        const std::set<uint16_t> hidden =
-            bf6::destruction_hidden_parts(c->src, *c->types, res_name);
+    if (has_parts && ms.mesh_type != 1) {
+        const std::set<uint16_t> hidden = hidden_for();
+        if (hidden_used) *hidden_used = hidden;
         if (!hidden.empty()) {
             for (auto& g : secs) {
                 if (g.parts.size() != g.positions.size() / 3) continue;
@@ -1356,7 +1303,7 @@ static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod
     mh->sections.resize(n);
     mh->colours.resize(n);
     mh->surfaces.resize(n);
-    float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+    for (int k = 0; k < 3; k++) { lo[k] = 1e30f; hi[k] = -1e30f; }
     for (size_t i = 0; i < n; i++) {
         bf6_section& sec = mh->sections[i];
         sec = bf6_section{};
@@ -1407,6 +1354,94 @@ static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod
     mh->mesh.mesh_type      = (int32_t)ms.mesh_type;
     mh->mesh.bone_count     = (int32_t)ms.bone_count;
     mh->mesh.lod_count      = (int32_t)ms.lod_count;
+
+    mh->mesh.lod_count      = (int32_t)ms.lod_count;
+    return mh;
+}
+
+static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod,
+                                      const char* placing_bundle,
+                                      const char* fallback_bundle,
+                                      const char* variation,
+                                      bool armory_index,
+                                      MeshCapture* cap = nullptr) {
+    if (!c || !res_name) return nullptr;
+    const std::string placing = placing_bundle ? placing_bundle : "";
+    const std::string fallback = fallback_bundle ? fallback_bundle : "";
+    const std::string variant = variation ? variation : "";
+    std::string err;
+    std::vector<uint8_t> d = c->src.get_res(res_name, err);
+    if (d.empty()) return nullptr;
+    bf6::MeshSet ms = bf6::meshset_parse(d.data(), d.size(), err);
+    if (!ms.ok || ms.lods.empty()) return nullptr;
+    if (lod < 0 || lod >= (int)ms.lods.size()) lod = 0;
+
+    // The vertex/index bytes live in the LOD's chunk (try both guid spellings).
+    static const char* H = "0123456789abcdef";
+    const auto& cid = ms.lods[lod].chunk_id;
+    std::string fwd, rev;
+    for (int i = 0; i < 16; i++) { fwd += H[cid[i] >> 4]; fwd += H[cid[i] & 0xF]; }
+    for (int i = 15; i >= 0; i--) { rev += H[cid[i] >> 4]; rev += H[cid[i] & 0xF]; }
+    std::vector<uint8_t> chunk = c->src.get_chunk(fwd, err);
+    std::string used_guid = fwd;
+    if (chunk.empty()) { chunk = c->src.get_chunk(rev, err); used_guid = rev; }
+    if (cap) { cap->lod = lod; cap->chunk_guid = chunk.empty() ? std::string() : used_guid; }
+
+    // NO CHUNK IS NOT ALWAYS A MISSING CHUNK. A LOD whose ChunkId is all zeros
+    // stores its geometry INSIDE the MeshSet, and returning null for those loses
+    // every gadget and projectile that ships that way - 9 of the 10,571 mesh
+    // resources in one level's mount, all under common/hardware. See
+    // meshset_inline_lod for the base recovery and its measurement.
+    const uint8_t* geom = chunk.data();
+    size_t geom_len = chunk.size();
+    if (chunk.empty() &&
+        !bf6::meshset_inline_lod(ms, lod, d.data(), d.size(), &geom, &geom_len))
+        return nullptr;
+
+    auto secs = bf6::meshset_read_lod(ms, lod, geom, geom_len, err);
+    if (secs.empty()) return nullptr;
+
+    // ---- DROP THE PARTS THE GAME HIDES AT SPAWN ---------------------------
+    //
+    // A destructible prop carries its own damaged state inside its intact
+    // mesh - the cracked windscreen, the crushed panel, the deflated tyre -
+    // tagged per vertex and hidden until the piece breaks. Left in, every
+    // parked car is drawn with its own wreck interpenetrating it, which is not
+    // subtle: it reads as bodywork that is stretched, doubled and corrupt, and
+    // it looks like a geometry bug rather than a missing filter.
+    //
+    // Skinned meshes are exempt: there the same per-vertex element is a
+    // SKELETON BONE, a different and differently sized index space, and
+    // indexing the part table with a bone id would cull arbitrary pieces of
+    // every aircraft.
+    // The part table lives in the prop EBX, so this needs the type schema.
+    // A context opened without one can still read geometry, and silently
+    // skipping the filter is better than refusing the mesh.
+    //
+    // THE PART INDEX IS CHECKED FIRST, and that ordering is the whole cost of
+    // this feature. Asking the question needs the prop's EBX partition read and
+    // parsed, and a map places about 1,450 distinct assets - so doing it for
+    // every one of them would put seconds onto a load that is already the thing
+    // people complain about. A mesh with no per-vertex part index cannot be
+    // filtered whatever its table says, and that test is free: the index was
+    // already decoded with the geometry.
+    // Every section's state key by material name, taken BEFORE the shadow
+    // filter below: a visual section's variation can resolve through its
+    // _ZOnly twin's key (reference: _candidate_keys, SHADERS.md 5.2), and the
+    // twin is exactly what the filter is about to remove.
+    std::map<std::string, uint64_t> twin_keys;
+    // Read keys from the cheap section headers, including skipped pass twins.
+    // Their vertex buffers do not need to be decoded to resolve materials.
+    for (const auto& g : ms.lods[lod].sections) twin_keys.emplace(g.material, g.state_key);
+
+    float lo[3], hi[3];
+    MeshHandle* mh = assemble_mesh_geometry(ms, secs,
+        [&]() { return c->types ? bf6::destruction_hidden_parts(c->src, *c->types, res_name)
+                                : std::set<uint16_t>(); },
+        cap ? &cap->hidden : nullptr, lo, hi);
+    if (!mh) return nullptr;
+    const size_t n = secs.size();
+    if (cap) cap->uv_channel.assign(n, 0);
 
     // ---- materials, one per section --------------------------------------
     //
@@ -1593,6 +1628,7 @@ static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod
         {
             const int ch = primary_uv_channel(secs[i].material, mb);
             if (ch != 0 && !secs[i].uv[ch].empty()) {
+                if (cap) cap->uv_channel[i] = ch;
                 secs[i].uv0 = secs[i].uv[ch];
                 // The section's uv0 pointer was taken before this, so it has to
                 // be repointed or the change never reaches the caller.
@@ -3827,6 +3863,489 @@ bf6_texture* bf6_texture_decode_res(bf6_ctx* c, const char* res_name, int max_di
 void bf6_texture_decode_free(bf6_texture* texture)
 {
     delete reinterpret_cast<Bf6DecodedTexture*>(texture);
+}
+
+// ---- texture references: cache where a texture is, read the bytes from the game
+namespace {
+
+void ref_u32(std::string& o, uint32_t v) { o.append((const char*)&v, 4); }
+void ref_str(std::string& o, const std::string& s) { ref_u32(o, (uint32_t)s.size()); o += s; }
+bool ref_get_u32(const uint8_t* d, size_t n, size_t& at, uint32_t& v)
+{ if (at + 4 > n) return false; std::memcpy(&v, d + at, 4); at += 4; return true; }
+bool ref_get_str(const uint8_t* d, size_t n, size_t& at, std::string& s)
+{ uint32_t len = 0; if (!ref_get_u32(d, n, at, len) || at + len > n) return false; s.assign((const char*)d + at, len); at += len; return true; }
+
+const uint32_t kTexRefMagic = 0x52585442;   // "BTXR"
+const uint32_t kTexRefVersion = 1;
+
+std::string relative_to_game(const std::string& game, const std::string& path)
+{
+    std::string g = game, p = path;
+    for (char& ch : g) { if (ch == '\\') ch = '/'; if (ch >= 'A' && ch <= 'Z') ch += 32; }
+    std::string pl = p;
+    for (char& ch : pl) { if (ch == '\\') ch = '/'; if (ch >= 'A' && ch <= 'Z') ch += 32; }
+    while (!g.empty() && g.back() == '/') g.pop_back();
+    if (!g.empty() && pl.size() > g.size() + 1 && pl.compare(0, g.size(), g) == 0 && pl[g.size()] == '/')
+        return p.substr(g.size() + 1);
+    return p;
+}
+
+}  // namespace
+
+int64_t bf6_texture_reference(bf6_ctx* c, const char* res_name, uint8_t* out, int64_t out_capacity)
+{
+    if (!c || !res_name || !*res_name || out_capacity < 0) return -1;
+    try {
+        std::string e;
+        std::vector<uint8_t> res = c->src.get_res(res_name, e);
+        if (res.empty()) return -1;
+        // Ask the decoders which chunks they would read, without reading them.
+        std::vector<std::string> wanted;
+        auto record = [&wanted](const std::string& g) {
+            if (std::find(wanted.begin(), wanted.end(), g) == wanted.end()) wanted.push_back(g);
+            return std::vector<uint8_t>();
+        };
+        bf6::TextureImage scratch;
+        bf6::Texture::decode(res, record, scratch, 0, e);
+        bf6::Texture::decode_capped(res, record, scratch, 1, e);
+        bf6::Texture::decode_capped(res, record, scratch, 1 << 20, e);
+        if (wanted.empty()) return -1;
+        std::string o;
+        ref_u32(o, kTexRefMagic);
+        ref_u32(o, kTexRefVersion);
+        ref_u32(o, (uint32_t)res.size());
+        o.append((const char*)res.data(), res.size());
+        std::string chunks;
+        uint32_t found = 0;
+        for (const std::string& g : wanted) {
+            std::string path;
+            bf6::CasLoc loc;
+            if (!c->src.locate_chunk(g, path, loc)) continue;
+            ref_str(chunks, g);
+            ref_str(chunks, relative_to_game(c->src.game_dir(), path));
+            ref_u32(chunks, loc.off);
+            ref_u32(chunks, loc.size);
+            ++found;
+        }
+        if (!found) return -1;
+        ref_u32(o, found);
+        o += chunks;
+        if (out && out_capacity >= (int64_t)o.size()) std::memcpy(out, o.data(), o.size());
+        return (int64_t)o.size();
+    } catch (...) {
+        return -1;
+    }
+}
+
+bf6_texture* bf6_texture_decode_reference(const char* game_dir, const uint8_t* record, int64_t record_len, int max_dim)
+{
+    if (!game_dir || !*game_dir || !record || record_len <= 12 || max_dim < 0) return nullptr;
+    try {
+        static std::mutex oodle_mutex;
+        {
+            std::lock_guard<std::mutex> lock(oodle_mutex);
+            if (!bf6::oodle_open(game_dir)) return nullptr;
+        }
+        const size_t n = (size_t)record_len;
+        size_t at = 0;
+        uint32_t magic = 0, version = 0, res_len = 0, count = 0;
+        if (!ref_get_u32(record, n, at, magic) || magic != kTexRefMagic ||
+            !ref_get_u32(record, n, at, version) || version != kTexRefVersion ||
+            !ref_get_u32(record, n, at, res_len) || at + res_len > n) return nullptr;
+        std::vector<uint8_t> res(record + at, record + at + res_len);
+        at += res_len;
+        if (!ref_get_u32(record, n, at, count) || count > 16) return nullptr;
+        struct Where { std::string guid, path; uint32_t off, size; };
+        std::vector<Where> where;
+        std::string root = game_dir;
+        if (!root.empty() && root.back() != '/' && root.back() != '\\') root += '/';
+        for (uint32_t i = 0; i < count; ++i) {
+            Where w;
+            if (!ref_get_str(record, n, at, w.guid) || !ref_get_str(record, n, at, w.path) ||
+                !ref_get_u32(record, n, at, w.off) || !ref_get_u32(record, n, at, w.size)) return nullptr;
+            const bool absolute = w.path.size() > 1 && (w.path[1] == ':' || w.path[0] == '/' || w.path[0] == '\\');
+            if (!absolute) w.path = root + w.path;
+            where.push_back(std::move(w));
+        }
+        auto fetch = [&where](const std::string& g) {
+            for (const Where& w : where)
+                if (w.guid == g) {
+                    std::string e;
+                    return bf6::cas_read(w.path, w.off, w.size, false, e);
+                }
+            return std::vector<uint8_t>();
+        };
+        auto out = std::make_unique<Bf6DecodedTexture>();
+        std::string e;
+        const bool ok = max_dim > 0
+            ? bf6::Texture::decode_capped(res, fetch, out->img, max_dim, e)
+            : bf6::Texture::decode(res, fetch, out->img, 0, e);
+        if (!ok) return nullptr;
+        out->abi.width = out->img.width;
+        out->abi.height = out->img.height;
+        out->abi.mip_count = out->img.mip_count;
+        out->abi.format = fmt_of(out->img.dxgi);
+        out->abi.data = out->img.blocks.data();
+        out->abi.data_len = (int32_t)out->img.blocks.size();
+        out->abi.srgb = out->img.srgb ? 1 : 0;
+        return &out.release()->abi;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+// ---- mesh references: cache decisions and materials, read geometry from the game
+namespace {
+
+const uint32_t kMeshRefMagic = 0x52534D42;   // "BMSR"
+const uint32_t kMeshRefVersion = 1;
+
+struct RefReader {
+    const uint8_t* d; size_t n; size_t at = 0; bool ok = true;
+    uint32_t u32() { uint32_t v = 0; if (at + 4 > n) { ok = false; return 0; } std::memcpy(&v, d + at, 4); at += 4; return v; }
+    int32_t i32() { return (int32_t)u32(); }
+    std::string str() { uint32_t len = u32(); if (!ok || at + len > n) { ok = false; return {}; } std::string s((const char*)d + at, len); at += len; return s; }
+    bool pod(void* p, size_t len) { if (at + len > n) { ok = false; return false; } std::memcpy(p, d + at, len); at += len; return true; }
+};
+
+std::string game_path(const std::string& game_dir, const std::string& path)
+{
+    const bool absolute = path.size() > 1 && (path[1] == ':' || path[0] == '/' || path[0] == '\\');
+    if (absolute) return path;
+    std::string root = game_dir;
+    if (!root.empty() && root.back() != '/' && root.back() != '\\') root += '/';
+    return root + path;
+}
+
+}  // namespace
+
+int64_t bf6_mesh_reference(bf6_ctx* c, const char* res_name, int lod,
+                           const char* placing_bundle, const char* variation, uint8_t** out)
+{
+    if (!c || !res_name || !*res_name || !out) return -1;
+    *out = nullptr;
+    try {
+        MeshCapture cap;
+        bf6_mesh* m = bf6__read_mesh_scoped(c, res_name, lod, placing_bundle, nullptr, variation, false, &cap);
+        if (!m) return -1;
+        std::unique_ptr<MeshHandle> mh(reinterpret_cast<MeshHandle*>(m));
+        c->handles.erase(m);
+
+        std::string res_path;
+        bf6::ResEntry entry;
+        if (!c->src.locate_res(res_name, res_path, entry)) return -1;
+        std::string o;
+        ref_u32(o, kMeshRefMagic);
+        ref_u32(o, kMeshRefVersion);
+        ref_str(o, relative_to_game(c->src.game_dir(), res_path));
+        ref_u32(o, entry.loc.off); ref_u32(o, entry.loc.size); ref_u32(o, entry.dsize);
+        ref_u32(o, (uint32_t)cap.lod);
+        ref_str(o, cap.chunk_guid);
+        if (!cap.chunk_guid.empty()) {
+            std::string chunk_path;
+            bf6::CasLoc loc;
+            if (!c->src.locate_chunk(cap.chunk_guid, chunk_path, loc)) return -1;
+            ref_str(o, relative_to_game(c->src.game_dir(), chunk_path));
+            ref_u32(o, loc.off); ref_u32(o, loc.size);
+        }
+        ref_u32(o, (uint32_t)cap.hidden.size());
+        for (uint16_t part : cap.hidden) o.append((const char*)&part, 2);
+
+        // Texture ids become indices into a per-record name table.
+        std::vector<std::string> names;
+        std::map<int, int> index_of;
+        auto name_index = [&](int id) -> int {
+            if (id < 0 || (size_t)id >= c->textures.size()) return -1;
+            auto f = index_of.find(id);
+            if (f != index_of.end()) return f->second;
+            const int ix = (int)names.size();
+            names.push_back(c->textures[(size_t)id].res);
+            index_of.emplace(id, ix);
+            return ix;
+        };
+        std::string body;
+        const size_t n = mh->sections.size();
+        ref_u32(body, (uint32_t)n);
+        for (size_t i = 0; i < n; ++i) {
+            ref_u32(body, (uint32_t)(i < cap.uv_channel.size() ? cap.uv_channel[i] : 0));
+            ref_u32(body, (uint32_t)mh->colours[i].size());
+            body.append((const char*)mh->colours[i].data(), mh->colours[i].size() * sizeof(uint32_t));
+            bf6_material_desc md = mh->materials[i];
+            md.textures = nullptr; md.shader_textures = nullptr;
+            body.append((const char*)&md, sizeof md);
+            ref_u32(body, (uint32_t)mh->bindings[i].size());
+            for (const auto& b : mh->bindings[i]) { ref_u32(body, (uint32_t)b.slot); ref_u32(body, (uint32_t)name_index(b.texture)); }
+            ref_u32(body, (uint32_t)mh->shader_bindings[i].size());
+            for (const auto& b : mh->shader_bindings[i]) { ref_u32(body, b.name32); ref_u32(body, (uint32_t)name_index(b.texture)); }
+            const bf6_surface_desc& sd = mh->surfaces[i].desc;
+            ref_u32(body, (uint32_t)sd.profile);
+            ref_u32(body, (uint32_t)sd.complete);
+            body.append((const char*)sd.material, sizeof sd.material);
+            for (int k = 0; k < 4; ++k) ref_u32(body, (uint32_t)name_index(sd.textures[k]));
+        }
+        ref_u32(o, (uint32_t)names.size());
+        for (const auto& nm : names) ref_str(o, nm);
+        o += body;
+        uint8_t* buffer = (uint8_t*)std::malloc(o.size());
+        if (!buffer) return -1;
+        std::memcpy(buffer, o.data(), o.size());
+        *out = buffer;
+        return (int64_t)o.size();
+    } catch (...) {
+        return -1;
+    }
+}
+
+void bf6_blob_free(uint8_t* blob) { std::free(blob); }
+
+bf6_mesh* bf6_mesh_decode_reference(const char* game_dir, const uint8_t* record, int64_t record_len)
+{
+    if (!game_dir || !*game_dir || !record || record_len <= 8) return nullptr;
+    try {
+        static std::mutex oodle_mutex;
+        {
+            std::lock_guard<std::mutex> lock(oodle_mutex);
+            if (!bf6::oodle_open(game_dir)) return nullptr;
+        }
+        RefReader r{ record, (size_t)record_len };
+        if (r.u32() != kMeshRefMagic || r.u32() != kMeshRefVersion) return nullptr;
+        const std::string res_path = game_path(game_dir, r.str());
+        const uint32_t res_off = r.u32(), res_size = r.u32(), res_dsize = r.u32();
+        int lod = (int)r.u32();
+        const std::string chunk_guid = r.str();
+        std::string chunk_path; uint32_t chunk_off = 0, chunk_size = 0;
+        if (!chunk_guid.empty()) { chunk_path = game_path(game_dir, r.str()); chunk_off = r.u32(); chunk_size = r.u32(); }
+        std::set<uint16_t> hidden;
+        const uint32_t hidden_count = r.u32();
+        for (uint32_t k = 0; r.ok && k < hidden_count; ++k) { uint16_t part = 0; r.pod(&part, 2); hidden.insert(part); }
+        const uint32_t name_count = r.u32();
+        std::vector<std::string> names;
+        for (uint32_t k = 0; r.ok && k < name_count; ++k) names.push_back(r.str());
+        if (!r.ok) return nullptr;
+
+        std::string err;
+        std::vector<uint8_t> d = bf6::cas_read(res_path, res_off, res_size, false, err);
+        if (d.size() != res_dsize) return nullptr;
+        bf6::MeshSet ms = bf6::meshset_parse(d.data(), d.size(), err);
+        if (!ms.ok || ms.lods.empty()) return nullptr;
+        if (lod < 0 || lod >= (int)ms.lods.size()) lod = 0;
+        std::vector<uint8_t> chunk;
+        if (!chunk_guid.empty()) chunk = bf6::cas_read(chunk_path, chunk_off, chunk_size, false, err);
+        const uint8_t* geom = chunk.data();
+        size_t geom_len = chunk.size();
+        if (chunk.empty() && !bf6::meshset_inline_lod(ms, lod, d.data(), d.size(), &geom, &geom_len))
+            return nullptr;
+        auto secs = bf6::meshset_read_lod(ms, lod, geom, geom_len, err);
+        if (secs.empty()) return nullptr;
+        float lo[3], hi[3];
+        std::unique_ptr<MeshHandle> mh(assemble_mesh_geometry(ms, secs, [&]() { return hidden; }, nullptr, lo, hi));
+        if (!mh) return nullptr;
+        const size_t n = secs.size();
+        if (r.u32() != n || !r.ok) return nullptr;
+        mh->texture_names = names;
+        mh->materials.resize(n);
+        mh->bindings.resize(n);
+        mh->shader_bindings.resize(n);
+        auto id_of = [&](uint32_t v) -> int32_t {
+            const int32_t ix = (int32_t)v;
+            return ix >= 0 && (size_t)ix < names.size() ? ix : -1;
+        };
+        for (size_t i = 0; i < n && r.ok; ++i) {
+            const int ch = (int)r.u32();
+            if (ch > 0 && ch < 5 && !secs[i].uv[ch].empty()) {
+                secs[i].uv0 = secs[i].uv[ch];
+                mh->uv[i] = secs[i].uv0;
+                mh->sections[i].uv0 = mh->uv[i].data();
+            }
+            const uint32_t colours = r.u32();
+            if (!r.ok || r.at + (size_t)colours * 4 > r.n) return nullptr;
+            mh->colours[i].resize(colours);
+            r.pod(mh->colours[i].data(), (size_t)colours * 4);
+            mh->sections[i].colors = mh->colours[i].empty() ? nullptr : mh->colours[i].data();
+            bf6_material_desc& md = mh->materials[i];
+            r.pod(&md, sizeof md);
+            const uint32_t nb = r.u32();
+            for (uint32_t k = 0; r.ok && k < nb; ++k) {
+                bf6_tex_binding b;
+                b.slot = (bf6_tex_slot)r.u32();
+                b.texture = id_of(r.u32());
+                mh->bindings[i].push_back(b);
+            }
+            const uint32_t ns = r.u32();
+            for (uint32_t k = 0; r.ok && k < ns; ++k) {
+                bf6_shader_tex_binding b;
+                b.name32 = r.u32();
+                b.texture = id_of(r.u32());
+                mh->shader_bindings[i].push_back(b);
+            }
+            md.textures = mh->bindings[i].empty() ? nullptr : mh->bindings[i].data();
+            md.shader_textures = mh->shader_bindings[i].empty() ? nullptr : mh->shader_bindings[i].data();
+            bf6_surface_desc& sd = mh->surfaces[i].desc;
+            sd.profile = r.i32();
+            sd.complete = r.i32();
+            r.pod(sd.material, sizeof sd.material);
+            for (int k = 0; k < 4; ++k) sd.textures[k] = id_of(r.u32());
+        }
+        if (!r.ok) return nullptr;
+        mh->mesh.materials = mh->materials.data();
+        mh->mesh.material_count = (int32_t)n;
+        for (int k = 0; k < 3; k++) { mh->mesh.aabb_min[k] = lo[k]; mh->mesh.aabb_max[k] = hi[k]; }
+        return &mh.release()->mesh;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void bf6_mesh_reference_free(bf6_mesh* mesh)
+{
+    delete reinterpret_cast<MeshHandle*>(mesh);
+}
+
+const char* bf6_mesh_reference_texture_name(const bf6_mesh* mesh, int texture)
+{
+    if (!mesh) return nullptr;
+    const auto* mh = reinterpret_cast<const MeshHandle*>(mesh);
+    return texture >= 0 && (size_t)texture < mh->texture_names.size() ? mh->texture_names[(size_t)texture].c_str() : nullptr;
+}
+
+int bf6_mesh_reference_surface(const bf6_mesh* mesh, int section, bf6_surface_desc* out)
+{
+    if (!mesh || !out || out->struct_size != sizeof(bf6_surface_desc)) return 0;
+    const auto* mh = reinterpret_cast<const MeshHandle*>(mesh);
+    if (section < 0 || (size_t)section >= mh->surfaces.size()) return 0;
+    *out = mh->surfaces[(size_t)section].desc;
+    return 1;
+}
+
+// ---- terrain references: where the heightfield's inputs live, composited on load
+namespace {
+const uint32_t kTerrainRefMagic = 0x52524554 ^ 0x01000000;   // distinct from cached heights
+const uint32_t kTerrainRefVersion = 1;
+}
+
+int64_t bf6_terrain_reference(bf6_ctx* c, const char* level, int water_surface, uint8_t** out)
+{
+    if (!c || !level || !*level || !out || (water_surface != 0 && water_surface != 1)) return -1;
+    *out = nullptr;
+    try {
+        // Same resource choice as read_terrain_block.
+        std::string want;
+        {
+            std::string lvl = level;
+            for (char& ch : lvl) ch = (char)std::tolower((unsigned char)ch);
+            for (const auto& kv : c->src.res()) {
+                std::string n = kv.first;
+                for (char& ch : n) ch = (char)std::tolower((unsigned char)ch);
+                if (n.find("streamingtree") != std::string::npos && n.find(lvl) != std::string::npos) { want = kv.first; break; }
+            }
+        }
+        if (want.empty()) return -1;
+        std::string err, res_path;
+        bf6::ResEntry entry;
+        if (!c->src.locate_res(want, res_path, entry)) return -1;
+        std::vector<uint8_t> res = c->src.get_res(want, err);
+        if (res.empty()) return -1;
+        bf6::Terrain probe;
+        if (water_surface ? !probe.parse_water_surface(res, err) : !probe.parse(res, err)) return -1;
+        std::vector<std::string> guids;
+        probe.resolve_external([&](const std::string& guid) {
+            guids.push_back(guid);
+            std::string e;
+            return c->src.get_chunk(guid, e);
+        });
+        std::string o;
+        ref_u32(o, kTerrainRefMagic);
+        ref_u32(o, kTerrainRefVersion);
+        ref_u32(o, (uint32_t)water_surface);
+        ref_str(o, relative_to_game(c->src.game_dir(), res_path));
+        ref_u32(o, entry.loc.off); ref_u32(o, entry.loc.size); ref_u32(o, entry.dsize);
+        std::string chunks;
+        uint32_t count = 0;
+        for (const std::string& g : guids) {
+            std::string path;
+            bf6::CasLoc loc;
+            ref_str(chunks, g);
+            if (c->src.locate_chunk(g, path, loc)) {
+                ref_u32(chunks, 1);
+                ref_str(chunks, relative_to_game(c->src.game_dir(), path));
+                ref_u32(chunks, loc.off); ref_u32(chunks, loc.size);
+            } else {
+                ref_u32(chunks, 0);   // the live read got nothing for it either
+            }
+            ++count;
+        }
+        ref_u32(o, count);
+        o += chunks;
+        uint8_t* buffer = (uint8_t*)std::malloc(o.size());
+        if (!buffer) return -1;
+        std::memcpy(buffer, o.data(), o.size());
+        *out = buffer;
+        return (int64_t)o.size();
+    } catch (...) {
+        return -1;
+    }
+}
+
+bf6_terrain* bf6_terrain_decode_reference(const char* game_dir, const uint8_t* record, int64_t record_len)
+{
+    if (!game_dir || !*game_dir || !record || record_len <= 8) return nullptr;
+    try {
+        static std::mutex oodle_mutex;
+        {
+            std::lock_guard<std::mutex> lock(oodle_mutex);
+            if (!bf6::oodle_open(game_dir)) return nullptr;
+        }
+        RefReader r{ record, (size_t)record_len };
+        if (r.u32() != kTerrainRefMagic || r.u32() != kTerrainRefVersion) return nullptr;
+        const bool water = r.u32() != 0;
+        const std::string res_path = game_path(game_dir, r.str());
+        const uint32_t off = r.u32(), size = r.u32(), dsize = r.u32();
+        struct Where { std::string guid, path; uint32_t off = 0, size = 0; bool present = false; };
+        std::vector<Where> where;
+        const uint32_t count = r.u32();
+        for (uint32_t k = 0; r.ok && k < count; ++k) {
+            Where w;
+            w.guid = r.str();
+            w.present = r.u32() != 0;
+            if (w.present) { w.path = game_path(game_dir, r.str()); w.off = r.u32(); w.size = r.u32(); }
+            where.push_back(std::move(w));
+        }
+        if (!r.ok) return nullptr;
+        std::string err;
+        std::vector<uint8_t> res = bf6::cas_read(res_path, off, size, false, err);
+        if (res.size() != dsize) return nullptr;
+        bf6::Terrain t;
+        if (water ? !t.parse_water_surface(res, err) : !t.parse(res, err)) return nullptr;
+        size_t next = 0;
+        t.resolve_external([&](const std::string& guid) {
+            for (size_t k = 0; k < where.size(); ++k) {
+                const Where& w = where[(next + k) % where.size()];
+                if (w.guid != guid) continue;
+                next = (next + k + 1) % where.size();
+                std::string e;
+                return w.present ? bf6::cas_read(w.path, w.off, w.size, false, e) : std::vector<uint8_t>();
+            }
+            return std::vector<uint8_t>();
+        });
+        bf6::TerrainGrid g;
+        if (!t.composite(g, 0, err)) return nullptr;
+        auto th = std::make_unique<TerrainHandle>();
+        th->heights = std::move(g.heights);
+        th->t.width = th->t.height = g.size;
+        th->t.heights = th->heights.data();
+        for (int i = 0; i < 3; i++) { th->t.world_min[i] = g.lo[i]; th->t.world_max[i] = g.hi[i]; }
+        th->t.height_scale = g.world_size_y;
+        th->t.splat_texture = -1;
+        th->t.color_texture = -1;
+        return &th.release()->t;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void bf6_terrain_reference_free(bf6_terrain* terrain)
+{
+    delete reinterpret_cast<TerrainHandle*>(terrain);
 }
 
 void bf6_free(bf6_ctx* c, void* handle) {

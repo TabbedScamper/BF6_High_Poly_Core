@@ -14,12 +14,15 @@ namespace bf6::cache {
 // Record formats written by these layers. Bump the matching version when a
 // record's bytes change; complete.json records it per layer.
 inline constexpr std::uint32_t kPlacementsVersion = 1;
-inline constexpr std::uint32_t kMeshesVersion = 1;
-inline constexpr std::uint32_t kTexturesVersion = 1;
-inline constexpr std::uint32_t kTerrainVersion = 1;
+// 2: mesh references (materials and decisions; geometry read from the installation).
+inline constexpr std::uint32_t kMeshesVersion = 2;
+// 2: texture references into the installation instead of decoded pixels.
+inline constexpr std::uint32_t kTexturesVersion = 2;
+// 2: terrain and water heightfield references.
+inline constexpr std::uint32_t kTerrainVersion = 2;
 
 struct GameBuildOptions {
-    int texture_max_dim = 0;      // 0 = full authored chain
+    int texture_max_dim = 0;      // applied when loading; references are size-independent
     std::size_t threads = 0;      // 0 = hardware threads
 };
 
@@ -31,6 +34,9 @@ struct GameLayerResult {
     int textures_new = 0, textures_failed = 0;
     std::uint64_t mesh_bytes = 0, texture_bytes = 0;
     double seconds_open = 0, seconds_meshes = 0, seconds_textures = 0, seconds_terrain = 0, seconds_write = 0;
+    // What mesh bytes are made of, to size a reference format.
+    std::uint64_t sections = 0, sections_with_colours = 0, sections_uv_swapped = 0;
+    std::uint64_t colour_bytes = 0, geometry_bytes = 0, material_bytes = 0;
     std::string placements_digest, terrain_digest;
 };
 
@@ -44,6 +50,6 @@ bool build_game_level(bf6_ctx* ctx, const std::string& level, const fs::path& ma
 
 // Shared-store keys, also used by loaders.
 std::string mesh_key(const std::string& res, const std::string& bundle, const std::string& variation);
-std::string texture_key(const std::string& res, int max_dim);
+std::string texture_key(const std::string& res);
 
 }  // namespace bf6::cache

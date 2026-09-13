@@ -184,7 +184,10 @@ struct bf6_precache {
                   << ", \"textures_new\": " << r.textures_new << ", \"textures_failed\": " << r.textures_failed
                   << ",\n  \"mesh_bytes\": " << r.mesh_bytes << ", \"texture_bytes\": " << r.texture_bytes
                   << ", \"placement_bytes\": " << r.placement_bytes << ", \"terrain_bytes\": " << r.terrain_bytes
-                  << ", \"texture_max_dim\": " << game_options.texture_max_dim << "\n}\n";
+                  << ", \"texture_max_dim\": " << game_options.texture_max_dim
+                  << ",\n  \"sections\": " << r.sections << ", \"sections_with_colours\": " << r.sections_with_colours
+                  << ", \"colour_bytes\": " << r.colour_bytes << ", \"geometry_bytes\": " << r.geometry_bytes
+                  << ", \"material_bytes\": " << r.material_bytes << "\n}\n";
             std::string ignore;
             atomic_write(store.map_dir(level) / "stats.json", stats.str(), ignore);
             progress.map_done(level, ok);

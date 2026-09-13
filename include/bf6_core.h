@@ -522,6 +522,51 @@ BF6_API const char* bf6_texture_name_at(bf6_ctx*, int texture_id);
 BF6_API bf6_texture* bf6_texture_decode_res(bf6_ctx*, const char* res_name, int max_dim);
 BF6_API void bf6_texture_decode_free(bf6_texture*);
 
+/* TEXTURE REFERENCES. A cache that must stay small stores where a texture lives
+ * in the installation instead of its pixels.
+ *
+ * bf6_texture_reference writes a self-contained record for res_name: the small
+ * texture header resource plus the archive path (relative to the game folder),
+ * offset and size of each payload chunk the decoders use. No payload is read.
+ * Returns the record size; writes only when out_capacity is large enough (call
+ * with out NULL to size). -1 if the texture cannot be located. Safe to call from
+ * several threads on one context while nothing mounts concurrently.
+ *
+ * bf6_texture_decode_reference decodes such a record straight from the game
+ * archives, with no context, mount or index: identical bytes to
+ * bf6_texture_decode_res for the same installation. Thread-safe. Free with
+ * bf6_texture_decode_free. NULL if the record is malformed or the game files
+ * changed underneath it (the cache key changes with the installation). */
+BF6_API int64_t      bf6_texture_reference(bf6_ctx*, const char* res_name,
+                                           uint8_t* out, int64_t out_capacity);
+BF6_API bf6_texture* bf6_texture_decode_reference(const char* game_dir, const uint8_t* record,
+                                                  int64_t record_len, int max_dim);
+
+/* MESH REFERENCES. Everything a scoped mesh read decides from the mounted game -
+ * materials, bindings, surface profiles, layer colours, the primary UV choice
+ * and the destruction parts hidden at spawn - plus where the geometry lives.
+ *
+ * bf6_mesh_reference performs the same read as bf6_read_mesh_scoped and returns
+ * a core-allocated record in *out (free with bf6_blob_free), or -1.
+ *
+ * bf6_mesh_decode_reference rebuilds the mesh from such a record by reading its
+ * geometry straight from the game archives, with no context: every stream,
+ * material value and surface value is identical to the live read. Thread-safe.
+ * Texture ids in the result index the record's own name table; resolve them
+ * with bf6_mesh_reference_texture_name, read surfaces with
+ * bf6_mesh_reference_surface, and free with bf6_mesh_reference_free (never
+ * bf6_free). */
+BF6_API int64_t   bf6_mesh_reference(bf6_ctx*, const char* res_name, int lod,
+                                     const char* placing_bundle, const char* variation,
+                                     uint8_t** out);
+BF6_API void      bf6_blob_free(uint8_t* blob);
+BF6_API bf6_mesh* bf6_mesh_decode_reference(const char* game_dir, const uint8_t* record,
+                                            int64_t record_len);
+BF6_API void      bf6_mesh_reference_free(bf6_mesh* mesh);
+BF6_API const char* bf6_mesh_reference_texture_name(const bf6_mesh* mesh, int texture);
+BF6_API int       bf6_mesh_reference_surface(const bf6_mesh* mesh, int section, bf6_surface_desc* out);
+
+
 /* --------------------------------------------------------------- placements */
 typedef struct {
     const char* res_name;      /* the mesh to instance                       */
@@ -968,6 +1013,14 @@ typedef struct {
 } bf6_terrain;
 
 BF6_API bf6_terrain* bf6_read_terrain(bf6_ctx*, const char* level);
+/* TERRAIN REFERENCES. The streaming-tree resource and every chunk the heightfield
+ * composite reads, by location. bf6_terrain_decode_reference re-reads them from
+ * the game archives and composites without a context: identical heights to
+ * bf6_read_terrain (water_surface 0) or bf6_read_water_heightfield (1).
+ * Thread-safe. Free with bf6_terrain_reference_free (never bf6_free). */
+BF6_API int64_t      bf6_terrain_reference(bf6_ctx*, const char* level, int water_surface, uint8_t** out);
+BF6_API bf6_terrain* bf6_terrain_decode_reference(const char* game_dir, const uint8_t* record, int64_t record_len);
+BF6_API void         bf6_terrain_reference_free(bf6_terrain* terrain);
 /* Absolute-Y water surface heightfield from streaming-tree block 2.  This is
  * the large spatial offset sampled by the water vertex shader; it is distinct
  * from the small ocean FFT displacement.  Reads the mounted game at runtime. */

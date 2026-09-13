@@ -1,6 +1,7 @@
 #include "cas.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <map>
 
@@ -124,6 +125,7 @@ void cas_unmap(CasHandle& h) { h.map = nullptr; h.map_size = 0; }
 struct CasHandles
 {
     std::map<std::string, CasHandle> open;
+    CasHandle transient;   // a failed open that must not be cached (f is null)
     ~CasHandles()
     {
         for (auto& kv : open) {
@@ -227,10 +229,27 @@ CasHandle& cas_handle_entry(const std::string& path)
     auto it = cache.open.find(path);
     if (it != cache.open.end()) return it->second;
     CasHandle h;
+    errno = 0;
     h.f = fopen_binary_read(path.c_str());
+#if defined(_WIN32)
+    // OUT OF STDIO SLOTS IS NOT A MISSING ARCHIVE. Every reading thread keeps
+    // its own handle per archive, and the C runtime allows 512 by default, so a
+    // multi-threaded load could exhaust it. The failure used to be cached as
+    // "no such archive", and a texture then silently decoded from its fallback
+    // chunk: valid-looking but different bytes. Raise the limit and retry. If
+    // that is still not enough the read fails (and is retried next time) rather
+    // than closing handles a range reader on this thread may still hold.
+    if (!h.f && errno == EMFILE) {
+        if (_getmaxstdio() < 8192) _setmaxstdio(8192);
+        errno = 0;
+        h.f = fopen_binary_read(path.c_str());
+    }
+#endif
     if (h.f && _fseeki64(h.f, 0, SEEK_END) == 0) h.size = _ftelli64(h.f);
-    // A null is cached too: a missing archive should not be reopened once per
-    // read either.
+    // A null is cached only when the archive really cannot be opened (missing,
+    // denied), so it is not reopened once per read. Resource exhaustion is not
+    // remembered: the next read tries again.
+    if (!h.f && errno == EMFILE) return cache.transient = h, cache.transient;
     return cache.open.emplace(path, h).first->second;
 }
 

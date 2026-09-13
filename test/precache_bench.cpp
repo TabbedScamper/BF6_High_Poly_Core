@@ -13,7 +13,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <stdio.h>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -45,6 +48,48 @@ static int on_progress(void* user, const char* stage, int, int)
 }
 
 struct MeshJob { std::string res, bundle, variation; };
+
+// Everything a consumer can read from a mesh, with textures by resource name.
+static unsigned long long mesh_digest(const bf6_mesh* m,
+                                      const std::function<const char*(int)>& texture_name,
+                                      const std::function<int(int, bf6_surface_desc*)>& surface)
+{
+    unsigned long long h = 1469598103934665603ull;
+    auto fold_i = [&](int32_t v) { unsigned char b[4]; std::memcpy(b, &v, 4); for (unsigned char x : b) h = (h ^ x) * 1099511628211ull; };
+    auto fold_p = [&](const void* p, size_t n) { const auto* c = (const unsigned char*)p; if (!c) { fold_i(-7); return; } for (size_t i = 0; i < n; ++i) h = (h ^ c[i]) * 1099511628211ull; };
+    auto fold_s = [&](const char* s) { fold_p(s ? s : "", s ? std::strlen(s) : 0); fold_i(0x5eed); };
+    fold_i(m->section_count); fold_i(m->material_count); fold_i(m->mesh_type); fold_i(m->bone_count); fold_i(m->lod_count);
+    fold_p(m->aabb_min, sizeof m->aabb_min); fold_p(m->aabb_max, sizeof m->aabb_max);
+    for (int i = 0; i < m->section_count; ++i) {
+        const bf6_section& s = m->sections[i];
+        const size_t vc = (size_t)std::max(0, s.vertex_count);
+        fold_i(s.vertex_count); fold_i(s.index_count); fold_i(s.material); fold_i(s.bone_list_count);
+        fold_i(s.skin_influences); fold_i(s.is_decal); fold_p(&s.state_key, 8);
+        fold_p(s.positions, vc * 12); fold_p(s.normals, vc * 12); fold_p(s.tangents, vc * 16);
+        fold_p(s.uv0, vc * 8); fold_p(s.uv1, vc * 8); fold_p(s.colors, vc * 4);
+        fold_p(s.indices, (size_t)std::max(0, s.index_count) * 4); fold_p(s.bones, vc * 2);
+        fold_p(s.bone_list, (size_t)std::max(0, s.bone_list_count) * 2);
+        fold_p(s.skin_bones, vc * (size_t)std::max(0, s.skin_influences) * 2);
+        fold_p(s.skin_weights, vc * (size_t)std::max(0, s.skin_influences) * 4);
+        bf6_surface_desc sd{}; sd.struct_size = sizeof sd;
+        if (surface(i, &sd)) {
+            fold_i(sd.profile); fold_i(sd.complete); fold_p(sd.material, sizeof sd.material);
+            for (int k = 0; k < 4; ++k) fold_s(texture_name(sd.textures[k]));
+            for (int k = 0; k < 5; ++k) fold_p(sd.uv[k], vc * 8);
+            fold_p(sd.color0, vc * 16); fold_p(sd.submaterial, vc);
+        } else fold_i(-1);
+    }
+    for (int k = 0; k < m->material_count; ++k) {
+        bf6_material_desc md = m->materials[k];
+        const bf6_tex_binding* tb = md.textures; const int tn = md.texture_count;
+        const bf6_shader_tex_binding* sb = md.shader_textures; const int sn = md.shader_texture_count;
+        md.textures = nullptr; md.shader_textures = nullptr;
+        fold_p(&md, sizeof md);
+        for (int b = 0; b < tn; ++b) { fold_i((int32_t)tb[b].slot); fold_s(texture_name(tb[b].texture)); }
+        for (int b = 0; b < sn; ++b) { fold_i((int32_t)sb[b].name32); fold_s(texture_name(sb[b].texture)); }
+    }
+    return h;
+}
 
 // Order-sensitive FNV-1a over everything read, to prove optimisations change no bytes.
 static void fold(unsigned long long& h, const unsigned char* p, size_t n)
@@ -115,6 +160,8 @@ int main(int argc, char** argv)
         else levels.push_back(argv[i]);
     }
     char err[1024] = {};
+    if (const char* limit = std::getenv("BF6_BENCH_MAXSTDIO")) std::printf("maxstdio set: %d\n", _setmaxstdio(std::atoi(limit)));
+    else std::printf("maxstdio: %d (default)\n", _getmaxstdio());
     std::printf("hardware threads: %u\n", std::thread::hardware_concurrency());
 
     StageClock clock;
@@ -186,10 +233,174 @@ int main(int argc, char** argv)
         if (n > 0 && jobs.size() > n)
             std::printf("  extrapolated serial time for all %zu reads: %.0f s\n", jobs.size(), serial * jobs.size() / n);
 
+        // Mesh references: live read vs reference rebuilt from the game files.
+        if (n > 0) {
+            std::vector<std::string> records(n);
+            std::vector<unsigned long long> live(n, 0), fromref(n, 0);
+            long long record_bytes = 0;
+            size_t live_ok = 0, records_ok = 0;
+            auto t0 = clk::now();
+            for (size_t i = 0; i < n; ++i) {
+                const MeshJob& job = jobs[i];
+                const char* bundle = job.bundle.empty() ? nullptr : job.bundle.c_str();
+                const char* variation = job.variation.empty() ? nullptr : job.variation.c_str();
+                if (bf6_mesh* m = bf6_read_mesh_scoped(ctx, job.res.c_str(), 0, bundle, variation)) {
+                    live[i] = mesh_digest(m, [&](int id) { return id >= 0 ? bf6_texture_name_at(ctx, id) : nullptr; },
+                                          [&](int s, bf6_surface_desc* out) { return bf6_mesh_surface(ctx, m, s, out); });
+                    bf6_free(ctx, m);
+                    ++live_ok;
+                }
+                uint8_t* blob = nullptr;
+                const int64_t len = bf6_mesh_reference(ctx, job.res.c_str(), 0, bundle, variation, &blob);
+                if (len > 0 && blob) { records[i].assign((const char*)blob, (size_t)len); record_bytes += len; ++records_ok; }
+                bf6_blob_free(blob);
+            }
+            const double record_s = secs(t0, clk::now());
+            std::atomic<size_t> next{ 0 };
+            std::atomic<long long> vertices{ 0 };
+            t0 = clk::now();
+            std::vector<std::thread> pool;
+            for (int k = 0; k < tex_threads; ++k)
+                pool.emplace_back([&] {
+                    for (size_t i; (i = next++) < n;) {
+                        if (records[i].empty()) continue;
+                        bf6_mesh* m = bf6_mesh_decode_reference(game.c_str(), (const uint8_t*)records[i].data(), (int64_t)records[i].size());
+                        if (!m) continue;
+                        fromref[i] = mesh_digest(m, [&](int id) { return bf6_mesh_reference_texture_name(m, id); },
+                                                 [&](int s, bf6_surface_desc* out) { return bf6_mesh_reference_surface(m, s, out); });
+                        for (int s = 0; s < m->section_count; ++s) vertices += m->sections[s].vertex_count;
+                        bf6_mesh_reference_free(m);
+                    }
+                });
+            for (auto& th : pool) th.join();
+            const double decode_s = secs(t0, clk::now());
+            size_t same = 0, shown = 0;
+            for (size_t i = 0; i < n; ++i) {
+                if (live[i] == fromref[i]) { ++same; continue; }
+                if (shown++ < 5) std::printf("  mesh mismatch %s (record %zu bytes, live %s)\n", jobs[i].res.c_str(), records[i].size(), live[i] ? "read" : "failed");
+            }
+            std::printf("mesh references: %zu records (%zu live reads) in %.2f s serial incl. live reads, %.1f MB (%.0f bytes each); "
+                        "decode on %d threads %.2f s (%.0f meshes/s, %lld vertices); identical: %zu / %zu\n",
+                        records_ok, live_ok, record_s, record_bytes / 1048576.0, records_ok ? double(record_bytes) / records_ok : 0.0,
+                        tex_threads, decode_s, decode_s > 0 ? records_ok / decode_s : 0.0, vertices.load(), same, n);
+        }
+
         // Thread-safe texture decode on this one context: 1 thread, then many.
         if (!seen.empty()) {
             std::vector<std::string> names;
             for (int id : seen) { const char* nm = bf6_texture_name_at(ctx, id); if (nm && *nm) names.push_back(nm); }
+            std::sort(names.begin(), names.end());
+
+            // References: record where each texture lives, then decode from the record
+            // with no context. Digests must equal the live decode of the same textures.
+            {
+                std::vector<std::string> records(names.size());
+                std::atomic<size_t> next{ 0 };
+                std::atomic<long long> record_bytes{ 0 };
+                auto t0 = clk::now();
+                std::vector<std::thread> pool;
+                for (int k = 0; k < tex_threads; ++k)
+                    pool.emplace_back([&] {
+                        for (size_t i; (i = next++) < names.size();) {
+                            const int64_t need = bf6_texture_reference(ctx, names[i].c_str(), nullptr, 0);
+                            if (need <= 0) continue;
+                            records[i].resize((size_t)need);
+                            bf6_texture_reference(ctx, names[i].c_str(), (uint8_t*)records[i].data(), need);
+                            record_bytes += need;
+                        }
+                    });
+                for (auto& th : pool) th.join();
+                const double make_s = secs(t0, clk::now());
+                size_t made = 0;
+                for (const auto& r : records) if (!r.empty()) ++made;
+                std::printf("texture references: %zu of %zu recorded in %.2f s, %.1f KB total (%.0f bytes each)\n",
+                            made, names.size(), make_s, record_bytes.load() / 1024.0,
+                            made ? double(record_bytes.load()) / made : 0.0);
+                for (int cap : { 0, max_dim }) {
+                    if (cap < 0) continue;
+                    std::vector<unsigned long long> live(names.size(), 0), fromref(names.size(), 0);
+                    std::atomic<size_t> i1{ 0 }, i2{ 0 };
+                    std::vector<std::thread> p1, p2;
+                    for (int k = 0; k < tex_threads; ++k)
+                        p1.emplace_back([&] {
+                            for (size_t i; (i = i1++) < names.size();) {
+                                unsigned long long h = 1469598103934665603ull;
+                                if (bf6_texture* tx = bf6_texture_decode_res(ctx, names[i].c_str(), cap)) {
+                                    const int32_t dims[4] = { tx->width, tx->height, tx->mip_count, (int32_t)tx->format };
+                                    fold(h, (const unsigned char*)dims, sizeof dims); fold(h, tx->data, (size_t)tx->data_len);
+                                    bf6_texture_decode_free(tx);
+                                }
+                                live[i] = h;
+                            }
+                        });
+                    for (auto& th : p1) th.join();
+                    t0 = clk::now();
+                    std::atomic<long long> bytes{ 0 };
+                    for (int k = 0; k < tex_threads; ++k)
+                        p2.emplace_back([&] {
+                            for (size_t i; (i = i2++) < names.size();) {
+                                unsigned long long h = 1469598103934665603ull;
+                                if (!records[i].empty())
+                                    if (bf6_texture* tx = bf6_texture_decode_reference(game.c_str(), (const uint8_t*)records[i].data(), (int64_t)records[i].size(), cap)) {
+                                        const int32_t dims[4] = { tx->width, tx->height, tx->mip_count, (int32_t)tx->format };
+                                        fold(h, (const unsigned char*)dims, sizeof dims); fold(h, tx->data, (size_t)tx->data_len);
+                                        bytes += tx->data_len;
+                                        bf6_texture_decode_free(tx);
+                                    }
+                                fromref[i] = h;
+                            }
+                        });
+                    for (auto& th : p2) th.join();
+                    const double ref_s = secs(t0, clk::now());
+                    // Determinism check: repeat both parallel passes and count self-mismatches.
+                    {
+                        auto pass = [&](bool reference) {
+                            std::vector<unsigned long long> out(names.size(), 0);
+                            std::atomic<size_t> idx{ 0 };
+                            std::vector<std::thread> ps;
+                            for (int k = 0; k < tex_threads; ++k)
+                                ps.emplace_back([&] {
+                                    for (size_t i; (i = idx++) < names.size();) {
+                                        unsigned long long h = 1469598103934665603ull;
+                                        bf6_texture* tx = reference
+                                            ? (records[i].empty() ? nullptr : bf6_texture_decode_reference(game.c_str(), (const uint8_t*)records[i].data(), (int64_t)records[i].size(), cap))
+                                            : bf6_texture_decode_res(ctx, names[i].c_str(), cap);
+                                        if (tx) {
+                                            const int32_t dims[4] = { tx->width, tx->height, tx->mip_count, (int32_t)tx->format };
+                                            fold(h, (const unsigned char*)dims, sizeof dims); fold(h, tx->data, (size_t)tx->data_len);
+                                            bf6_texture_decode_free(tx);
+                                        }
+                                        out[i] = h;
+                                    }
+                                });
+                            for (auto& th : ps) th.join();
+                            return out;
+                        };
+                        const auto live2 = pass(false);
+                        const auto ref2 = pass(true);
+                        size_t lv = 0, rf = 0;
+                        for (size_t i = 0; i < names.size(); ++i) { if (live[i] != live2[i]) ++lv; if (fromref[i] != ref2[i]) ++rf; }
+                        std::printf("determinism (max_dim %d): live pass vs repeat differs on %zu, reference pass vs repeat differs on %zu\n", cap, lv, rf);
+                    }
+                    size_t same = 0, shown = 0;
+                    const unsigned long long empty_hash = 1469598103934665603ull;
+                    for (size_t i = 0; i < names.size(); ++i) {
+                        if (live[i] == fromref[i]) { ++same; continue; }
+                        if (shown++ < 6) {
+                            bf6_texture* a = bf6_texture_decode_res(ctx, names[i].c_str(), cap);
+                            bf6_texture* b = records[i].empty() ? nullptr : bf6_texture_decode_reference(game.c_str(), (const uint8_t*)records[i].data(), (int64_t)records[i].size(), cap);
+                            std::printf("  mismatch %s: live %s %dx%d mips %d %d bytes | ref %s %dx%d mips %d %d bytes | record %zu bytes | repeat-live-equal %d\n",
+                                names[i].c_str(), a ? "ok" : (live[i] == empty_hash ? "FAILED" : "failed-now"), a ? a->width : 0, a ? a->height : 0, a ? a->mip_count : 0, a ? a->data_len : 0,
+                                b ? "ok" : "FAILED", b ? b->width : 0, b ? b->height : 0, b ? b->mip_count : 0, b ? b->data_len : 0,
+                                records[i].size(), (int)(a && b && a->data_len == b->data_len && std::memcmp(a->data, b->data, (size_t)a->data_len) == 0));
+                            if (a) bf6_texture_decode_free(a);
+                            if (b) bf6_texture_decode_free(b);
+                        }
+                    }
+                    std::printf("reference decode on %d threads, max_dim %d: %.2f s (%.0f MB/s); identical to live decode: %zu / %zu\n",
+                                tex_threads, cap, ref_s, ref_s > 0 ? bytes.load() / 1048576.0 / ref_s : 0.0, same, names.size());
+                }
+            }
             for (int threads : { 1, tex_threads }) {
                 for (int cap : { 0, max_dim }) {
                     if (cap < 0) continue;
@@ -218,6 +429,22 @@ int main(int argc, char** argv)
         t = clk::now();
         bf6_terrain* terr = bf6_read_terrain(ctx, level.c_str());
         std::printf("terrain: %.2f s (%dx%d)\n", secs(t, clk::now()), terr ? terr->width : 0, terr ? terr->height : 0);
+        {
+            uint8_t* rec = nullptr;
+            const int64_t len = bf6_terrain_reference(ctx, level.c_str(), 0, &rec);
+            const auto td = clk::now();
+            bf6_terrain* fromref = len > 0 ? bf6_terrain_decode_reference(game.c_str(), rec, len) : nullptr;
+            const double decode_s = secs(td, clk::now());
+            const bool same = terr && fromref && terr->width == fromref->width && terr->height == fromref->height &&
+                std::memcmp(terr->heights, fromref->heights, (size_t)terr->width * terr->height * 2) == 0 &&
+                std::memcmp(terr->world_min, fromref->world_min, sizeof terr->world_min) == 0 &&
+                std::memcmp(terr->world_max, fromref->world_max, sizeof terr->world_max) == 0 &&
+                terr->height_scale == fromref->height_scale;
+            std::printf("terrain reference: %lld bytes; decode %.2f s; identical heights and bounds: %s\n",
+                        (long long)len, decode_s, same ? "yes" : "NO");
+            if (fromref) bf6_terrain_reference_free(fromref);
+            bf6_blob_free(rec);
+        }
         if (terr) bf6_free(ctx, terr);
 
         if (contexts > 1 && n > 0) {

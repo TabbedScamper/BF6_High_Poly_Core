@@ -172,6 +172,11 @@ public:
     std::vector<uint8_t> get_ebx(const std::string& name, std::string& err);
     // Loose chunk or bundle chunk, by guid hex (either spelling - see get_chunk).
     std::vector<uint8_t> get_chunk(const std::string& guid_hex, std::string& err);
+    // Where a chunk lives in the installation, without reading it: the archive
+    // path and the reference inside it. Same lookup order as get_chunk.
+    bool locate_chunk(const std::string& guid_hex, std::string& path, CasLoc& loc) const;
+    // Same for a resource by name.
+    bool locate_res(const std::string& name, std::string& path, ResEntry& entry) const;
 
     const std::string& game_dir() const { return game_; }
     size_t res_count() const { return res_.size(); }

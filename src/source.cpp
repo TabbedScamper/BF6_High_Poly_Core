@@ -320,6 +320,28 @@ std::vector<uint8_t> Source::get_chunk(const std::string& guid_hex, std::string&
     return std::vector<uint8_t>();
 }
 
+bool Source::locate_res(const std::string& name, std::string& path, ResEntry& entry) const {
+    auto it = res_.find(name);
+    if (it == res_.end()) return false;
+    entry = it->second;
+    path = loc_.cas_path(entry.loc.chunk_id, entry.loc.cas_ix);
+    return !path.empty();
+}
+
+bool Source::locate_chunk(const std::string& guid_hex, std::string& path, CasLoc& loc) const {
+    std::string g = guid_hex;
+    for (char& ch : g) if (ch >= 'A' && ch <= 'Z') ch += 32;
+    auto it = chunks_.find(g);
+    if (it != chunks_.end()) loc = it->second;
+    else {
+        auto it2 = chunk_seg_.find(g);
+        if (it2 == chunk_seg_.end()) return false;
+        loc = it2->second;
+    }
+    path = loc_.cas_path(loc.chunk_id, loc.cas_ix);
+    return !path.empty();
+}
+
 bool Source::has_chunk(const std::string& guid_hex) const {
     std::string g = guid_hex;
     for (char& ch : g) if (ch >= 'A' && ch <= 'Z') ch += 32;

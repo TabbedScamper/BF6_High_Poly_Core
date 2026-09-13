@@ -11,6 +11,11 @@ placements, lights, FX and UI data, and hands engine-neutral results across the
 plain C API in `include/bf6_core.h`. Engine bindings only upload that data, convert
 coordinates and build scene objects. No game data is included in this repository.
 
+## Licence and credit
+
+Apache License 2.0 (`LICENSE`). Redistributions and anything built on this core must keep
+`NOTICE` and credit **TabbedScamper - BF6 High Poly Core**.
+
 ## Interface version
 
 `BF6_ABI_VERSION` in `include/bf6_core.h` is the contract between this library and

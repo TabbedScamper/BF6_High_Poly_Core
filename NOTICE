@@ -1,0 +1,15 @@
+BF6 High Poly Core
+Copyright 2026 TabbedScamper (https://github.com/TabbedScamper)
+
+This product includes software developed by TabbedScamper as part of
+BF6 High Poly Core: https://github.com/TabbedScamper/BF6_High_Poly_Core
+
+Attribution requirement: any redistribution of this software, in source or
+binary form, and any product, plugin, tool or service that includes or is
+derived from it, must retain this NOTICE file and give visible credit to
+"TabbedScamper - BF6 High Poly Core" in its documentation, credits or about
+screen, as required by section 4(d) of the Apache License, Version 2.0.
+
+Third-party components:
+- src/json.hpp: JSON for Modern C++ by Niels Lohmann, MIT License (notice in the file).
+- Oodle is not included; it is loaded at runtime from the user's own Battlefield 6 installation.

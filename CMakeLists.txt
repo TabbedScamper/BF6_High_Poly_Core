@@ -105,6 +105,13 @@ if(BF6_BUILD_CORE_TESTS)
         target_link_libraries(precache_test PRIVATE xaudio2 ole32)
     endif()
     add_test(NAME core.precache COMMAND precache_test "${CMAKE_CURRENT_BINARY_DIR}/precache_test_root")
+    # Timing harness against a real installation (not a CTest test).
+    add_executable(precache_bench test/precache_bench.cpp)
+    target_link_libraries(precache_bench PRIVATE bf6_core_static)
+    target_include_directories(precache_bench PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(precache_bench PRIVATE xaudio2 ole32)
+    endif()
 endif()
 
 option(BF6_BUILD_TOOLS "Build tests, probes and research tools" OFF)

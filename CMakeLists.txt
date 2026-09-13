@@ -47,6 +47,7 @@ set(BF6_SOURCES
     src/cache/pack.cpp
     src/cache/progress.cpp
     src/cache/cache_api.cpp
+    src/cache/game_layers.cpp
 )
 
 # bf6_core.cpp deliberately keeps the ABI implementation in small include
@@ -105,6 +106,13 @@ if(BF6_BUILD_CORE_TESTS)
         target_link_libraries(precache_test PRIVATE xaudio2 ole32)
     endif()
     add_test(NAME core.precache COMMAND precache_test "${CMAKE_CURRENT_BINARY_DIR}/precache_test_root")
+    # Real precache build runner (not a CTest test).
+    add_executable(precache_run test/precache_run.cpp)
+    target_link_libraries(precache_run PRIVATE bf6_core_static)
+    target_include_directories(precache_run PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(precache_run PRIVATE xaudio2 ole32)
+    endif()
     # Timing harness against a real installation (not a CTest test).
     add_executable(precache_bench test/precache_bench.cpp)
     target_link_libraries(precache_bench PRIVATE bf6_core_static)

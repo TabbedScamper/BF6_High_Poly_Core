@@ -5396,6 +5396,8 @@ typedef struct bf6_precache bf6_precache;
 #define BF6_PRECACHE_MAX_LAYERS 16
 /* Builds synthetic layers only, to exercise the pipeline and UI wiring. */
 #define BF6_PRECACHE_BUILD_SELFTEST 0x1
+/* Cache textures at most 2048 px (largest authored mip that fits), not full size. */
+#define BF6_PRECACHE_BUILD_TEXTURES_2048 0x2
 
 typedef enum {
     BF6_PRECACHE_IDLE = 0, BF6_PRECACHE_RUNNING = 1, BF6_PRECACHE_CANCELLING = 2,
@@ -5423,8 +5425,9 @@ BF6_API const char* bf6_precache_key(bf6_precache*);
 BF6_API int bf6_precache_sweep_stale(bf6_precache*, char* err, int err_len);
 
 /* Starts building the listed levels (lower-case names) on core-owned threads and
- * returns immediately. 0 started, -1 bad arguments, -2 nothing to build for these
- * flags (no game layers exist yet in this core version), -3 already running.
+ * returns immediately. Level names as the reader expects them (e.g. "MP_Dumbo");
+ * the cache stores them lower-case. 0 started, -1 bad arguments, -2 the cache was
+ * opened by identity and has no installation to read, -3 already running.
  * Already-complete maps are skipped, so a cancelled build resumes. */
 BF6_API int  bf6_precache_build_start(bf6_precache*, const char* const* levels,
                                       int level_count, int flags);

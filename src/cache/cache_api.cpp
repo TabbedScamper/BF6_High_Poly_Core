@@ -2,6 +2,7 @@
 #include "bf6_core.h"
 
 #include "cache_store.h"
+#include "game_layers.h"
 #include "pack.h"
 #include "progress.h"
 #include "thread_pool.h"
@@ -10,10 +11,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <stdio.h>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <thread>
+#include <sstream>
 
 namespace {
 
@@ -73,8 +76,18 @@ std::vector<Layer> self_test_layers()
 
 }  // namespace
 
+std::string lower(std::string s)
+{
+    for (char& ch : s) if (ch >= 'A' && ch <= 'Z') ch = (char)(ch + 32);
+    return s;
+}
+
 struct bf6_precache {
     Store store;
+    std::string game_dir;                      // empty when opened by identity only
+    bool game = false;                         // building real game layers
+    GameBuildOptions game_options;
+    std::map<std::string, std::string> read_name;   // store name -> name the reader expects
     ContentStore shared;
     Progress progress;
     std::vector<Layer> layers;
@@ -92,6 +105,11 @@ struct bf6_precache {
     std::map<std::string, std::uint32_t> required() const
     {
         std::map<std::string, std::uint32_t> r;
+        if (game) {
+            r["placements"] = kPlacementsVersion; r["meshes"] = kMeshesVersion;
+            r["textures"] = kTexturesVersion; r["terrain"] = kTerrainVersion;
+            return r;
+        }
         for (const Layer& l : layers) r[l.id] = l.version;
         return r;
     }
@@ -121,8 +139,71 @@ struct bf6_precache {
         return store.write_map_complete(level, records, err);
     }
 
+    void run_game()
+    {
+        progress.state(Progress::State::Running);
+#ifdef _WIN32
+        // Every decode thread keeps its own handle to each game archive it reads
+        // (see cas.cpp); the C runtime default of 512 stdio files runs out.
+        if (_getmaxstdio() < 8192) _setmaxstdio(8192);
+#endif
+        char e[1024] = {};
+        bf6_ctx* ctx = bf6_open(game_dir.c_str(), e, sizeof e);
+        if (!ctx) { progress.state(Progress::State::Failed, std::string("cannot open the installation: ") + e); running = false; return; }
+        const auto req = required();
+        bool failed = false;
+        std::string first_error;
+        for (const std::string& level : levels) {
+            if (cancel.load()) break;
+            if (store.map_complete(level, req)) { progress.map_done(level, true); continue; }
+            GameLayerResult r;
+            std::string err;
+            auto report = [this, &level](const char* layer, double f, const std::string& item) {
+                progress.layer(level, layer, f, item);
+            };
+            const auto t0 = std::chrono::steady_clock::now();
+            bool ok = build_game_level(ctx, read_name[level], store.map_dir(level), shared, game_options,
+                                       report, cancel, r, err);
+            if (ok) ok = shared.flush(err);
+            const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (ok) {
+                std::map<std::string, LayerRecord> records;
+                records["placements"] = { kPlacementsVersion, r.placement_bytes, r.placements_digest };
+                records["meshes"] = { kMeshesVersion, r.mesh_bytes, "" };
+                records["textures"] = { kTexturesVersion, r.texture_bytes, "" };
+                records["terrain"] = { kTerrainVersion, r.terrain_bytes, r.terrain_digest };
+                ok = store.write_map_complete(level, records, err);
+            }
+            std::ostringstream stats;
+            stats << "{\n  \"level\": \"" << level << "\", \"ok\": " << (ok ? "true" : "false")
+                  << ",\n  \"seconds_total\": " << total << ", \"seconds_open\": " << r.seconds_open
+                  << ", \"seconds_meshes\": " << r.seconds_meshes << ", \"seconds_textures\": " << r.seconds_textures
+                  << ", \"seconds_terrain\": " << r.seconds_terrain << ", \"seconds_write_incl_wait\": " << r.seconds_write
+                  << ",\n  \"placements\": " << r.placements << ", \"mesh_reads\": " << r.mesh_reads
+                  << ", \"meshes_new\": " << r.meshes_new << ", \"meshes_failed\": " << r.meshes_failed
+                  << ", \"textures_new\": " << r.textures_new << ", \"textures_failed\": " << r.textures_failed
+                  << ",\n  \"mesh_bytes\": " << r.mesh_bytes << ", \"texture_bytes\": " << r.texture_bytes
+                  << ", \"placement_bytes\": " << r.placement_bytes << ", \"terrain_bytes\": " << r.terrain_bytes
+                  << ", \"texture_max_dim\": " << game_options.texture_max_dim << "\n}\n";
+            std::string ignore;
+            atomic_write(store.map_dir(level) / "stats.json", stats.str(), ignore);
+            progress.map_done(level, ok);
+            if (!ok) { failed = true; if (first_error.empty()) first_error = level + ": " + err; }
+        }
+        bf6_close(ctx);
+        std::string err;
+        if (!shared.flush(err)) { failed = true; if (first_error.empty()) first_error = err; }
+        progress.shared(1.0);
+        if (cancel.load()) progress.state(Progress::State::Idle, "cancelled; completed maps are kept");
+        else if (failed) progress.state(Progress::State::Failed, first_error);
+        else if (!store.write_install_complete(levels, err)) progress.state(Progress::State::Failed, err);
+        else progress.state(Progress::State::Done);
+        running = false;
+    }
+
     void run()
     {
+        if (game) { run_game(); return; }
         progress.state(Progress::State::Running);
         std::string err;
         const auto req = required();
@@ -180,7 +261,9 @@ bf6_precache* bf6_precache_open(const char* game_dir, const char* cache_root, ch
     if (!game_dir || !cache_root) { put_text(err, err_len, "missing argument"); return nullptr; }
     const auto snap = ::bf6_cache::inspect(fs::u8path(game_dir));
     if (!snap.ok) { put_text(err, err_len, "cannot identify installation: " + snap.error); return nullptr; }
-    return bf6_precache_open_identity(snap.identity.c_str(), cache_root, err, err_len);
+    bf6_precache* cache = bf6_precache_open_identity(snap.identity.c_str(), cache_root, err, err_len);
+    if (cache) cache->game_dir = game_dir;
+    return cache;
 }
 
 void bf6_precache_close(bf6_precache* cache) { delete cache; }
@@ -199,7 +282,7 @@ int bf6_precache_sweep_stale(bf6_precache* cache, char* err, int err_len)
 int bf6_precache_map_ready(bf6_precache* cache, const char* level)
 {
     if (!cache || !level || cache->layers.empty()) return 0;
-    return cache->store.map_complete(level, cache->required()) ? 1 : 0;
+    return cache->store.map_complete(lower(level), cache->required()) ? 1 : 0;
 }
 
 int bf6_precache_ready(bf6_precache* cache)
@@ -217,12 +300,29 @@ int bf6_precache_build_start(bf6_precache* cache, const char* const* levels, int
     if (cache->running.load()) return -3;
     if (cache->worker.joinable()) cache->worker.join();
     std::vector<std::string> list;
+    std::map<std::string, std::string> names;
     for (int i = 0; i < level_count; ++i) {
-        if (!levels[i] || !Store::valid_level_name(levels[i])) return -1;
-        list.emplace_back(levels[i]);
+        if (!levels[i]) return -1;
+        const std::string key = lower(levels[i]);
+        if (!Store::valid_level_name(key)) return -1;
+        if (!names.count(key)) list.push_back(key);
+        names[key] = levels[i];
     }
-    cache->layers = (flags & BF6_PRECACHE_BUILD_SELFTEST) ? self_test_layers() : std::vector<Layer>{};
-    if (cache->layers.empty()) return -2;   // no game layers exist yet (phase 1)
+    cache->read_name = names;
+    if (flags & BF6_PRECACHE_BUILD_SELFTEST) {
+        cache->game = false;
+        cache->layers = self_test_layers();
+    } else {
+        if (cache->game_dir.empty()) return -2;   // opened by identity: no installation to read
+        cache->game = true;
+        cache->game_options.texture_max_dim = (flags & BF6_PRECACHE_BUILD_TEXTURES_2048) ? 2048 : 0;
+        cache->layers = {
+            { "placements", kPlacementsVersion, 1.0, nullptr },
+            { "meshes", kMeshesVersion, 4.0, nullptr },
+            { "textures", kTexturesVersion, 6.0, nullptr },
+            { "terrain", kTerrainVersion, 1.0, nullptr },
+        };
+    }
     cache->levels = list;
     std::vector<LayerSpec> specs;
     for (const Layer& l : cache->layers) specs.push_back({ l.id, l.weight });

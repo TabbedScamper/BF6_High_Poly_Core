@@ -110,7 +110,7 @@ int main(int argc, char** argv)
     bf6_precache* c = bf6_precache_open_identity("identity-one", root.c_str(), e, sizeof e);
     check(c != nullptr, "precache opens for an identity");
     const char* levels[] = { "mp_one", "mp_two", "mp_three" };
-    check(bf6_precache_build_start(c, levels, 3, 0) == -2, "a real build reports that no game layers exist yet");
+    check(bf6_precache_build_start(c, levels, 3, 0) == -2, "a cache opened by identity refuses a game build (no installation)");
     check(bf6_precache_ready(c) == 0, "nothing is ready before a build");
 
     check(bf6_precache_build_start(c, levels, 3, BF6_PRECACHE_BUILD_SELFTEST) == 0, "self-test build starts");

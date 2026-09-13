@@ -3,6 +3,7 @@
 #include "cache_store.h"
 #include "../../include/bf6_cache_identity.h"
 
+#include <cerrno>
 #include <cstring>
 #include <memory>
 #include <system_error>
@@ -56,8 +57,14 @@ bool PackWriter::begin(const fs::path& dir, const std::string& name, std::string
     dir_ = dir; name_ = name;
     data_tmp_ = dir / (name + ".pack.writing");
     index_tmp_ = dir / (name + ".idx.writing");
+    out_.clear();
+    errno = 0;
     out_.open(data_tmp_, std::ios::binary | std::ios::trunc);
-    if (!out_) { err = "cannot write " + data_tmp_.u8string(); return false; }
+    if (!out_) {
+        const int code = errno;
+        err = "cannot write " + data_tmp_.u8string() + ": " + std::strerror(code);
+        return false;
+    }
     cursor_ = 0; rows_.clear(); seen_.clear();
     open_ = true;
     return true;

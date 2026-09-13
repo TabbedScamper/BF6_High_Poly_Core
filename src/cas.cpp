@@ -304,6 +304,20 @@ std::vector<uint8_t> cas_read(const std::string& path, int64_t offset,
     }
 
     // Multi-block span: walk blocks until the guard breaks or the buffer ends.
+    // Size the output once from the headers first. Texture chunks are dozens of
+    // blocks, and growing the vector block by block reallocated and copied the
+    // payload several times over.
+    {
+        size_t scan = 0, total = 0;
+        for (int i = 0; i < MAX_BLOCKS; i++) {
+            if (scan + 8 > buf.size()) break;
+            BlockHdr h2 = block_header(buf.data(), scan);
+            if (h2.guard != GUARD || scan + 8 + h2.csize > buf.size()) break;
+            total += h2.dsize;
+            scan += 8 + h2.csize;
+        }
+        out.reserve(total);
+    }
     size_t pos = 0;
     int nparts = 0;
     for (int i = 0; i < MAX_BLOCKS; i++) {

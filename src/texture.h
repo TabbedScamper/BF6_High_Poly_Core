@@ -85,7 +85,7 @@ public:
     static bool is_srgb(int dxgi);
 
 private:
-    static bool dims_for(const TextureHeader& h, const std::vector<uint8_t>& pix,
+    static bool dims_for(const TextureHeader& h, std::vector<uint8_t>& pix,
                          int max_dim, TextureImage& out);
     static int  level_size(int w, int h, int dxgi);
     static int  chain_size(int w, int h, int dxgi);

@@ -46,7 +46,15 @@ static int on_progress(void* user, const char* stage, int, int)
 
 struct MeshJob { std::string res, bundle, variation; };
 
+// Order-sensitive FNV-1a over everything read, to prove optimisations change no bytes.
+static void fold(unsigned long long& h, const unsigned char* p, size_t n)
+{
+    if (!p) return;
+    for (size_t i = 0; i < n; ++i) h = (h ^ p[i]) * 1099511628211ull;
+}
+
 struct ReadStats {
+    unsigned long long digest = 1469598103934665603ull;
     int meshes = 0, failed = 0, sections = 0, textures = 0;
     long long vertices = 0, texture_bytes = 0;
     double mesh_seconds = 0, texture_seconds = 0;
@@ -63,6 +71,13 @@ static void read_meshes(bf6_ctx* ctx, const std::vector<MeshJob>& jobs, size_t b
         st.mesh_seconds += secs(t0, clk::now());
         if (!m) { ++st.failed; continue; }
         ++st.meshes;
+        for (int s = 0; s < m->section_count; ++s) {
+            const bf6_section& sec = m->sections[s];
+            fold(st.digest, (const unsigned char*)sec.positions, (size_t)sec.vertex_count * 3 * sizeof(float));
+            if (sec.normals) fold(st.digest, (const unsigned char*)sec.normals, (size_t)sec.vertex_count * 3 * sizeof(float));
+            if (sec.uv0) fold(st.digest, (const unsigned char*)sec.uv0, (size_t)sec.vertex_count * 2 * sizeof(float));
+            fold(st.digest, (const unsigned char*)sec.indices, (size_t)sec.index_count * sizeof(uint32_t));
+        }
         st.sections += m->section_count;
         for (int s = 0; s < m->section_count; ++s) st.vertices += m->sections[s].vertex_count;
         std::vector<int> ids;
@@ -74,7 +89,12 @@ static void read_meshes(bf6_ctx* ctx, const std::vector<MeshJob>& jobs, size_t b
         const auto t1 = clk::now();
         for (int id : ids) {
             const bf6_texture* tex = bf6_texture_at(ctx, id);
-            if (tex && tex->data) { ++st.textures; st.texture_bytes += tex->data_len; }
+            if (tex && tex->data) {
+                ++st.textures; st.texture_bytes += tex->data_len;
+                const int32_t dims[4] = { tex->width, tex->height, tex->mip_count, (int32_t)tex->format };
+                fold(st.digest, (const unsigned char*)dims, sizeof dims);
+                fold(st.digest, tex->data, (size_t)tex->data_len);
+            }
         }
         st.texture_seconds += secs(t1, clk::now());
         bf6_free(ctx, m);
@@ -86,9 +106,11 @@ int main(int argc, char** argv)
     if (argc < 3) { std::printf("usage: precache_bench <game_dir> <level> [level...] [--meshes N] [--contexts K]\n"); return 2; }
     const std::string game = argv[1];
     std::vector<std::string> levels;
-    int mesh_limit = 400, contexts = 1;
+    int mesh_limit = 400, contexts = 1, tex_threads = 16, max_dim = 2048;
     for (int i = 2; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--meshes") && i + 1 < argc) mesh_limit = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--tex-threads") && i + 1 < argc) tex_threads = std::max(1, std::atoi(argv[++i]));
+        else if (!std::strcmp(argv[i], "--max-dim") && i + 1 < argc) max_dim = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--contexts") && i + 1 < argc) contexts = std::max(1, std::atoi(argv[++i]));
         else levels.push_back(argv[i]);
     }
@@ -160,8 +182,38 @@ int main(int argc, char** argv)
         std::printf("serial read of %zu: %.2f s total | mesh+material %.2f s | texture payloads %.2f s | ok %d failed %d | sections %d | verts %lld | textures %d (%.1f MB)\n",
                     n, serial, st.mesh_seconds, st.texture_seconds, st.meshes, st.failed, st.sections, st.vertices,
                     st.textures, st.texture_bytes / 1048576.0);
+        std::printf("content digest (meshes + textures read): %016llx\n", st.digest);
         if (n > 0 && jobs.size() > n)
             std::printf("  extrapolated serial time for all %zu reads: %.0f s\n", jobs.size(), serial * jobs.size() / n);
+
+        // Thread-safe texture decode on this one context: 1 thread, then many.
+        if (!seen.empty()) {
+            std::vector<std::string> names;
+            for (int id : seen) { const char* nm = bf6_texture_name_at(ctx, id); if (nm && *nm) names.push_back(nm); }
+            for (int threads : { 1, tex_threads }) {
+                for (int cap : { 0, max_dim }) {
+                    if (cap < 0) continue;
+                    std::atomic<size_t> next{ 0 };
+                    std::atomic<long long> bytes{ 0 };
+                    std::atomic<int> ok{ 0 };
+                    const auto t0 = clk::now();
+                    std::vector<std::thread> pool;
+                    for (int k = 0; k < threads; ++k)
+                        pool.emplace_back([&] {
+                            for (size_t i; (i = next++) < names.size();) {
+                                bf6_texture* tx = bf6_texture_decode_res(ctx, names[i].c_str(), cap);
+                                if (tx) { ++ok; bytes += tx->data_len; bf6_texture_decode_free(tx); }
+                            }
+                        });
+                    for (auto& th : pool) th.join();
+                    const double s = secs(t0, clk::now());
+                    std::printf("texture decode x%zu on %d thread(s), max_dim %d: %.2f s (%.1f tex/s, %.0f MB/s, ok %d, %.1f MB)\n",
+                                names.size(), threads, cap, s, s > 0 ? names.size() / s : 0.0,
+                                s > 0 ? bytes.load() / 1048576.0 / s : 0.0, ok.load(), bytes.load() / 1048576.0);
+                    if (cap == max_dim) break;
+                }
+            }
+        }
 
         t = clk::now();
         bf6_terrain* terr = bf6_read_terrain(ctx, level.c_str());

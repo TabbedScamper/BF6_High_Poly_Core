@@ -514,6 +514,14 @@ BF6_API void bf6_release_texture_payload(bf6_ctx*, int texture_id, int max_dim);
 
 BF6_API const char* bf6_texture_name_at(bf6_ctx*, int texture_id);
 
+/* Decodes one texture resource by name into a caller-owned copy, without using
+ * or changing the context's texture table. Many threads may call this at once on
+ * one context, provided nothing mounts or opens a level concurrently. max_dim 0
+ * keeps the full chain; otherwise the largest authored mip within max_dim is
+ * chosen. NULL if unreadable. Free with bf6_texture_decode_free. */
+BF6_API bf6_texture* bf6_texture_decode_res(bf6_ctx*, const char* res_name, int max_dim);
+BF6_API void bf6_texture_decode_free(bf6_texture*);
+
 /* --------------------------------------------------------------- placements */
 typedef struct {
     const char* res_name;      /* the mesh to instance                       */

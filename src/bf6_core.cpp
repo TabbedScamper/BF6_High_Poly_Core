@@ -73,6 +73,8 @@ struct bf6_rime_binding_cache {
 
 struct bf6_ctx {
     bf6::Source      src;
+    // Executable the type schema was read from; empty when chosen automatically.
+    std::string      types_exe;
     std::map<int, std::vector<bf6::TerrainShaderBindingRecord>> surface_schemas;
     // Backing store for the slot names bf6_armory_slots hands out as
     // char*. Owned by the context, like every other string in this ABI.
@@ -1898,10 +1900,21 @@ int bf6_open_level(bf6_ctx* c, const char* level, const char* exe_path,
     if (c->mounted_level != level) c->forget_texture_decodes();
     c->mounted_level = level;
 
-    c->types.reset(new bf6::TypeDb());
-    if (exe_path && *exe_path) {
+    // THE TYPE SCHEMA DOES NOT DEPEND ON THE LEVEL. It comes from the game
+    // executable (hundreds of megabytes), and re-reading it on every level open
+    // cost about four seconds per map. Keep a readable schema from an earlier
+    // open unless the caller names a different executable.
+    const bool reuse_types = c->types && !c->types->looks_encrypted() &&
+        (!(exe_path && *exe_path) || c->types_exe == exe_path);
+    if (reuse_types) {
+        // keep c->types
+    } else if (exe_path && *exe_path) {
+        c->types.reset(new bf6::TypeDb());
         if (!c->types->open(exe_path, e)) return fail("type schema: " + e);
+        c->types_exe = exe_path;
     } else {
+        c->types.reset(new bf6::TypeDb());
+        c->types_exe.clear();
         // No exe given: try the install's own, MP first because that is the
         // build a Portal level comes from.
         //
@@ -3775,6 +3788,45 @@ int bf6_level_lighting_zones(bf6_ctx* c, const char* level,
         for (int i = 0; i < n && i < out_max; ++i)
             out[i] = c->lighting_zone_rows[(size_t)i];
     return n;
+}
+
+struct Bf6DecodedTexture {
+    bf6_texture abi{};          // first member: the pointer handed out is this
+    bf6::TextureImage img;
+};
+
+bf6_texture* bf6_texture_decode_res(bf6_ctx* c, const char* res_name, int max_dim)
+{
+    if (!c || !res_name || !*res_name || max_dim < 0) return nullptr;
+    try {
+        std::string e;
+        std::vector<uint8_t> res = c->src.get_res(res_name, e);
+        if (res.empty()) return nullptr;
+        auto fetch = [c](const std::string& g) {
+            std::string e2;
+            return c->src.get_chunk(g, e2);
+        };
+        auto out = std::make_unique<Bf6DecodedTexture>();
+        const bool ok = max_dim > 0
+            ? bf6::Texture::decode_capped(res, fetch, out->img, max_dim, e)
+            : bf6::Texture::decode(res, fetch, out->img, 0, e);
+        if (!ok) return nullptr;
+        out->abi.width = out->img.width;
+        out->abi.height = out->img.height;
+        out->abi.mip_count = out->img.mip_count;
+        out->abi.format = fmt_of(out->img.dxgi);
+        out->abi.data = out->img.blocks.data();
+        out->abi.data_len = (int32_t)out->img.blocks.size();
+        out->abi.srgb = out->img.srgb ? 1 : 0;
+        return &out.release()->abi;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void bf6_texture_decode_free(bf6_texture* texture)
+{
+    delete reinterpret_cast<Bf6DecodedTexture*>(texture);
 }
 
 void bf6_free(bf6_ctx* c, void* handle) {

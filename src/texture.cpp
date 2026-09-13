@@ -1,4 +1,5 @@
 #include "texture.h"
+#include <utility>
 
 #include <algorithm>
 #include <cstdio>
@@ -143,7 +144,9 @@ const char* Texture::which_chunk(const TextureHeader& h)
     return "embedded";
 }
 
-bool Texture::dims_for(const TextureHeader& h, const std::vector<uint8_t>& pix,
+// Takes ownership of pix: the payload is moved into out.blocks instead of copied
+// (textures are the largest buffers the reader handles).
+bool Texture::dims_for(const TextureHeader& h, std::vector<uint8_t>& pix,
                        int max_dim, TextureImage& out)
 {
     const int w = h.width, ht = h.height, dxgi = h.dxgi;
@@ -160,7 +163,7 @@ bool Texture::dims_for(const TextureHeader& h, const std::vector<uint8_t>& pix,
     {
         // The streamed chunk is mip0 ON ITS OWN, so this really is one level.
         // A consumer that needs a chain for this texture has to build one.
-        out.width = w; out.height = ht; out.blocks = pix; out.mip_count = 1;
+        out.width = w; out.height = ht; out.blocks = std::move(pix); out.mip_count = 1;
         return true;
     }
 
@@ -193,7 +196,8 @@ bool Texture::dims_for(const TextureHeader& h, const std::vector<uint8_t>& pix,
                 out.height = std::max(1, ht >> lvl);
                 // EVERYTHING FROM HERE DOWN, not just this level. The chain is
                 // contiguous and largest-first, so the tail is the mip chain.
-                out.blocks.assign(pix.begin() + (ptrdiff_t)off, pix.end());
+                if (off) pix.erase(pix.begin(), pix.begin() + (ptrdiff_t)off);
+                out.blocks = std::move(pix);
                 out.mip_count = mipcount - lvl;
                 return true;
             }
@@ -210,22 +214,22 @@ bool Texture::dims_for(const TextureHeader& h, const std::vector<uint8_t>& pix,
     for (int i = 0; i < 4; i++)
         if (cw[i] > 0 && chh[i] > 0 &&
             (size_t)chain_size(cw[i], chh[i], dxgi) * (size_t)slices == pix.size())
-        { out.width = cw[i]; out.height = chh[i]; out.blocks = pix; return true; }
+        { out.width = cw[i]; out.height = chh[i]; out.blocks = std::move(pix); return true; }
     for (int i = 0; i < 4; i++)
         if (cw[i] > 0 && chh[i] > 0 &&
             (size_t)level_size(cw[i], chh[i], dxgi) * (size_t)slices == pix.size())
-        { out.width = cw[i]; out.height = chh[i]; out.blocks = pix; return true; }
+        { out.width = cw[i]; out.height = chh[i]; out.blocks = std::move(pix); return true; }
 
     int bw = 0, bh = 0;
     for (int i = 0; i < 4; i++)
         if (cw[i] > 0 && chh[i] > 0 &&
             (size_t)level_size(cw[i], chh[i], dxgi) * (size_t)slices <= pix.size())
             if (cw[i] * chh[i] > bw * bh) { bw = cw[i]; bh = chh[i]; }
-    if (bw > 0) { out.width = bw; out.height = bh; out.blocks = pix; return true; }
+    if (bw > 0) { out.width = bw; out.height = bh; out.blocks = std::move(pix); return true; }
 
     out.width = (h.streamflag & 0x10) ? w / 2 : w;
     out.height = (h.streamflag & 0x10) ? ht / 2 : ht;
-    out.blocks = pix;
+    out.blocks = std::move(pix);
     return out.width > 0 && out.height > 0;
 }
 

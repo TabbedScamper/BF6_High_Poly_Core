@@ -5379,6 +5379,86 @@ BF6_API int bf6_level_scatter(bf6_ctx*, const char* level,
                               bf6_scatter_entry* out, int out_max,
                               char* err, int err_len);
 
+/* ------------------------------------------------------------ up-front cache */
+/* One engine-neutral cache for every map of an installation, shared by the Godot
+ * and Unreal bindings. See docs/PRECACHE.md. Additive exports; no existing struct
+ * changes. All strings are UTF-8. A bf6_precache is independent of any bf6_ctx. */
+typedef struct bf6_precache bf6_precache;
+
+#define BF6_PRECACHE_MAX_LAYERS 16
+/* Builds synthetic layers only, to exercise the pipeline and UI wiring. */
+#define BF6_PRECACHE_BUILD_SELFTEST 0x1
+
+typedef enum {
+    BF6_PRECACHE_IDLE = 0, BF6_PRECACHE_RUNNING = 1, BF6_PRECACHE_CANCELLING = 2,
+    BF6_PRECACHE_DONE = 3, BF6_PRECACHE_FAILED = 4
+} bf6_precache_state;
+
+typedef enum {
+    BF6_PRECACHE_MAP_WAITING = 0, BF6_PRECACHE_MAP_RUNNING = 1,
+    BF6_PRECACHE_MAP_DONE = 2, BF6_PRECACHE_MAP_FAILED = 3
+} bf6_precache_map_state;
+
+/* Identifies the installation (its archive tables and executables) and opens or
+ * creates <cache_root>/bf6hp-cache/v<format>/<key>. cache_root must be absolute.
+ * Returns NULL with err on failure. Free with bf6_precache_close. */
+BF6_API bf6_precache* bf6_precache_open(const char* game_dir, const char* cache_root,
+                                        char* err, int err_len);
+/* Same, for a binding that already holds the installation identity string. */
+BF6_API bf6_precache* bf6_precache_open_identity(const char* install_identity,
+                                                 const char* cache_root, char* err, int err_len);
+/* Cancels and waits for a running build, then frees. */
+BF6_API void bf6_precache_close(bf6_precache*);
+/* The 16-character cache key; valid until close. */
+BF6_API const char* bf6_precache_key(bf6_precache*);
+/* Deletes caches this core created for other keys or formats. Returns the count. */
+BF6_API int bf6_precache_sweep_stale(bf6_precache*, char* err, int err_len);
+
+/* Starts building the listed levels (lower-case names) on core-owned threads and
+ * returns immediately. 0 started, -1 bad arguments, -2 nothing to build for these
+ * flags (no game layers exist yet in this core version), -3 already running.
+ * Already-complete maps are skipped, so a cancelled build resumes. */
+BF6_API int  bf6_precache_build_start(bf6_precache*, const char* const* levels,
+                                      int level_count, int flags);
+/* Requests a stop after the current unit. Completed maps are kept. */
+BF6_API void bf6_precache_build_cancel(bf6_precache*);
+/* Blocks until the current build ends; returns the final bf6_precache_state. */
+BF6_API int  bf6_precache_build_wait(bf6_precache*);
+
+/* 1 when every level of the last started build is complete for this key. */
+BF6_API int bf6_precache_ready(bf6_precache*);
+BF6_API int bf6_precache_map_ready(bf6_precache*, const char* level);
+
+typedef struct {
+    int32_t struct_size;          /* set to sizeof(bf6_precache_progress) */
+    int32_t state;                /* bf6_precache_state */
+    double  overall;              /* 0..1, never decreases during a build */
+    double  shared;               /* 0..1 shared store */
+    int32_t map_count;
+    int32_t maps_done;
+    int64_t bytes_written;        /* shared store bytes this session */
+    double  seconds_since_update; /* a UI shows "still working" past a few seconds */
+    char    current_map[64];
+    char    current_layer[32];
+    char    current_item[128];
+    char    error[256];
+} bf6_precache_progress;
+/* Snapshot for a UI; cheap enough to call every frame. 0 or -1. */
+BF6_API int bf6_precache_progress_get(bf6_precache*, bf6_precache_progress* out);
+
+typedef struct {
+    char    level[64];
+    int32_t state;                /* bf6_precache_map_state */
+    int32_t layer_count;
+    double  progress;             /* 0..1 */
+    double  layer_progress[BF6_PRECACHE_MAX_LAYERS];
+} bf6_precache_map_progress;
+/* Returns the number of maps; fills up to out_max rows in build order. */
+BF6_API int bf6_precache_map_progress_get(bf6_precache*, bf6_precache_map_progress* out, int out_max);
+/* Layer names, in the same order as layer_progress. */
+BF6_API int bf6_precache_layer_count(bf6_precache*);
+BF6_API int bf6_precache_layer_name(bf6_precache*, int index, char* out, int out_len);
+
 /* -------------------------------------------------------------------- memory */
 /* Free anything this API returned (bf6_mesh*, bf6_terrain*, ...). The bf6_ctx*
  * itself is freed by bf6_close(), not this. */

@@ -5,7 +5,9 @@ map of a player's installation and writes it to one engine-neutral cache. Godot 
 Unreal both read that same cache, so after it finishes any map opens without touching
 the game files, in either engine.
 
-Status: design. Nothing below is implemented yet unless marked.
+Status: phase 1 implemented (cache store, key, manifests, pack files, shared store,
+thread pool, progress model and the `bf6_precache_*` C API, with synthetic self-test
+layers and `test/precache_test.cpp`). No game layers yet.
 
 ## Product behaviour (both engines)
 
@@ -97,7 +99,10 @@ seconds. Every phase below ships with before/after timings.
 Not cacheable: close-up ground detail that rebuilds as the camera moves. In cache-only
 mode it is disabled or served from a fixed precomputed page set.
 
-## C API (additions to bf6_core.h, next interface version)
+## C API (implemented in bf6_core.h, additive to interface version 6)
+
+The exported names are `bf6_precache_*` (the C++ namespace `bf6_cache` is taken by
+`bf6_cache_identity.h`). The sketch below shows the shape; the header is authoritative.
 
 ```c
 typedef struct bf6_cache bf6_cache;
@@ -146,8 +151,8 @@ their controls on `bf6_cache_ready`.
 
 ## Phases
 
-1. Cache root, key, manifests, progress API, thread pool, pack writer/reader (no layers).
-   Unit tests with synthetic data. Timing harness.
+1. (done) Cache root, key, manifests, progress API, thread pool, pack writer/reader (no layers).
+   Unit tests with synthetic data (`-DBF6_BUILD_CORE_TESTS=ON`). Timing harness: next.
 2. Single-context whole-install scan (mount, index, types, lift once) and the
    content-addressed store for meshes and textures. Measure against today.
 3. Terrain, ground, roads, water (including exported simulation parameters).

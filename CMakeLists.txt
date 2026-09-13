@@ -43,6 +43,10 @@ set(BF6_SOURCES
     src/expression_graph.cpp
     src/expression_registry.cpp
     src/expression_vm.cpp
+    src/cache/cache_store.cpp
+    src/cache/pack.cpp
+    src/cache/progress.cpp
+    src/cache/cache_api.cpp
 )
 
 # bf6_core.cpp deliberately keeps the ABI implementation in small include
@@ -90,6 +94,19 @@ endif()
 # Everything below is validation and research tooling. Several targets need a
 # local game install, and some reference research-only sources that are not
 # part of this repository. Engine packages need only the libraries above.
+# Core unit tests that need no game install and no research sources.
+option(BF6_BUILD_CORE_TESTS "Build self-contained core tests" OFF)
+if(BF6_BUILD_CORE_TESTS)
+    enable_testing()
+    add_executable(precache_test test/precache_test.cpp)
+    target_link_libraries(precache_test PRIVATE bf6_core_static)
+    target_include_directories(precache_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(precache_test PRIVATE xaudio2 ole32)
+    endif()
+    add_test(NAME core.precache COMMAND precache_test "${CMAKE_CURRENT_BINARY_DIR}/precache_test_root")
+endif()
+
 option(BF6_BUILD_TOOLS "Build tests, probes and research tools" OFF)
 if(NOT BF6_BUILD_TOOLS)
     return()

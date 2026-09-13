@@ -11,5 +11,5 @@ derived from it, must retain this NOTICE file and give visible credit to
 screen, as required by section 4(d) of the Apache License, Version 2.0.
 
 Third-party components:
-- src/json.hpp: JSON for Modern C++ by Niels Lohmann, MIT License (notice in the file).
+- None bundled. src/json.hpp is this project's own minimal JSON parser.
 - Oodle is not included; it is loaded at runtime from the user's own Battlefield 6 installation.

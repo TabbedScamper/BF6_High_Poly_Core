@@ -1721,7 +1721,8 @@ BF6_API int64_t bf6_budget(const char* request_json, size_t len, uint8_t** out);
  * Reusable pieces, one format for both editors: "bf6-block/2", game metres,
  * each object {"type","mesh","origin":[x,y,z] relative to the block's anchor,
  * "basis":[9] (game basis columns x, y, z, scale included),"props":{name:
- * value},"links":{name:["@i" (a member by index) or an outside name]}}. The
+ * value},"links":{name:["@i" (a member by index) or an outside name]}, and for
+ * a zone "points":[[x,y,z],...] (its polygon, in the same space as origin)}. The
  * Unreal tool's earlier files (centimetres, rotators, "Key=Value" props) load
  * upgraded. Requests are JSON; each call returns a record in *out
  * (bf6_blob_free) and its length, or -1.
@@ -1733,7 +1734,8 @@ BF6_API int64_t bf6_budget(const char* request_json, size_t len, uint8_t** out);
  * bf6_block_save: {"dir","name","level","objects":[{"type","mesh","name" (its
  *   link name),"origin" (world),"basis","props","links" (names)}]} ->
  *   {"name","file","count","anchor"} or {"error"}. The anchor is the centroid on
- *   the ground plane at the lowest point; links to members become "@i".
+ *   the ground plane at the lowest point (a zone counts by its points); links
+ *   to members become "@i".
  * bf6_block_load: {"dirs","name","at":[x,y,z]} -> {"name","level","format",
  *   "file","objects":[{"index", ...the object with origin in world space}]} or
  *   {"error"}.

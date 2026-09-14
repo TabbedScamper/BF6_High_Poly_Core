@@ -137,6 +137,7 @@ struct Member {
     double basis[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};    // game basis columns x, y, z, scale included
     std::vector<std::pair<std::string, std::string>> props;   // name -> JSON value text
     std::vector<std::pair<std::string, std::vector<std::string>>> links;   // name -> "@i" or a name
+    std::vector<double> points;   // a zone's polygon, x y z triples in the origin's space
 };
 
 // A v1 object: pos in centimetres (Unreal X, Y, Z), rot [pitch, yaw, roll],
@@ -201,6 +202,11 @@ Member from_v2(const Value& o)
             if (kv.second.is_arr()) for (const Value& e : kv.second.arr) if (e.is_str()) parts.push_back(e.str);
             m.links.push_back({kv.first, parts});
         }
+    if (const Value* pts = o.find("points"); pts && pts->is_arr())
+        for (const Value& pt : pts->arr) {
+            const std::vector<double> xyz = nums(&pt, 3, 0.0);
+            m.points.insert(m.points.end(), xyz.begin(), xyz.end());
+        }
     return m;
 }
 
@@ -222,7 +228,16 @@ std::string member_json(const Member& m, const double shift[3], int index)
         for (size_t k = 0; k < m.links[i].second.size(); ++k) { if (k) j += ','; j += q(m.links[i].second[k]); }
         j += "]";
     }
-    return j + "}}";
+    j += "}";
+    if (!m.points.empty()) {
+        j += ",\"points\":[";
+        for (size_t i = 0; i + 2 < m.points.size(); i += 3) {
+            if (i) j += ',';
+            j += "[" + numtxt(m.points[i] + shift[0]) + "," + numtxt(m.points[i + 1] + shift[1]) + "," + numtxt(m.points[i + 2] + shift[2]) + "]";
+        }
+        j += "]";
+    }
+    return j + "}";
 }
 
 struct Block {
@@ -319,7 +334,17 @@ extern "C" int64_t bf6_block_save(const char* request_json, size_t len, uint8_t*
     // placed block lands on the surface it was dropped on.
     double anchor[3] = {0, 0, 0};
     double low = 1e300;
-    for (const Member& m : members) { anchor[0] += m.origin[0]; anchor[2] += m.origin[2]; low = std::min(low, m.origin[1]); }
+    // A zone stands where its polygon is, wherever its own pivot sits.
+    for (const Member& m : members) {
+        if (m.points.size() >= 3) {
+            double cx = 0, cz = 0;
+            const size_t n = m.points.size() / 3;
+            for (size_t i = 0; i < n; ++i) { cx += m.points[i * 3]; cz += m.points[i * 3 + 2]; low = std::min(low, m.points[i * 3 + 1]); }
+            anchor[0] += cx / (double)n; anchor[2] += cz / (double)n;
+        } else {
+            anchor[0] += m.origin[0]; anchor[2] += m.origin[2]; low = std::min(low, m.origin[1]);
+        }
+    }
     anchor[0] /= (double)members.size(); anchor[2] /= (double)members.size(); anchor[1] = low;
 
     // Links between members by index, so they survive a copy getting fresh names.

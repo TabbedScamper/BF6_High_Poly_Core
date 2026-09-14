@@ -116,6 +116,17 @@ int main()
     auto nameless = call(bf6_block_save, "{\"dir\":" + jq(lib) + ",\"name\":\"  \",\"objects\":[{\"type\":\"Crate\"}]}");
     check(nameless.find("error") != nullptr, "a nameless block is refused");
 
+    // A zone whose pivot sits at the world origin counts by its polygon.
+    auto zone = call(bf6_block_save, "{\"dir\":" + jq(lib) + ",\"name\":\"Zone\",\"objects\":["
+        "{\"type\":\"CapturePoint\",\"name\":\"CP\",\"origin\":[50,10,50],\"links\":{\"CaptureArea\":[\"Area\"]}},"
+        "{\"type\":\"PolygonVolume\",\"name\":\"Area\",\"origin\":[0,0,0],\"points\":[[48,10,48],[52,10,48],[52,10,52],[48,10,52]]}]}");
+    check(zone.find("anchor") && close_to(zone.find("anchor")->arr[0].num, 50) && close_to(zone.find("anchor")->arr[1].num, 10), "a zone anchors by its points");
+    auto zl = call(bf6_block_load, "{\"dirs\":[" + jq(lib) + "],\"name\":\"Zone\",\"at\":[0,0,0]}");
+    const auto& zo = zl.find("objects")->arr;
+    check(zo.size() == 2 && zo[1].find("points") && zo[1].find("points")->arr.size() == 4 && close_to(zo[1].find("points")->arr[0].arr[0].num, -2)
+          && close_to(zo[1].find("origin")->arr[0].num, -50) && zo[0].find("links")->find("CaptureArea")->arr[0].str == "@1",
+          "a zone's points move with the block");
+
     uint8_t* out = nullptr;
     bf6_block_library(&out);
     check(out && std::strstr((const char*)out, "blocks") != nullptr, "the shared library has a folder");

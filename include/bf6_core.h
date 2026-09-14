@@ -1704,6 +1704,46 @@ BF6_API int64_t bf6_caps_status(const char* request_json, size_t len, uint8_t** 
 BF6_API int64_t bf6_caps_probe(uint8_t** out);
 BF6_API int64_t bf6_caps_ingest_probe(const char* request_json, size_t len, uint8_t** out);
 
+/* ---------------------------------------------------------- PORTAL BUDGET
+ *
+ * bf6_budget: the top-row meter. Request JSON: {"level","level_info" (path to
+ * FbExportData/level_info.json),"asset_types" (path to asset_types.json),
+ * "counts":{type: n} (every placed and base object, by SDK type),
+ * "upload_bytes","upload_raw_bytes" (optional: what the map uploads as),
+ * "limit_per_map","limit_experience" (optional; 3 MiB and 4 MiB),"upload_note"}.
+ * -> {"objects","cost","max" (-1 = no cap),"physics_frac","size_frac","frac"
+ * (the larger),"over","color":[r,g,b] (sRGB 0..1, blue to yellow to red),"text"}.
+ * Record in *out (bf6_blob_free); returns its length, or -1. */
+BF6_API int64_t bf6_budget(const char* request_json, size_t len, uint8_t** out);
+
+/* ---------------------------------------------------------- BLOCKS
+ *
+ * Reusable pieces, one format for both editors: "bf6-block/2", game metres,
+ * each object {"type","mesh","origin":[x,y,z] relative to the block's anchor,
+ * "basis":[9] (game basis columns x, y, z, scale included),"props":{name:
+ * value},"links":{name:["@i" (a member by index) or an outside name]}}. The
+ * Unreal tool's earlier files (centimetres, rotators, "Key=Value" props) load
+ * upgraded. Requests are JSON; each call returns a record in *out
+ * (bf6_blob_free) and its length, or -1.
+ *
+ * bf6_block_library: {"dir"} - the shared library both editors save to
+ *   (%LOCALAPPDATA%/BF6/blocks).
+ * bf6_block_list: {"dirs":[...]} -> {"blocks":[{"name","level","count","file",
+ *   "format"}]}; an earlier folder wins a name clash.
+ * bf6_block_save: {"dir","name","level","objects":[{"type","mesh","name" (its
+ *   link name),"origin" (world),"basis","props","links" (names)}]} ->
+ *   {"name","file","count","anchor"} or {"error"}. The anchor is the centroid on
+ *   the ground plane at the lowest point; links to members become "@i".
+ * bf6_block_load: {"dirs","name","at":[x,y,z]} -> {"name","level","format",
+ *   "file","objects":[{"index", ...the object with origin in world space}]} or
+ *   {"error"}.
+ * bf6_block_delete: {"dirs","name"} -> {"deleted","file"}. */
+BF6_API int64_t bf6_block_library(uint8_t** out);
+BF6_API int64_t bf6_block_list(const char* request_json, size_t len, uint8_t** out);
+BF6_API int64_t bf6_block_save(const char* request_json, size_t len, uint8_t** out);
+BF6_API int64_t bf6_block_load(const char* request_json, size_t len, uint8_t** out);
+BF6_API int64_t bf6_block_delete(const char* request_json, size_t len, uint8_t** out);
+
 typedef int (*bf6_scatter_ground_fn)(void* user, double x, double z, double ref_y, int terrain_only, double* out_y);
 BF6_API int64_t bf6_scatter_layout(const char* request_json, size_t len, bf6_scatter_ground_fn ground,
                                    void* user, uint8_t** out);

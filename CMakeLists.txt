@@ -35,6 +35,8 @@ set(BF6_SOURCES
     src/scatter_layout.cpp
     src/game_log.cpp
     src/caps.cpp
+    src/budget.cpp
+    src/blocks.cpp
     src/loadout.cpp
     src/splat.cpp
     src/terrainlayers.cpp
@@ -162,6 +164,12 @@ if(BF6_BUILD_CORE_TESTS)
     target_include_directories(loadout_test PRIVATE src include)
     if(WIN32)
         target_link_libraries(loadout_test PRIVATE xaudio2 ole32)
+    endif()
+    add_executable(budget_blocks_test test/budget_blocks_test.cpp)
+    target_link_libraries(budget_blocks_test PRIVATE bf6_core_static)
+    target_include_directories(budget_blocks_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(budget_blocks_test PRIVATE xaudio2 ole32)
     endif()
     add_executable(log_caps_test test/log_caps_test.cpp)
     target_link_libraries(log_caps_test PRIVATE bf6_core_static)

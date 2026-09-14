@@ -38,6 +38,7 @@ set(BF6_SOURCES
     src/budget.cpp
     src/blocks.cpp
     src/spatial_export.cpp
+    src/walk_mode.cpp
     src/loadout.cpp
     src/splat.cpp
     src/terrainlayers.cpp
@@ -165,6 +166,12 @@ if(BF6_BUILD_CORE_TESTS)
     target_include_directories(loadout_test PRIVATE src include)
     if(WIN32)
         target_link_libraries(loadout_test PRIVATE xaudio2 ole32)
+    endif()
+    add_executable(walk_mode_test test/walk_mode_test.cpp)
+    target_link_libraries(walk_mode_test PRIVATE bf6_core_static)
+    target_include_directories(walk_mode_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(walk_mode_test PRIVATE xaudio2 ole32)
     endif()
     add_executable(spatial_export_test test/spatial_export_test.cpp)
     target_link_libraries(spatial_export_test PRIVATE bf6_core_static)

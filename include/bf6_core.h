@@ -1810,6 +1810,64 @@ typedef int (*bf6_scatter_ground_fn)(void* user, double x, double z, double ref_
 BF6_API int64_t bf6_scatter_layout(const char* request_json, size_t len, bf6_scatter_ground_fn ground,
                                    void* user, uint8_t** out);
 
+/* ---------------------------------------------------------- RAYS AND WALKING
+ *
+ * The rays both editors stand, walk and place on, answered from the triangles
+ * the editor already draws rather than from physics collision, so nothing has to
+ * be cooked or generated first. A ray scene holds meshes (each indexed by a
+ * uniform grid over its triangles, two-sided) and instances of them (a mesh and a
+ * local-to-world transform); a trace returns the nearest hit over every instance,
+ * nearest bounds first.
+ *
+ * Units are metres and Y is up (the game's frame, the Godot scene's frame). An
+ * editor in another frame converts at its edge.
+ *
+ * transform: 12 doubles, row major: world = [m0 m1 m2; m4 m5 m6; m8 m9 m10] * local
+ * + (m3, m7, m11). Any scale and handedness. */
+typedef struct bf6_ray_scene bf6_ray_scene;
+BF6_API bf6_ray_scene* bf6_ray_scene_create(void);
+BF6_API void bf6_ray_scene_free(bf6_ray_scene*);
+/* A mesh from positions (xyz, vertex_count of them) and triangles (3 per
+ * triangle, index_count in all). Returns its id (>= 0), or -1 for no triangles. */
+BF6_API int32_t bf6_ray_scene_add_mesh(bf6_ray_scene*, const float* positions, int32_t vertex_count,
+                                       const int32_t* indices, int32_t index_count);
+/* Instances. add returns the instance id (>= 0) or -1 for an unknown mesh; clear
+ * removes every instance and keeps the meshes (their grids are the expensive part). */
+BF6_API int32_t bf6_ray_scene_add_instance(bf6_ray_scene*, int32_t mesh, const double* transform);
+BF6_API void    bf6_ray_scene_clear_instances(bf6_ray_scene*);
+BF6_API int32_t bf6_ray_scene_counts(bf6_ray_scene*, int32_t* meshes, int32_t* instances, int64_t* triangles);
+/* The nearest hit on the segment from -> to. out[0..2] the point, out[3..5] the
+ * unit normal facing the ray's origin, out[6] how far along the segment (0..1).
+ * Returns the instance hit, or -1 for none. */
+BF6_API int32_t bf6_ray_scene_trace(bf6_ray_scene*, const double* from, const double* to, double* out);
+
+/* Walking at eye level, the Unreal SDK's walk mode: move and slide along what the
+ * knees, chest and head run into, gravity, a 0.45 m step, standing on slopes up to
+ * about 45 degrees and sliding down steeper ones, snapping down stairs, jumping,
+ * crouching and running, with acceleration so starting and stopping have weight.
+ * The state is the camera: pos is the eye. */
+typedef struct {
+    double pos[3];       /* eye position */
+    double vel[3];       /* horizontal momentum (y ignored) */
+    double vel_up;       /* vertical speed */
+    int32_t grounded;
+    double eye;          /* eye height standing, metres (1.72, or measured off a spawn point) */
+    double eye_last;     /* the eye height the last step stood at (crouched or not); 0 at the start */
+} bf6_walk_state;
+typedef struct {
+    double wish[3];      /* wanted horizontal direction, length 0..1 (y ignored) */
+    int32_t run;
+    int32_t crouch;
+    int32_t jump;        /* pressed this step */
+    double dt;           /* seconds; clamped to 0.001..0.1 */
+} bf6_walk_input;
+/* ray: the nearest surface on from -> to; fills hit and the normal facing the
+ * origin, returns nonzero for a hit. */
+typedef int (*bf6_walk_ray_fn)(void* user, const double* from, const double* to, double* hit, double* normal);
+BF6_API void bf6_walk_step(bf6_walk_state*, const bf6_walk_input*, bf6_walk_ray_fn ray, void* user);
+/* The same step against a ray scene. */
+BF6_API void bf6_walk_step_scene(bf6_walk_state*, const bf6_walk_input*, bf6_ray_scene*);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

@@ -1591,6 +1591,30 @@ BF6_API int64_t bf6_loadout_attachments(bf6_ctx*, const char* item_id, const cha
 BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fits,
                                    const char* portal_enums, uint8_t** out);
 
+/* The soldier a PlayerSpawner, HQ_PlayerSpawner, AI_Spawner or SpawnPoint
+ * stands for, posed and armed, in game space with the feet at the origin.
+ *
+ * bf6_loadout_catalogue also lists the choices: "characters":[{"id","label"}]
+ * (the multiplayer operators, e.g. cha0001wisp), "outfits":[{"character","id",
+ * "label"}] (their sets, e.g. 001), "factions" (alliance, pax) and "roles"
+ * (assault, engineer, support, recon).
+ *
+ * request JSON {"character","outfit","faction","role","item","fits"} - every
+ * field optional, defaulting to cha0001wisp / 001 / alliance / assault /
+ * carbine/m4a1 / factory; "fits" is "slot=enum" lines as bf6_loadout_weapon.
+ * The body, headgear, backpack, patch and face meshes of the outfit are
+ * skinned by the first sample of the role's front-end standing idle
+ * (ui_frontend_standing_idle_<role>_01) through each mesh's composed render
+ * skeleton; the patch's placeholder albedo becomes the faction badge
+ * (t_patch_faction_alliance_cs / t_patch_faction_pax_01_cs, alpha-tested);
+ * eyelash, eyebrow and velcro cards are left out; the configured weapon is
+ * placed on Wep_Align joined to the drawn right hand (Wep_IK_RightHand ->
+ * RightHand); the whole is moved so the point between the feet is at x/z 0
+ * and the lowest body vertex at y 0.
+ * Record: the bf6_loadout_weapon layout, with "detail" beside "error" and
+ * "anchors" empty. A non-empty error means no soldier. */
+BF6_API int64_t bf6_loadout_soldier(bf6_ctx*, const char* request_json, const char* portal_enums, uint8_t** out);
+
 /* ---------------------------------------------------------- map checks
  *
  * bf6_map_validate: the VALIDATE rules both SDK editors run, so a map gets the

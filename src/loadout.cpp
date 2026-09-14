@@ -1,9 +1,11 @@
 /* The equipment a LootSpawner drops, for every engine: the Unreal plugin's
  * loadout catalogue, attachment join and configured weapon assembly
  * (BF6HighPolyLoadoutDecode.cpp, BF6HighPolyLoadoutAttachments.cpp), moved
- * here so the Godot plugin offers the same choices and draws the same weapon.
+ * here so the Godot plugin offers the same choices and draws the same weapon,
+ * and the posed soldier a PlayerSpawner, HQ, AI spawner or spawn point stands for.
  * See bf6_loadout_catalogue in bf6_core.h. */
 #include "bf6_core.h"
+#include "json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -11,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -282,6 +285,572 @@ bool any_bound(const bf6_mesh* m)
     return false;
 }
 
+/* ---------------------------------------------------------------- sections
+ *
+ * One drawable section as both records carry it: game-space geometry and the
+ * material the reader bound, serialized the same way for a weapon and a
+ * soldier. */
+
+struct Sec {
+    std::string mesh, bundle;
+    uint64_t state_key = 0;
+    int decal = 0;
+    std::vector<float> pos, nrm, uv;
+    std::vector<uint32_t> idx, colors;
+    bool has_material = false;
+    int alpha_test = 0, translucent = 0, alpha_from_albedo = 0, nsm = 0, terrain_decal_receiver = 0;
+    float base_color[3] = {0, 0, 0};
+    float roughness = 0;
+    std::vector<std::pair<int, int>> textures;          /* slot, texture id */
+    std::vector<std::pair<uint32_t, int>> shader_textures; /* name32, texture id */
+};
+
+/* Row-vector 4x3 affine matrices, the convention bf6_bone and the Unreal
+ * plugin's FMatrix44f share: p' = p.x*R + p.y*U + p.z*F + T. */
+struct M43 { float m[12]; };
+
+M43 identity43()
+{
+    M43 r{};
+    r.m[0] = r.m[4] = r.m[8] = 1;
+    return r;
+}
+
+M43 from12(const float* p)
+{
+    M43 r;
+    std::memcpy(r.m, p, sizeof(r.m));
+    return r;
+}
+
+/* a then b: the Unreal plugin's A * B. */
+M43 mul(const M43& a, const M43& b)
+{
+    M43 r{};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 3; ++j) {
+            double s = i == 3 ? b.m[9 + j] : 0.0;
+            for (int k = 0; k < 3; ++k) s += (double)a.m[i * 3 + k] * b.m[k * 3 + j];
+            r.m[i * 3 + j] = (float)s;
+        }
+    return r;
+}
+
+bool inverse43(const M43& a, M43& out)
+{
+    const double m00 = a.m[0], m01 = a.m[1], m02 = a.m[2], m10 = a.m[3], m11 = a.m[4], m12 = a.m[5],
+                 m20 = a.m[6], m21 = a.m[7], m22 = a.m[8];
+    const double det = m00 * (m11 * m22 - m12 * m21) - m01 * (m10 * m22 - m12 * m20) + m02 * (m10 * m21 - m11 * m20);
+    if (std::fabs(det) < 1e-20) return false;
+    const double inv[9] = {
+        (m11 * m22 - m12 * m21) / det, -(m01 * m22 - m02 * m21) / det, (m01 * m12 - m02 * m11) / det,
+        -(m10 * m22 - m12 * m20) / det, (m00 * m22 - m02 * m20) / det, -(m00 * m12 - m02 * m10) / det,
+        (m10 * m21 - m11 * m20) / det, -(m00 * m21 - m01 * m20) / det, (m00 * m11 - m01 * m10) / det};
+    for (int k = 0; k < 9; ++k) out.m[k] = (float)inv[k];
+    for (int j = 0; j < 3; ++j)
+        out.m[9 + j] = (float)-(a.m[9] * inv[0 + j] + a.m[10] * inv[3 + j] + a.m[11] * inv[6 + j]);
+    return true;
+}
+
+/* The Unreal plugin's FQuatRotationTranslationMatrix44f rows. */
+void quat_rows(float x, float y, float z, float w, float* m9)
+{
+    const float len = std::sqrt(x * x + y * y + z * z + w * w);
+    if (len > 1e-8f) { x /= len; y /= len; z /= len; w /= len; }
+    const float x2 = x + x, y2 = y + y, z2 = z + z;
+    const float xx = x * x2, xy = x * y2, xz = x * z2, yy = y * y2, yz = y * z2, zz = z * z2;
+    const float wx = w * x2, wy = w * y2, wz = w * z2;
+    m9[0] = 1 - (yy + zz); m9[1] = xy + wz;       m9[2] = xz - wy;
+    m9[3] = xy - wz;       m9[4] = 1 - (xx + zz); m9[5] = yz + wx;
+    m9[6] = xz + wy;       m9[7] = yz - wx;       m9[8] = 1 - (xx + yy);
+}
+
+/* Place every section through a transform, normals through its inverse
+ * transpose (the Unreal plugin's Transform()). */
+void transform_sections(std::vector<Sec>& secs, const M43& t)
+{
+    double nm[9];
+    const bool normals = normal_matrix(t.m, nm);
+    for (Sec& s : secs) {
+        for (size_t v = 0; v + 2 < s.pos.size(); v += 3) {
+            float p[3];
+            xform_point(t.m, &s.pos[v], p);
+            std::memcpy(&s.pos[v], p, sizeof(p));
+        }
+        if (!normals) continue;
+        for (size_t v = 0; v + 2 < s.nrm.size(); v += 3) {
+            const float* n = &s.nrm[v];
+            double o[3];
+            for (int k = 0; k < 3; ++k) o[k] = n[0] * nm[k] + n[1] * nm[3 + k] + n[2] * nm[6 + k];
+            const double len = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+            if (len > 1e-12) for (int k = 0; k < 3; ++k) s.nrm[v + k] = (float)(o[k] / len);
+        }
+    }
+}
+
+/* A mesh through the armory reader, skinned by a palette and optionally
+ * placed, as sections. `rig_bones` resolves a flagged (0x8000) skin index to an
+ * appended renderbone; a weapon skeleton has none. False with `error` set. */
+bool read_sections(bf6_ctx* c, const std::string& mesh, const std::string& bundle, const std::string& variation,
+                   const std::vector<M43>* skin, int rig_bones, std::vector<Sec>& out,
+                   std::string& error)
+{
+    const char* var = variation.empty() ? nullptr : variation.c_str();
+    bf6_mesh* m = bf6_read_armory_mesh_scoped(c, mesh.c_str(), 0, bundle.empty() ? nullptr : bundle.c_str(), var);
+    if (!m) { error = "no mesh at " + mesh; return false; }
+    std::string scope = bundle;
+    /* A scoped read that bound nothing in a bundle with no depot retries in the
+     * mesh's own scope, keeping its variation, as the Unreal plugin's ReadMesh
+     * does. */
+    if (!bundle.empty() && !any_bound(m) && bf6_material_scope_exists(c, bundle.c_str()) != 1) {
+        if (bf6_mesh* plain = bf6_read_armory_mesh_scoped(c, mesh.c_str(), 0, nullptr, var)) {
+            if (any_bound(plain)) { bf6_free(c, m); m = plain; scope.clear(); }
+            else bf6_free(c, plain);
+        }
+    }
+    for (int si = 0; si < m->section_count; ++si) {
+        const bf6_section& s = m->sections[si];
+        if (s.vertex_count <= 0 || s.index_count <= 0 || !s.positions) continue;
+        Sec o;
+        o.mesh = mesh;
+        o.bundle = scope;
+        o.state_key = s.state_key;
+        o.decal = s.is_decal;
+        o.pos.assign(s.positions, s.positions + (size_t)s.vertex_count * 3);
+        if (s.normals) o.nrm.assign(s.normals, s.normals + (size_t)s.vertex_count * 3);
+        if (s.uv0) o.uv.assign(s.uv0, s.uv0 + (size_t)s.vertex_count * 2);
+        o.idx.assign(s.indices, s.indices + (size_t)s.index_count);
+        if (s.colors) o.colors.assign(s.colors, s.colors + (size_t)s.vertex_count);
+        if (skin && !skin->empty() && m->mesh_type == 1 && s.skin_bones && s.skin_weights) {
+            const int bones = (int)skin->size();
+            for (int v = 0; v < s.vertex_count; ++v) {
+                float P[3] = {0, 0, 0}, N[3] = {0, 0, 0};
+                float accepted = 0.f;
+                for (int lane = 0; lane < s.skin_influences; ++lane) {
+                    const int at = v * s.skin_influences + lane;
+                    const uint16_t raw = s.skin_bones[at];
+                    const int bone = (raw & 0x8000) ? rig_bones + ((raw & 0x7fff) >> 1) : raw;
+                    const float w = s.skin_weights[at];
+                    if (w <= 0.f) continue;
+                    if (bone < 0 || bone >= bones) {
+                        bf6_free(c, m);
+                        error = "preview skin references an unavailable bone";
+                        out.clear();
+                        return false;
+                    }
+                    float tp[3];
+                    xform_point((*skin)[(size_t)bone].m, &o.pos[(size_t)v * 3], tp);
+                    for (int k = 0; k < 3; ++k) P[k] += tp[k] * w;
+                    if (!o.nrm.empty()) {
+                        float tn[3];
+                        xform_vector((*skin)[(size_t)bone].m, &o.nrm[(size_t)v * 3], tn);
+                        for (int k = 0; k < 3; ++k) N[k] += tn[k] * w;
+                    }
+                    accepted += w;
+                }
+                if (accepted > 1e-8f) {
+                    for (int k = 0; k < 3; ++k) o.pos[(size_t)v * 3 + k] = P[k] / accepted;
+                    if (!o.nrm.empty()) {
+                        const float len = std::sqrt(N[0] * N[0] + N[1] * N[1] + N[2] * N[2]);
+                        if (len > 1e-8f) for (int k = 0; k < 3; ++k) o.nrm[(size_t)v * 3 + k] = N[k] / len;
+                    }
+                }
+            }
+        }
+        if (m->materials && s.material >= 0 && s.material < m->material_count) {
+            const bf6_material_desc& d = m->materials[s.material];
+            o.has_material = true;
+            o.alpha_test = d.alpha_test;
+            o.translucent = d.translucent;
+            o.alpha_from_albedo = d.alpha_from_albedo;
+            o.nsm = d.normal_is_nsm;
+            o.terrain_decal_receiver = d.terrain_decal_receiver;
+            for (int k = 0; k < 3; ++k) o.base_color[k] = d.base_color[k];
+            o.roughness = d.roughness;
+            for (int b = 0; b < d.texture_count; ++b) o.textures.push_back({(int)d.textures[b].slot, d.textures[b].texture});
+            for (int b = 0; b < d.shader_texture_count; ++b)
+                o.shader_textures.push_back({d.shader_textures[b].name32, d.shader_textures[b].texture});
+        }
+        out.push_back(std::move(o));
+    }
+    bf6_free(c, m);
+    return true;
+}
+
+void place_tail(std::vector<Sec>& out, size_t from, const M43& t)
+{
+    std::vector<Sec> tail(std::make_move_iterator(out.begin() + (long)from), std::make_move_iterator(out.end()));
+    out.erase(out.begin() + (long)from, out.end());
+    transform_sections(tail, t);
+    for (Sec& s : tail) out.push_back(std::move(s));
+}
+
+/* sections_json and the float body, in the record layout bf6_core.h
+ * documents. */
+void serialize(bf6_ctx* c, const std::vector<Sec>& secs, std::string& sections_json, std::vector<float>& body)
+{
+    char buf[256];
+    bool first = true;
+    for (const Sec& s : secs) {
+        const int vc = (int)(s.pos.size() / 3), ic = (int)s.idx.size();
+        if (!first) sections_json += ',';
+        first = false;
+        sections_json += "{\"mesh\":"; json_str(sections_json, s.mesh);
+        sections_json += ",\"bundle\":"; json_str(sections_json, s.bundle);
+        std::snprintf(buf, sizeof(buf), ",\"state_key\":\"%016llx\",\"vertex_count\":%d,\"index_count\":%d",
+                      (unsigned long long)s.state_key, vc, ic);
+        sections_json += buf;
+        std::snprintf(buf, sizeof(buf), ",\"positions\":%zu", body.size());
+        sections_json += buf;
+        body.insert(body.end(), s.pos.begin(), s.pos.end());
+        std::snprintf(buf, sizeof(buf), ",\"normals\":%lld", s.nrm.empty() ? -1LL : (long long)body.size());
+        sections_json += buf;
+        body.insert(body.end(), s.nrm.begin(), s.nrm.end());
+        std::snprintf(buf, sizeof(buf), ",\"uvs\":%lld", s.uv.empty() ? -1LL : (long long)body.size());
+        sections_json += buf;
+        body.insert(body.end(), s.uv.begin(), s.uv.end());
+        /* Indices and colours ride in the float body as exact bit patterns. */
+        std::snprintf(buf, sizeof(buf), ",\"indices\":%zu", body.size());
+        sections_json += buf;
+        size_t at = body.size();
+        body.resize(at + s.idx.size());
+        if (!s.idx.empty()) std::memcpy(&body[at], s.idx.data(), s.idx.size() * sizeof(uint32_t));
+        std::snprintf(buf, sizeof(buf), ",\"colors\":%lld,\"decal\":%d", s.colors.empty() ? -1LL : (long long)body.size(), s.decal);
+        sections_json += buf;
+        if (!s.colors.empty()) {
+            at = body.size();
+            body.resize(at + s.colors.size());
+            std::memcpy(&body[at], s.colors.data(), s.colors.size() * sizeof(uint32_t));
+        }
+        if (s.has_material) {
+            std::snprintf(buf, sizeof(buf),
+                          ",\"alpha_test\":%d,\"translucent\":%d,\"alpha_from_albedo\":%d,\"nsm\":%d,"
+                          "\"terrain_decal_receiver\":%d,\"base_color\":[%.9g,%.9g,%.9g],\"roughness\":%.9g,\"textures\":[",
+                          s.alpha_test, s.translucent, s.alpha_from_albedo, s.nsm, s.terrain_decal_receiver,
+                          s.base_color[0], s.base_color[1], s.base_color[2], s.roughness);
+            sections_json += buf;
+            for (size_t b = 0; b < s.textures.size(); ++b) {
+                const char* tn = bf6_texture_name_at(c, s.textures[b].second);
+                std::snprintf(buf, sizeof(buf), "%s[%d,%d,", b ? "," : "", s.textures[b].first, s.textures[b].second);
+                sections_json += buf;
+                json_str(sections_json, tn ? tn : "");
+                sections_json += ']';
+            }
+            sections_json += "],\"shader_textures\":[";
+            for (size_t b = 0; b < s.shader_textures.size(); ++b) {
+                const char* tn = bf6_texture_name_at(c, s.shader_textures[b].second);
+                std::snprintf(buf, sizeof(buf), "%s[%u,%d,", b ? "," : "", s.shader_textures[b].first, s.shader_textures[b].second);
+                sections_json += buf;
+                json_str(sections_json, tn ? tn : "");
+                sections_json += ']';
+            }
+            sections_json += ']';
+        }
+        sections_json += '}';
+    }
+}
+
+/* The 'BLWP' record around a JSON head and a float body. */
+int64_t record(const std::string& head, const std::vector<float>& body, uint8_t** out)
+{
+    std::string j = head;
+    while ((j.size() + 12) % 4) j.push_back(' ');
+    const uint32_t hdr[3] = {0x50574C42u /* BLWP */, 1u, (uint32_t)j.size()};
+    const size_t total = 12 + j.size() + body.size() * sizeof(float);
+    *out = (uint8_t*)std::malloc(total);
+    if (!*out) return -1;
+    std::memcpy(*out, hdr, 12);
+    std::memcpy(*out + 12, j.data(), j.size());
+    if (!body.empty()) std::memcpy(*out + 12 + j.size(), body.data(), body.size() * sizeof(float));
+    return (int64_t)total;
+}
+
+/* ---------------------------------------------------------------- the weapon */
+
+/* The configured weapon's sections and slot anchors: the factory fits with the
+ * user's choices mixed in, the configured assembly, each part skinned by the
+ * configured palette and placed by its attach transform. */
+bool assemble_weapon(bf6_ctx* c, const char* item_id, const char* fits_text, const char* portal_enums,
+                     std::vector<Sec>& secs, std::string& anchors_json, std::string& error)
+{
+    char why[512] = {0};
+    if (!bf6_mount_frontend(c, why, sizeof(why))) { error = why[0] ? why : "The reader cannot mount front-end equipment."; return false; }
+    const std::vector<std::string> ebx = names(c, "common/hardware/");
+    const std::vector<Item> items = read_items(c, ebx);
+    const Item* item = find_item(items, item_id);
+    if (!item) { error = "This item is absent from the installed equipment catalogue."; return false; }
+    const std::string md = model_definition(c, ebx, *item);
+    if (md.empty()) { error = "This item has no unambiguous model definition."; return false; }
+    const std::string equipment = exact_leaf(ebx, "equipment_" + leaf(item->id), item->asset);
+
+    bf6_weapon_fit fits[64]{};
+    int nfits = 0;
+    std::vector<std::string> fit_strings;
+    fit_strings.reserve(256);
+    if (!equipment.empty()) nfits = bf6_weapon_factory_fits(c, equipment.c_str(), fits, 64);
+    if (nfits < 0 || nfits > 64) { error = "The item's factory configuration is unreadable."; return false; }
+    /* The factory strings are context-owned and live until the next factory
+     * call; keep copies so the user's choices can be mixed in safely. */
+    for (int i = 0; i < nfits; ++i) {
+        fit_strings.emplace_back(fits[i].slot ? fits[i].slot : "");
+        fit_strings.emplace_back(fits[i].attachment ? fits[i].attachment : "");
+    }
+    const std::vector<std::string> wanted = lines(fits_text);
+    std::vector<Choice> available;
+    if (!wanted.empty()) available = read_attachments(c, *item, ebx, lines(portal_enums));
+    std::vector<std::pair<std::string, std::string>> fit_pairs;
+    for (int i = 0; i < nfits; ++i) fit_pairs.emplace_back(fit_strings[(size_t)i * 2], fit_strings[(size_t)i * 2 + 1]);
+    for (const std::string& w : wanted) {
+        const size_t eq = w.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string slot = w.substr(0, eq), id = w.substr(eq + 1);
+        const Choice* ch = nullptr;
+        for (const Choice& a : available) if (a.slot == slot && a.id == id) { ch = &a; break; }
+        if (!ch) { error = "An attachment is unavailable for this weapon. Choose it again in Loadout."; return false; }
+        bool replaced = false;
+        for (auto& fp : fit_pairs) if (fp.first == slot) { fp.second = ch->bundle; replaced = true; break; }
+        if (!replaced) {
+            if (fit_pairs.size() == 64) { error = "Too many configured attachments."; return false; }
+            fit_pairs.emplace_back(slot, ch->bundle);
+        }
+    }
+    nfits = (int)fit_pairs.size();
+    for (int i = 0; i < nfits; ++i) {
+        fits[i].slot = fit_pairs[(size_t)i].first.c_str();
+        fits[i].attachment = fit_pairs[(size_t)i].second.c_str();
+    }
+
+    std::vector<bf6_weapon_part_pose> parts(256);
+    std::vector<bf6_bone_xform> bones(1024);
+    int bone_count = 0;
+    const int count = bf6_weapon_configured_assembly(c, md.c_str(), fits, nfits, parts.data(), 256,
+                                                     bones.data(), 1024, &bone_count);
+    if (count < 1 || count > 256 || bone_count < 0 || bone_count > 1024) {
+        error = "No complete configured item assembly was returned.";
+        return false;
+    }
+    struct Part { std::string mesh, bundle; float attach[12]; bool has_attach; };
+    std::vector<Part> copy;
+    for (int i = 0; i < count; ++i) {
+        if (!parts[(size_t)i].mesh) continue;
+        Part p;
+        p.mesh = parts[(size_t)i].mesh;
+        p.bundle = parts[(size_t)i].bundle ? parts[(size_t)i].bundle : "";
+        std::memcpy(p.attach, parts[(size_t)i].attach_transform, sizeof(p.attach));
+        p.has_attach = parts[(size_t)i].has_attach_transform != 0;
+        copy.push_back(std::move(p));
+    }
+    std::vector<M43> skin;
+    for (int i = 0; i < bone_count; ++i) skin.push_back(from12(bones[(size_t)i].m));
+
+    /* Slot anchors: each attachment bone's socket under the configured skin. */
+    if (bone_count > 0) {
+        if (bf6_skeleton* s = bf6_skeleton_read(c, "common/characters/_soldier/_weaponskeleton")) {
+            static const std::pair<const char*, const char*> kSlots[] = {
+                {"Wep_Scope_ATT", "scp"}, {"Wep_SecondarySight_ATT", "sca"}, {"Wep_Barrel_ATT", "brl"},
+                {"Wep_Muzzle_ATT", "mzl"}, {"Wep_MGZ_ATT", "mag"}, {"Wep_UnderBarrel_ATT", "btm"}};
+            for (int i = 0; i < std::min(s->bone_count, bone_count); ++i) {
+                if (!s->bones[i].name) continue;
+                for (const auto& kv : kSlots) {
+                    if (std::strcmp(s->bones[i].name, kv.first) != 0) continue;
+                    const float origin[3] = {s->bones[i].model[9], s->bones[i].model[10], s->bones[i].model[11]};
+                    float p[3];
+                    xform_point(bones[(size_t)i].m, origin, p);
+                    if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2])) {
+                        char b[160];
+                        std::snprintf(b, sizeof(b), "%s\"%s\":[%.6g,%.6g,%.6g]", anchors_json.empty() ? "" : ",",
+                                      kv.second, p[0], p[1], p[2]);
+                        anchors_json += b;
+                    }
+                }
+            }
+            bf6_free(c, s);
+        }
+    }
+
+    for (const Part& part : copy) {
+        const size_t from = secs.size();
+        if (!read_sections(c, part.mesh, part.bundle, std::string(), bone_count > 0 ? &skin : nullptr, 0, secs, error)) {
+            secs.clear();
+            return false;
+        }
+        if (part.has_attach) place_tail(secs, from, from12(part.attach));
+    }
+    if (secs.empty()) { error = "The configured item has no drawable geometry."; return false; }
+    return true;
+}
+
+/* ---------------------------------------------------------------- the soldier */
+
+struct Character { std::string id, label, root; };
+struct Outfit { std::string character, id, label, bundle; };
+
+std::vector<std::string> res_names(bf6_ctx* c, const char* query)
+{
+    std::vector<std::string> out;
+    const int n = bf6_list_res(c, query, nullptr, 0);
+    if (n < 1 || n > 1000000) return out;
+    std::vector<bf6_asset> rows((size_t)n);
+    const int got = std::clamp(bf6_list_res(c, query, rows.data(), n), 0, n);
+    for (int i = 0; i < got; ++i) if (rows[(size_t)i].name) out.emplace_back(rows[(size_t)i].name);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+/* The operators and their outfits: every pf_cha<name>_set_<nnn>_*_bundle_3p
+ * whose character ships the multiplayer set_001 body (the Unreal plugin's
+ * ReadCatalogue). */
+void read_characters(const std::vector<std::string>& bundles, const std::set<std::string>& resources,
+                     std::vector<Character>& characters, std::vector<Outfit>& outfits)
+{
+    std::set<std::string> seen_char, seen_outfit;
+    for (const std::string& p : bundles) {
+        if (p.find('/') != std::string::npos || !starts(p, "pf_cha") || !ends(p, "_bundle_3p")) continue;
+        const std::string tail = p.substr(3);
+        const size_t split = tail.find("_set_");
+        if (split == std::string::npos) continue;
+        const std::string ch = tail.substr(0, split), rest = tail.substr(split + 5);
+        if (rest.size() < 4) continue;
+        const std::string set = rest.substr(0, 3);
+        const std::string root = "common/characters/mp/main/" + ch;
+        if (!resources.count(root + "/set/set_001/" + ch + "_set_001_mesh")) continue;
+        if (seen_char.insert(ch).second) {
+            std::string label = ch.size() > 7 ? ch.substr(7) : ch;
+            for (char& x : label) x = (char)std::toupper((unsigned char)x);
+            characters.push_back({ch, label, root});
+        }
+        if (seen_outfit.insert(ch + "/" + set).second)
+            outfits.push_back({ch, set, "Outfit " + set, "win32/" + p});
+    }
+    std::stable_sort(characters.begin(), characters.end(), [](const Character& a, const Character& b) { return a.label < b.label; });
+}
+
+std::string replace_all(std::string s, const std::string& from, const std::string& to)
+{
+    if (from.empty()) return s;
+    size_t at = 0;
+    while ((at = s.find(from, at)) != std::string::npos) { s.replace(at, from.size(), to); at += to.size(); }
+    return s;
+}
+
+const char* const kRig = "animations/glacier/global/rigging/soldier_3p.rig";
+const char* const kSkeleton = "common/characters/_soldier/ske_soldier_3p";
+
+struct Pose {
+    std::vector<bf6_anim_binding> bindings;
+    std::vector<float> channels;
+    bf6_anim_binding_stats stats{};
+};
+
+/* The first authored sample of the role's front-end loadout idle: a static
+ * editor stand-in needs one pose, not the whole clip. */
+bool pose_samples(bf6_ctx* c, const std::string& role, Pose& out, std::string& error)
+{
+    const std::string clip_path = "animations/glacier/assets/frontend/mainmenu/loadout/ui_frontend_standing_idle_" + role + "_01";
+    const int count = bf6_anim_bindings(c, clip_path.c_str(), kRig, kSkeleton, nullptr, 0, &out.stats);
+    if (count < 1 || count > 4096) { error = "The selected soldier pose has no readable animation binding."; return false; }
+    out.bindings.assign((size_t)count, bf6_anim_binding{});
+    if (bf6_anim_bindings(c, clip_path.c_str(), kRig, kSkeleton, out.bindings.data(), count, &out.stats) != count) {
+        error = "The selected soldier pose has no readable animation binding.";
+        return false;
+    }
+    bf6_anim_clip* clip = bf6_anim_clip_open(c, clip_path.c_str());
+    if (!clip) { error = "The selected soldier pose is unavailable."; return false; }
+    bool ok = clip->channel_count == count && clip->key_time_count >= 1;
+    if (ok) {
+        out.channels.assign((size_t)count * 4, 0.f);
+        ok = bf6_anim_clip_sample(c, clip, 0, out.channels.data(), nullptr) != 0;
+    }
+    bf6_free(c, clip);
+    if (!ok) error = "The selected soldier pose is unavailable.";
+    return ok;
+}
+
+/* The posed skinning palette for one character mesh, the weapon frame in the
+ * hand, and the point between the feet. */
+bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& mesh, const Pose& pose,
+              std::vector<M43>& skin, int& rig_bones, M43& weapon, float foot[3], std::string& error)
+{
+    std::string renderbones;
+    /* Prefer the mesh asset's own Renderbones import; some outfits reuse another rig. */
+    std::string mesh_asset = mesh;
+    if (ends(mesh_asset, "_mesh")) mesh_asset.resize(mesh_asset.size() - 5);
+    bf6_ebx_instance_import rows[32]{};
+    const int n = bf6_armory_ebx_instance_imports(c, mesh_asset.c_str(), 0, rows, 32);
+    for (int i = 0; i < std::min(n, 32); ++i)
+        if (rows[i].field_hash == 0xA38BC860 && rows[i].path[0]) renderbones = rows[i].path;
+    if (ends(renderbones, ".ebx")) renderbones.resize(renderbones.size() - 4);
+    if (renderbones.empty() && ebx.count(mesh_asset + "_renderbonesdata")) renderbones = mesh_asset + "_renderbonesdata";
+    bf6_skeleton* s = bf6_skeleton_compose(c, kSkeleton, renderbones.empty() ? nullptr : renderbones.c_str());
+    if (!s) { error = "The character render skeleton is unavailable."; return false; }
+    bool ok = s->bone_count >= 1 && s->bone_count <= 8192;
+    std::vector<M43> local, model;
+    if (ok) {
+        rig_bones = s->rig_bone_count;
+        local.resize((size_t)s->bone_count);
+        model.resize((size_t)s->bone_count);
+        skin.assign((size_t)s->bone_count, identity43());
+        for (int i = 0; i < s->bone_count; ++i) local[(size_t)i] = from12(s->bones[i].local);
+        int applied = 0;
+        for (const bf6_anim_binding& b : pose.bindings) {
+            if (b.bone < 0 || b.bone >= s->bone_count) continue;
+            if (b.channel < 0 || (size_t)b.channel * 4 + 3 >= pose.channels.size()) { ok = false; break; }
+            const float* v = pose.channels.data() + (size_t)b.channel * 4;
+            if (b.component == BF6_ANIM_DOF_QUATERNION) {
+                quat_rows(v[0], v[1], v[2], v[3], local[(size_t)b.bone].m);
+                ++applied;
+            } else if (b.component == BF6_ANIM_DOF_VECTOR3) {
+                for (int k = 0; k < 3; ++k) local[(size_t)b.bone].m[9 + k] = v[k];
+                ++applied;
+            }
+        }
+        if (ok && applied != pose.stats.quaternion_bones + pose.stats.vector_bones) {
+            error = "The soldier pose did not bind completely.";
+            ok = false;
+        }
+    }
+    int right_hand = -1, right_grip = -1, feet = 0;
+    bool have_weapon = false;
+    foot[0] = foot[1] = foot[2] = 0;
+    for (int i = 0; ok && i < s->bone_count; ++i) {
+        const int parent = s->bones[i].parent;
+        if (parent >= i) { ok = false; break; }
+        model[(size_t)i] = parent < 0 ? local[(size_t)i] : mul(local[(size_t)i], model[(size_t)parent]);
+        skin[(size_t)i] = mul(from12(s->bones[i].inverse), model[(size_t)i]);
+        const char* nm = s->bones[i].name;
+        if (!nm) continue;
+        if (std::strcmp(nm, "Wep_Align") == 0) { weapon = model[(size_t)i]; have_weapon = true; }
+        if (std::strcmp(nm, "RightHand") == 0) right_hand = i;
+        if (std::strcmp(nm, "Wep_IK_RightHand") == 0) right_grip = i;
+        if (std::strcmp(nm, "LeftFoot") == 0 || std::strcmp(nm, "RightFoot") == 0) {
+            for (int k = 0; k < 3; ++k) foot[k] += model[(size_t)i].m[9 + k];
+            ++feet;
+        }
+    }
+    if (ok && feet) for (int k = 0; k < 3; ++k) foot[k] /= (float)feet;
+    if (ok) {
+        if (have_weapon && right_hand >= 0 && right_grip >= 0) {
+            /* Front-end clips carry a separate weapon IK target whose offset is
+             * not applied to the rendered arm: join the authored grip frame to
+             * the wrist actually drawn, or every rifle floats above the hands. */
+            M43 grip_inv;
+            if (inverse43(model[(size_t)right_grip], grip_inv))
+                weapon = mul(mul(weapon, grip_inv), model[(size_t)right_hand]);
+        } else {
+            error = "The pose has no complete weapon-to-hand binding.";
+            ok = false;
+        }
+    }
+    bf6_free(c, s);
+    return ok;
+}
+
+std::string field(const bf6json::Value& v, const char* key, const char* fallback)
+{
+    const bf6json::Value* f = v.find(key);
+    return f && f->is_str() && !f->str.empty() ? f->str : std::string(fallback);
+}
+
 } // namespace
 
 extern "C" int64_t bf6_loadout_catalogue(bf6_ctx* c, uint8_t** out)
@@ -299,7 +868,31 @@ extern "C" int64_t bf6_loadout_catalogue(bf6_ctx* c, uint8_t** out)
         j += ",\"asset\":"; json_str(j, items[i].asset);
         j += '}';
     }
-    j += "]}";
+    /* The soldier choices: operators, their outfits, and the fixed faction and
+     * role lists the Unreal plugin offers. */
+    const std::vector<std::string> res = res_names(c, "common/characters/");
+    const std::set<std::string> resources(res.begin(), res.end());
+    std::vector<Character> characters;
+    std::vector<Outfit> outfits;
+    read_characters(names(c, "pf_cha"), resources, characters, outfits);
+    j += "],\"characters\":[";
+    for (size_t i = 0; i < characters.size(); ++i) {
+        if (i) j += ',';
+        j += "{\"id\":"; json_str(j, characters[i].id);
+        j += ",\"label\":"; json_str(j, characters[i].label);
+        j += '}';
+    }
+    j += "],\"outfits\":[";
+    for (size_t i = 0; i < outfits.size(); ++i) {
+        if (i) j += ',';
+        j += "{\"character\":"; json_str(j, outfits[i].character);
+        j += ",\"id\":"; json_str(j, outfits[i].id);
+        j += ",\"label\":"; json_str(j, outfits[i].label);
+        j += '}';
+    }
+    j += "],\"factions\":[{\"id\":\"alliance\",\"label\":\"NATO\"},{\"id\":\"pax\",\"label\":\"PAX\"}]";
+    j += ",\"roles\":[{\"id\":\"assault\",\"label\":\"Assault\"},{\"id\":\"engineer\",\"label\":\"Engineer\"},"
+         "{\"id\":\"support\",\"label\":\"Support\"},{\"id\":\"recon\",\"label\":\"Recon\"}]}";
     return give(j, out);
 }
 
@@ -336,251 +929,144 @@ extern "C" int64_t bf6_loadout_weapon(bf6_ctx* c, const char* item_id, const cha
                                       const char* portal_enums, uint8_t** out)
 {
     if (!c || !item_id || !out) return -1;
-    char why[512] = {0};
-    std::string error;
-    std::string sections_json;
+    std::vector<Sec> secs;
+    std::string anchors_json, error, sections_json;
     std::vector<float> body;
-    std::string anchors_json;
+    if (assemble_weapon(c, item_id, fits_text, portal_enums, secs, anchors_json, error))
+        serialize(c, secs, sections_json, body);
+    else
+        anchors_json.clear();
+    std::string j = "{\"item\":";
+    json_str(j, item_id);
+    j += ",\"error\":";
+    json_str(j, error);
+    j += ",\"sections\":[" + sections_json + "],\"anchors\":{" + anchors_json + "}}";
+    return record(j, body, out);
+}
+
+extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, const char* portal_enums, uint8_t** out)
+{
+    if (!c || !out) return -1;
+    bf6json::Value req;
+    if (request_json && *request_json) {
+        std::string err;
+        bf6json::Parser p(request_json, std::strlen(request_json));
+        if (!p.parse(req, err)) req = bf6json::Value();
+    }
+    /* The Unreal plugin's FRequest defaults. */
+    const std::string character = field(req, "character", "cha0001wisp");
+    const std::string outfit_id = field(req, "outfit", "001");
+    const std::string faction = field(req, "faction", "alliance");
+    const std::string role = field(req, "role", "assault");
+    const std::string item = field(req, "item", "carbine/m4a1");
+    const std::string fits = field(req, "fits", "");
+
+    std::vector<Sec> secs;
+    std::string error, detail;
     auto finish = [&]() -> int64_t {
+        std::string sections_json;
+        std::vector<float> body;
+        if (error.empty()) serialize(c, secs, sections_json, body);
         std::string j = "{\"item\":";
-        json_str(j, item_id);
+        json_str(j, item);
         j += ",\"error\":";
         json_str(j, error);
-        j += ",\"sections\":[" + sections_json + "],\"anchors\":{" + anchors_json + "}}";
-        while ((j.size() + 12) % 4) j.push_back(' ');
-        const uint32_t head[3] = {0x50574C42u /* BLWP */, 1u, (uint32_t)j.size()};
-        const size_t total = 12 + j.size() + body.size() * sizeof(float);
-        *out = (uint8_t*)std::malloc(total);
-        if (!*out) return -1;
-        std::memcpy(*out, head, 12);
-        std::memcpy(*out + 12, j.data(), j.size());
-        if (!body.empty()) std::memcpy(*out + 12 + j.size(), body.data(), body.size() * sizeof(float));
-        return (int64_t)total;
+        j += ",\"detail\":";
+        json_str(j, detail);
+        j += ",\"sections\":[" + sections_json + "],\"anchors\":{}}";
+        return record(j, body, out);
     };
+
+    char why[512] = {0};
     if (!bf6_mount_frontend(c, why, sizeof(why))) { error = why[0] ? why : "The reader cannot mount front-end equipment."; return finish(); }
-    const std::vector<std::string> ebx = names(c, "common/hardware/");
-    const std::vector<Item> items = read_items(c, ebx);
-    const Item* item = find_item(items, item_id);
-    if (!item) { error = "This item is absent from the installed equipment catalogue."; return finish(); }
-    const std::string md = model_definition(c, ebx, *item);
-    if (md.empty()) { error = "This item has no unambiguous model definition."; return finish(); }
-    const std::string equipment = exact_leaf(ebx, "equipment_" + leaf(item->id), item->asset);
+    const std::vector<std::string> bundles = names(c, "pf_cha");
+    std::set<std::string> ebx;
+    for (const std::string& p : names(c, "common/characters/")) ebx.insert(p);
+    for (const std::string& p : bundles) ebx.insert(p);
+    const std::vector<std::string> res = res_names(c, "common/characters/");
+    const std::set<std::string> resources(res.begin(), res.end());
+    std::vector<Character> characters;
+    std::vector<Outfit> outfits;
+    read_characters(bundles, resources, characters, outfits);
+    const Character* ch = nullptr;
+    const Outfit* outfit = nullptr;
+    for (const Character& x : characters) if (x.id == character) { ch = &x; break; }
+    for (const Outfit& x : outfits) if (x.character == character && x.id == outfit_id) { outfit = &x; break; }
+    if (!ch || !outfit) { error = "The selected character or outfit is unavailable."; return finish(); }
 
-    bf6_weapon_fit fits[64]{};
-    int nfits = 0;
-    std::vector<std::string> fit_strings;
-    fit_strings.reserve(256);
-    if (!equipment.empty()) nfits = bf6_weapon_factory_fits(c, equipment.c_str(), fits, 64);
-    if (nfits < 0 || nfits > 64) { error = "The item's factory configuration is unreadable."; return finish(); }
-    /* The factory strings are context-owned and live until the next factory
-     * call; keep copies so the user's choices can be mixed in safely. */
-    for (int i = 0; i < nfits; ++i) {
-        fit_strings.emplace_back(fits[i].slot ? fits[i].slot : "");
-        fit_strings.emplace_back(fits[i].attachment ? fits[i].attachment : "");
-    }
-    const std::vector<std::string> wanted = lines(fits_text);
-    std::vector<Choice> available;
-    if (!wanted.empty()) available = read_attachments(c, *item, ebx, lines(portal_enums));
-    std::vector<std::pair<std::string, std::string>> fit_pairs;
-    for (int i = 0; i < nfits; ++i) fit_pairs.emplace_back(fit_strings[(size_t)i * 2], fit_strings[(size_t)i * 2 + 1]);
-    for (const std::string& w : wanted) {
-        const size_t eq = w.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string slot = w.substr(0, eq), id = w.substr(eq + 1);
-        const Choice* ch = nullptr;
-        for (const Choice& a : available) if (a.slot == slot && a.id == id) { ch = &a; break; }
-        if (!ch) { error = "An attachment is unavailable for this weapon. Choose it again in Loadout."; return finish(); }
-        bool replaced = false;
-        for (auto& fp : fit_pairs) if (fp.first == slot) { fp.second = ch->bundle; replaced = true; break; }
-        if (!replaced) {
-            if (fit_pairs.size() == 64) { error = "Too many configured attachments."; return finish(); }
-            fit_pairs.emplace_back(slot, ch->bundle);
-        }
-    }
-    nfits = (int)fit_pairs.size();
-    for (int i = 0; i < nfits; ++i) {
-        fits[i].slot = fit_pairs[(size_t)i].first.c_str();
-        fits[i].attachment = fit_pairs[(size_t)i].second.c_str();
+    Pose pose;
+    if (!pose_samples(c, role, pose, error)) return finish();
+
+    const std::string base = ch->root + "/set/set_001/" + character + "_set_001";
+    std::vector<std::string> meshes;
+    for (const std::string& p : res)
+        if (starts(p, base) && ends(p, "_mesh") && p.find("_1p") == std::string::npos) meshes.push_back(p);
+    std::string face_bundle;
+    for (const std::string& p : bundles)
+        if (starts(p, "pf_" + character + "_face_001_") && p.find('/') == std::string::npos && ends(p, "_bundle_3p")) { face_bundle = p; break; }
+    for (const char* suffix : {"base_standard", "parts_standard"}) {
+        const std::string mesh = ch->root + "/face/_base/" + character + "_face_" + suffix + "_mesh";
+        if (resources.count(mesh)) meshes.push_back(mesh);
     }
 
-    std::vector<bf6_weapon_part_pose> parts(256);
-    std::vector<bf6_bone_xform> bones(1024);
-    int bone_count = 0;
-    const int count = bf6_weapon_configured_assembly(c, md.c_str(), fits, nfits, parts.data(), 256,
-                                                     bones.data(), 1024, &bone_count);
-    if (count < 1 || count > 256 || bone_count < 0 || bone_count > 1024) {
-        error = "No complete configured item assembly was returned.";
-        return finish();
-    }
-    struct Part { std::string mesh, bundle; float attach[12]; bool has_attach; };
-    std::vector<Part> copy;
-    for (int i = 0; i < count; ++i) {
-        if (!parts[(size_t)i].mesh) continue;
-        Part p;
-        p.mesh = parts[(size_t)i].mesh;
-        p.bundle = parts[(size_t)i].bundle ? parts[(size_t)i].bundle : "";
-        std::memcpy(p.attach, parts[(size_t)i].attach_transform, sizeof(p.attach));
-        p.has_attach = parts[(size_t)i].has_attach_transform != 0;
-        copy.push_back(std::move(p));
+    M43 weapon = identity43();
+    float foot[3] = {0, 0, 0};
+    int parts = 0;
+    for (const std::string& mesh : meshes) {
+        const bool face = mesh.find("/face/") != std::string::npos;
+        /* Hair cards need their own shader; a solid stand-in is worse than none. */
+        if (mesh.find("eyelash") != std::string::npos || mesh.find("eyebrow") != std::string::npos
+            || mesh.find("velcro") != std::string::npos)
+            continue;
+        std::string variation = mesh.substr(0, mesh.size() - 5);
+        if (face) variation = replace_all(replace_all(variation, "/face/_base/", "/face/face_001/"), "_face_base_", "_face_001_base_");
+        else variation = replace_all(variation, "set_001", "set_" + outfit_id);
+        if (!ebx.count(variation)) variation.clear();
+        std::vector<M43> skin;
+        int rig_bones = 0;
+        if (!skin_for(c, ebx, mesh, pose, skin, rig_bones, weapon, foot, error)) { secs.clear(); return finish(); }
+        const size_t from = secs.size();
+        if (!read_sections(c, mesh, face ? face_bundle : outfit->bundle, variation, &skin, rig_bones, secs, error)) {
+            secs.clear();
+            return finish();
+        }
+        if (ends(mesh, "_patch_mesh")) {
+            const std::string badge = std::string("common/characters/_shared/patches/faction/t_patch_faction_")
+                                    + (faction == "pax" ? "pax_01" : "alliance") + "_cs";
+            const int texture = bf6_texture_id_by_name(c, badge.c_str());
+            if (texture < 0) { error = "The selected faction badge is unavailable."; secs.clear(); return finish(); }
+            for (size_t i = from; i < secs.size(); ++i) {
+                Sec& s = secs[i];
+                s.textures.erase(std::remove_if(s.textures.begin(), s.textures.end(),
+                                                [](const std::pair<int, int>& b) { return b.first == 0; }),
+                                 s.textures.end());
+                s.textures.push_back({0, texture});
+                s.has_material = true;
+                s.alpha_test = 1;
+                s.alpha_from_albedo = 1;
+            }
+        }
+        ++parts;
     }
 
-    /* Slot anchors: each attachment bone's socket under the configured skin. */
-    if (bone_count > 0) {
-        if (bf6_skeleton* s = bf6_skeleton_read(c, "common/characters/_soldier/_weaponskeleton")) {
-            static const std::pair<const char*, const char*> kSlots[] = {
-                {"Wep_Scope_ATT", "scp"}, {"Wep_SecondarySight_ATT", "sca"}, {"Wep_Barrel_ATT", "brl"},
-                {"Wep_Muzzle_ATT", "mzl"}, {"Wep_MGZ_ATT", "mag"}, {"Wep_UnderBarrel_ATT", "btm"}};
-            for (int i = 0; i < std::min(s->bone_count, bone_count); ++i) {
-                if (!s->bones[i].name) continue;
-                for (const auto& kv : kSlots) {
-                    if (std::strcmp(s->bones[i].name, kv.first) != 0) continue;
-                    const float origin[3] = {s->bones[i].model[9], s->bones[i].model[10], s->bones[i].model[11]};
-                    float p[3];
-                    xform_point(bones[(size_t)i].m, origin, p);
-                    if (std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2])) {
-                        char b[160];
-                        std::snprintf(b, sizeof(b), "%s\"%s\":[%.6g,%.6g,%.6g]", anchors_json.empty() ? "" : ",",
-                                      kv.second, p[0], p[1], p[2]);
-                        anchors_json += b;
-                    }
-                }
-            }
-            bf6_free(c, s);
-        }
+    float min_y = 1e30f;
+    bool any = false;
+    for (const Sec& s : secs)
+        for (size_t v = 1; v < s.pos.size(); v += 3) { min_y = std::min(min_y, s.pos[v]); any = true; }
+    std::vector<Sec> gun;
+    std::string anchors_unused;
+    if (!assemble_weapon(c, item.c_str(), fits.c_str(), portal_enums, gun, anchors_unused, error)) { secs.clear(); return finish(); }
+    transform_sections(gun, weapon);
+    for (Sec& s : gun) secs.push_back(std::move(s));
+    if (any) {
+        M43 anchor = identity43();
+        anchor.m[9] = -foot[0];
+        anchor.m[10] = -min_y;
+        anchor.m[11] = -foot[2];
+        transform_sections(secs, anchor);
     }
-
-    bool first_section = true;
-    for (const Part& part : copy) {
-        bf6_mesh* m = bf6_read_armory_mesh_scoped(c, part.mesh.c_str(), 0,
-                                                  part.bundle.empty() ? nullptr : part.bundle.c_str(), nullptr);
-        if (!m) { error = "no mesh at " + part.mesh; sections_json.clear(); body.clear(); return finish(); }
-        std::string scope = part.bundle;
-        /* A scoped read that bound nothing in a bundle with no depot retries in
-         * the mesh's own scope, as the Unreal plugin's ReadMesh does. */
-        if (!part.bundle.empty() && !any_bound(m) && bf6_material_scope_exists(c, part.bundle.c_str()) != 1) {
-            if (bf6_mesh* plain = bf6_read_armory_mesh_scoped(c, part.mesh.c_str(), 0, nullptr, nullptr)) {
-                if (any_bound(plain)) { bf6_free(c, m); m = plain; scope.clear(); }
-                else bf6_free(c, plain);
-            }
-        }
-        double nm[9];
-        const bool attach_normals = part.has_attach && normal_matrix(part.attach, nm);
-        for (int si = 0; si < m->section_count; ++si) {
-            const bf6_section& s = m->sections[si];
-            if (s.vertex_count <= 0 || s.index_count <= 0 || !s.positions) continue;
-            std::vector<float> pos(s.positions, s.positions + (size_t)s.vertex_count * 3);
-            std::vector<float> nrm;
-            if (s.normals) nrm.assign(s.normals, s.normals + (size_t)s.vertex_count * 3);
-            if (bone_count > 0 && m->mesh_type == 1 && s.skin_bones && s.skin_weights) {
-                for (int v = 0; v < s.vertex_count; ++v) {
-                    float P[3] = {0, 0, 0}, N[3] = {0, 0, 0};
-                    float accepted = 0.f;
-                    for (int lane = 0; lane < s.skin_influences; ++lane) {
-                        const int idx = v * s.skin_influences + lane;
-                        const uint16_t raw = s.skin_bones[idx];
-                        /* A weapon skeleton has no appended renderbones (rig count 0). */
-                        const int bone = (raw & 0x8000) ? ((raw & 0x7fff) >> 1) : raw;
-                        const float w = s.skin_weights[idx];
-                        if (w <= 0.f) continue;
-                        if (bone < 0 || bone >= bone_count) {
-                            bf6_free(c, m);
-                            error = "preview skin references an unavailable bone";
-                            sections_json.clear(); body.clear();
-                            return finish();
-                        }
-                        float tp[3];
-                        xform_point(bones[(size_t)bone].m, &pos[(size_t)v * 3], tp);
-                        for (int k = 0; k < 3; ++k) P[k] += tp[k] * w;
-                        if (!nrm.empty()) {
-                            float tn[3];
-                            xform_vector(bones[(size_t)bone].m, &nrm[(size_t)v * 3], tn);
-                            for (int k = 0; k < 3; ++k) N[k] += tn[k] * w;
-                        }
-                        accepted += w;
-                    }
-                    if (accepted > 1e-8f) {
-                        for (int k = 0; k < 3; ++k) pos[(size_t)v * 3 + k] = P[k] / accepted;
-                        if (!nrm.empty()) {
-                            const float len = std::sqrt(N[0] * N[0] + N[1] * N[1] + N[2] * N[2]);
-                            if (len > 1e-8f) for (int k = 0; k < 3; ++k) nrm[(size_t)v * 3 + k] = N[k] / len;
-                        }
-                    }
-                }
-            }
-            if (part.has_attach) {
-                for (int v = 0; v < s.vertex_count; ++v) {
-                    float tp[3];
-                    xform_point(part.attach, &pos[(size_t)v * 3], tp);
-                    std::memcpy(&pos[(size_t)v * 3], tp, sizeof(tp));
-                    if (!nrm.empty() && attach_normals) {
-                        const float* n = &nrm[(size_t)v * 3];
-                        double o[3];
-                        for (int k = 0; k < 3; ++k) o[k] = n[0] * nm[k] + n[1] * nm[3 + k] + n[2] * nm[6 + k];
-                        const double len = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
-                        if (len > 1e-12) for (int k = 0; k < 3; ++k) nrm[(size_t)v * 3 + k] = (float)(o[k] / len);
-                    }
-                }
-            }
-            char buf[256];
-            if (!first_section) sections_json += ',';
-            first_section = false;
-            sections_json += "{\"mesh\":"; json_str(sections_json, part.mesh);
-            sections_json += ",\"bundle\":"; json_str(sections_json, scope);
-            std::snprintf(buf, sizeof(buf), ",\"state_key\":\"%016llx\",\"vertex_count\":%d,\"index_count\":%d",
-                          (unsigned long long)s.state_key, s.vertex_count, s.index_count);
-            sections_json += buf;
-            std::snprintf(buf, sizeof(buf), ",\"positions\":%zu", body.size());
-            sections_json += buf;
-            body.insert(body.end(), pos.begin(), pos.end());
-            std::snprintf(buf, sizeof(buf), ",\"normals\":%lld", nrm.empty() ? -1LL : (long long)body.size());
-            sections_json += buf;
-            body.insert(body.end(), nrm.begin(), nrm.end());
-            std::snprintf(buf, sizeof(buf), ",\"uvs\":%lld", s.uv0 ? (long long)body.size() : -1LL);
-            sections_json += buf;
-            if (s.uv0) body.insert(body.end(), s.uv0, s.uv0 + (size_t)s.vertex_count * 2);
-            /* Indices and colours ride in the float body as exact bit patterns. */
-            std::snprintf(buf, sizeof(buf), ",\"indices\":%zu", body.size());
-            sections_json += buf;
-            const size_t at = body.size();
-            body.resize(at + (size_t)s.index_count);
-            std::memcpy(&body[at], s.indices, (size_t)s.index_count * sizeof(uint32_t));
-            std::snprintf(buf, sizeof(buf), ",\"colors\":%lld,\"decal\":%d", s.colors ? (long long)body.size() : -1LL, s.is_decal);
-            sections_json += buf;
-            if (s.colors) {
-                const size_t cat = body.size();
-                body.resize(cat + (size_t)s.vertex_count);
-                std::memcpy(&body[cat], s.colors, (size_t)s.vertex_count * sizeof(uint32_t));
-            }
-            if (m->materials && s.material >= 0 && s.material < m->material_count) {
-                const bf6_material_desc& d = m->materials[s.material];
-                std::snprintf(buf, sizeof(buf),
-                              ",\"alpha_test\":%d,\"translucent\":%d,\"alpha_from_albedo\":%d,\"nsm\":%d,"
-                              "\"terrain_decal_receiver\":%d,\"base_color\":[%.9g,%.9g,%.9g],\"roughness\":%.9g,\"textures\":[",
-                              d.alpha_test, d.translucent, d.alpha_from_albedo, d.normal_is_nsm, d.terrain_decal_receiver,
-                              d.base_color[0], d.base_color[1], d.base_color[2], d.roughness);
-                sections_json += buf;
-                for (int b = 0; b < d.texture_count; ++b) {
-                    const char* tn = bf6_texture_name_at(c, d.textures[b].texture);
-                    std::snprintf(buf, sizeof(buf), "%s[%d,%d,", b ? "," : "", (int)d.textures[b].slot, d.textures[b].texture);
-                    sections_json += buf;
-                    json_str(sections_json, tn ? tn : "");
-                    sections_json += ']';
-                }
-                sections_json += "],\"shader_textures\":[";
-                for (int b = 0; b < d.shader_texture_count; ++b) {
-                    const char* tn = bf6_texture_name_at(c, d.shader_textures[b].texture);
-                    std::snprintf(buf, sizeof(buf), "%s[%u,%d,", b ? "," : "", d.shader_textures[b].name32,
-                                  d.shader_textures[b].texture);
-                    sections_json += buf;
-                    json_str(sections_json, tn ? tn : "");
-                    sections_json += ']';
-                }
-                sections_json += ']';
-            }
-            sections_json += '}';
-        }
-        bf6_free(c, m);
-    }
-    if (first_section) error = "The configured item has no drawable geometry.";
+    char b[128];
+    std::snprintf(b, sizeof(b), "Posed soldier, %d character parts and configured weapon", parts);
+    detail = b;
     return finish();
 }

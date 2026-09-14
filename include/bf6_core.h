@@ -1382,6 +1382,52 @@ BF6_API int bf6_level_water_sims_effective(bf6_ctx*, const char* level, int isol
                                            bf6_water_sim_v2* out, int out_max,
                                            bf6_ocean_sea_state* sea_out);
 
+/* ---------------------------------------------------------- water draw tree
+ *
+ * Which tiles of the shared water patch to draw from a camera: the game's
+ * fixed-root adaptive quadtree (root 65.536 km centred on the surface bounds,
+ * max depth 12). A tile splits while its vertex spacing (width / patch_quads)
+ * is larger than one screen pixel's footprint at its distance; the worst
+ * looking tile is refined first until tile_cap is spent. Tiles outside the
+ * horizontal view are kept, refined no deeper than off_view_max_depth, so
+ * turning never opens a hole. Distance never rejects a tile.
+ *
+ * Engine neutral: metres, (x, y) is the water plane and z is up. An engine
+ * with Y up passes (x, z, y). Each tile is a square of width_m centred on
+ * `center`; draw the patch (patch_quads x patch_quads quads over one unit
+ * square) scaled by width_m. */
+typedef struct {
+    double  camera[3];                /* x, y in the plane, z up */
+    double  forward[2];               /* horizontal view direction; 0,0 = looking straight down */
+    float   horizontal_fov_degrees;
+    int32_t viewport_width;           /* pixels */
+    int32_t patch_quads;              /* 0 = 16 */
+    int32_t tile_cap;                 /* 0 = 12288 */
+    int32_t off_view_max_depth;       /* -1 = 6 */
+} bf6_water_view;
+
+typedef struct {
+    double  center[2];
+    double  width_m;
+    int32_t level;
+    int32_t in_view;
+} bf6_water_tile;
+
+typedef struct {
+    int32_t min_level, max_level;
+    double  min_spacing_m, max_spacing_m, max_tile_m;
+    int32_t hit_tile_cap;
+    int32_t refused_for_budget;       /* tiles that wanted to refine and could not afford it */
+    int32_t emitted_in_view, emitted_coarse;
+    int32_t rejected_outside_bounds, beyond_projector;
+} bf6_water_tree_stats;
+
+/* bounds = min x, min y, max x, max y of the water surface. Returns the tile
+ * count; fills up to out_max tiles (out may be null to count). */
+BF6_API int bf6_water_draw_tree(const bf6_water_view* view, const double* bounds,
+                                double height_m, bf6_water_tile* out, int out_max,
+                                bf6_water_tree_stats* stats);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

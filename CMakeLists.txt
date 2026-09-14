@@ -27,6 +27,7 @@ set(BF6_SOURCES
     src/depot.cpp
     src/destruction.cpp
     src/decals.cpp
+    src/water_tree.cpp
     src/splat.cpp
     src/terrainlayers.cpp
     src/terrainstatic.cpp
@@ -148,6 +149,12 @@ if(BF6_BUILD_CORE_TESTS)
         target_link_libraries(types_open_bench PRIVATE xaudio2 ole32)
     endif()
     # Mount snapshot parity and timing against a real installation.
+    add_executable(water_tree_test test/water_tree_test.cpp)
+    target_link_libraries(water_tree_test PRIVATE bf6_core_static)
+    target_include_directories(water_tree_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(water_tree_test PRIVATE xaudio2 ole32)
+    endif()
     add_executable(water_sea_state_test test/water_sea_state_test.cpp)
     target_link_libraries(water_sea_state_test PRIVATE bf6_core_static)
     target_include_directories(water_sea_state_test PRIVATE src include)

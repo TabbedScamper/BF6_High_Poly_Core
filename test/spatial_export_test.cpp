@@ -103,11 +103,13 @@ static bool alike(const Value& a, const Value& b, bool as_set)
     }
 }
 
-static int compare(const std::string& request_path, const std::string& official_path)
+static int compare(const std::string& request_path, const std::string& official_path, bool is_file = false)
 {
     std::string req, off;
     if (!bf6fs::read_all(request_path, req) || !bf6fs::read_all(official_path, off)) { std::printf("cannot read inputs\n"); return 2; }
-    Result r = run(req);
+    Result r;
+    if (is_file) { r.text = req; parse(req, r.json); }
+    else r = run(req);
     Value official;
     if (!parse(off, official)) { std::printf("official file is not JSON\n"); return 2; }
     std::printf("core: %zu bytes, report %s\n", r.text.size(), show(r.report).substr(0, 2000).c_str());
@@ -148,6 +150,7 @@ static int compare(const std::string& request_path, const std::string& official_
 int main(int argc, char** argv)
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc == 4 && std::string(argv[1]) == "--files") return compare(argv[2], argv[3], true);
     if (argc == 3) return compare(argv[1], argv[2]);
 
     const std::string base = bf6fs::join(bf6fs::env("TEMP"), "bf6_spatial_export_test");
@@ -212,7 +215,7 @@ int main(int argc, char** argv)
     check(patrol && patrol->find("Waypoints") && patrol->find("Waypoints")->str == "Patrol/Waypoints" && path && path->find("isClosed")->b
           && path->find("points")->arr.size() == 2 && !path->find("position"), "a waypoint path is its own entity, linked as Waypoints");
     check(!entry(j, "Portal_Dynamic", "Camera3D") && !entry(j, "Portal_Dynamic", "HiddenStuff/SpawnPoint"), "engine nodes and hidden nodes stay out");
-    check(entry(j, "Portal_Dynamic", "Dup") != nullptr, "a repeated authored id falls back to the path");
+    check(entry(j, "Portal_Dynamic", "Dup") != nullptr && entry(j, "Portal_Dynamic", "TEAM_1_HQ") == hq, "ids are paths; authored ids are dropped");
     const Value* ter = entry(j, "Static", "Static/MP_Test_Terrain");
     check(ter && ter->find("metadata/_edit_lock_") && ter->find("type")->str == "MP_Test_Terrain", "a Static entry is written as given");
     const Value* warn = r.report.find("warnings");

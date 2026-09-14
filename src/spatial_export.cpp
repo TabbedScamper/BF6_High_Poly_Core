@@ -3,8 +3,8 @@
  * The rules are the Portal SDK's own exporter's (code/gdconverter,
  * export_tscn.py and _tscn_to_json.py), taken over so the Unreal tool and the
  * Godot SDK send the site the same file for the same map:
- *   - an object's id is its authored id, else its path in the scene; a repeat
- *     falls back to the path, and a repeated path gets a suffix
+ *   - an object's id is its path in the scene (the SDK exporter drops authored
+ *     ids); a repeated path gets a suffix
  *   - only Portal types go in; anything under a node named "hidden" stays out
  *   - a selection is written by name, a link by the id of what it names, and the
  *     "linked" list says which fields are links
@@ -545,14 +545,12 @@ extern "C" int64_t bf6_spatial_export(const char* request_json, size_t len, uint
             objs.push_back(ob);
         }
 
-    // Ids: authored when unique, else the path; a repeated path gets a suffix.
+    // Ids are paths, as the SDK exporter writes them - it discards authored ids -
+    // and a repeated path gets a suffix. An authored id still names its object
+    // in a link.
     std::set<std::string> used;
     for (Obj& ob : objs) {
-        std::string id = ob.authored_id.empty() ? ob.key : ob.authored_id;
-        if (used.count(id)) {
-            if (!ob.authored_id.empty()) warnings.push_back("Duplicate id " + id + " on " + ob.key + ": it takes its path instead");
-            id = ob.key;
-        }
+        std::string id = ob.key;
         if (used.count(id)) {
             int n = 2;
             while (used.count(id + "_" + std::to_string(n))) ++n;

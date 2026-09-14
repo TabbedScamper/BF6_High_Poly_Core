@@ -1753,8 +1753,8 @@ BF6_API int64_t bf6_block_delete(const char* request_json, size_t len, uint8_t**
 /* ---------------------------------------------------------- SPATIAL EXPORT
  *
  * The .spatial.json a map uploads as, one writer for both editors, following the
- * Portal SDK's exporter (gdconverter export_tscn.py): ids are authored ids or
- * scene paths, only Portal types are written, selections by name, links by the
+ * Portal SDK's exporter (gdconverter export_tscn.py): ids are scene paths (the
+ * exporter drops authored ids), only Portal types are written, selections by name, links by the
  * id they name with a "linked" list, values equal to the type's default left
  * out (with the SDK's ObjId shim on Bomb, CapturePoint, DeployCam, RingOfFire,
  * MCOM and Sector), polygon volumes as world points and height, OBB volumes
@@ -1764,7 +1764,7 @@ BF6_API int64_t bf6_block_delete(const char* request_json, size_t len, uint8_t**
  *   "pretty" (default true: the SDK's four-space layout; false: no whitespace),
  *   "short_ids" (default false: Portal_Dynamic names and ids become a, b, ...),
  *   "objects":[{"key" (the object's path in the scene, unique; the default id),
- *     "name","type","id" (authored id, optional),"origin":[x,y,z],"basis":[9]
+ *     "name","type","id" (an authored id: names it in links only),"origin":[x,y,z],"basis":[9]
  *     (world, game space: columns x, y, z with scale),"props":{field: value},
  *     "links":{field: [..]} (optional; a link field may also sit in props),
  *     "points":[[x,y,z]..] (a polygon volume, world),"height","size":[x,y,z],

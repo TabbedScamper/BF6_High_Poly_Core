@@ -1750,6 +1750,37 @@ BF6_API int64_t bf6_block_save(const char* request_json, size_t len, uint8_t** o
 BF6_API int64_t bf6_block_load(const char* request_json, size_t len, uint8_t** out);
 BF6_API int64_t bf6_block_delete(const char* request_json, size_t len, uint8_t** out);
 
+/* ---------------------------------------------------------- SPATIAL EXPORT
+ *
+ * The .spatial.json a map uploads as, one writer for both editors, following the
+ * Portal SDK's exporter (gdconverter export_tscn.py): ids are authored ids or
+ * scene paths, only Portal types are written, selections by name, links by the
+ * id they name with a "linked" list, values equal to the type's default left
+ * out (with the SDK's ObjId shim on Bomb, CapturePoint, DeployCam, RingOfFire,
+ * MCOM and Sector), polygon volumes as world points and height, OBB volumes
+ * with a size, waypoint paths as their own entity, and a Static layer.
+ *
+ * request {"level","asset_types" (path to FbExportData/asset_types.json),
+ *   "pretty" (default true: the SDK's four-space layout; false: no whitespace),
+ *   "short_ids" (default false: Portal_Dynamic names and ids become a, b, ...),
+ *   "objects":[{"key" (the object's path in the scene, unique; the default id),
+ *     "name","type","id" (authored id, optional),"origin":[x,y,z],"basis":[9]
+ *     (world, game space: columns x, y, z with scale),"props":{field: value},
+ *     "links":{field: [..]} (optional; a link field may also sit in props),
+ *     "points":[[x,y,z]..] (a polygon volume, world),"height","size":[x,y,z],
+ *     "path":{"points":[[x,y,z]..],"closed"} (waypoints this object owns, world),
+ *     "extra":{key: value} (written as given),"static" (true: a Static layer
+ *     entry: name, extra, type, transform, id)}]}
+ * A value may be engine text: "true", "12", "Team2" or a selection index,
+ * "x,y,z", a link as "a,b". A link names an object by key, authored id, or name.
+ * Objects are written in the order given.
+ * *out: the spatial JSON (bf6_blob_free). *report, when not NULL: {"dynamic",
+ * "static","bytes","skipped":[{"key","why"}],"warnings":[..],"errors":[..]} -
+ * errors are what the SDK exporter refuses to write (a combat area too large, a
+ * RingOfFire missing its shapes, a volume under 3 points).
+ * Returns the length of *out, or -1 (the report then carries the reason). */
+BF6_API int64_t bf6_spatial_export(const char* request_json, size_t len, uint8_t** out, uint8_t** report);
+
 typedef int (*bf6_scatter_ground_fn)(void* user, double x, double z, double ref_y, int terrain_only, double* out_y);
 BF6_API int64_t bf6_scatter_layout(const char* request_json, size_t len, bf6_scatter_ground_fn ground,
                                    void* user, uint8_t** out);

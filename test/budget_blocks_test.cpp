@@ -99,6 +99,17 @@ int main()
           && objs[0].find("props")->find("Team")->str == "Team1" && objs[0].find("links")->find("InfantrySpawns")->arr[0].str == "@1",
           "basis, typed props and links come back");
 
+    // A picture beside the block is fresh until the block is saved again.
+    const std::string pic = bf6fs::join(lib, "Guard Post_.png");
+    auto no_pic = call(bf6_block_list, "{\"dirs\":[" + jq(lib) + "]}");
+    bf6fs::write_all(pic, "png");
+    auto with_pic = call(bf6_block_list, "{\"dirs\":[" + jq(lib) + "]}");
+    check(no_pic.find("blocks")->arr[0].find("thumb")->str == pic && !no_pic.find("blocks")->arr[0].find("thumb_fresh")->b
+          && with_pic.find("blocks")->arr[0].find("thumb_fresh")->b, "a block's picture sits beside it and is fresh once drawn");
+    call(bf6_block_save, save);
+    std::string gone;
+    check(!bf6fs::read_all(pic, gone), "saving the block again drops its old picture");
+
     auto again = call(bf6_block_load, "{\"dirs\":[" + jq(lib) + "],\"name\":\"Guard Post_\",\"at\":[0,0,0],\"used_ids\":[200,301,302,305]}");
     auto fresh = call(bf6_block_load, "{\"dirs\":[" + jq(lib) + "],\"name\":\"Guard Post_\",\"at\":[0,0,0],\"used_ids\":[200]}");
     check(std::string(jval_text(*again.find("objects")->arr[0].find("props")->find("ObjId"))) == "306"

@@ -1730,7 +1730,10 @@ BF6_API int64_t bf6_budget(const char* request_json, size_t len, uint8_t** out);
  * bf6_block_library: {"dir"} - the shared library both editors save to
  *   (%LOCALAPPDATA%/BF6/blocks).
  * bf6_block_list: {"dirs":[...]} -> {"blocks":[{"name","level","count","file",
- *   "format"}]}; an earlier folder wins a name clash.
+ *   "format","thumb","thumb_fresh"}]}; an earlier folder wins a name clash.
+ *   "thumb" is the block's picture beside its file (<name>.png), rendered by
+ *   whichever editor finds it missing or older than the block ("thumb_fresh"
+ *   false); load reports the same two fields, save and delete remove it.
  * bf6_block_save: {"dir","name","level","objects":[{"type","mesh","name" (its
  *   link name),"origin" (world),"basis","props","links" (names)}]} ->
  *   {"name","file","count","anchor"} or {"error"}. The anchor is the centroid on

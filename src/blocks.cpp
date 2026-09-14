@@ -266,6 +266,19 @@ bool load_block(const std::string& path, Block& b)
     return true;
 }
 
+// A block's picture sits beside its file: "<name>.png". It is fresh while it is
+// no older than the block; both editors render one when it is not.
+std::string thumb_path(const std::string& file)
+{
+    return file.size() > 5 ? file.substr(0, file.size() - 5) + ".png" : file + ".png";
+}
+
+bool thumb_fresh(const std::string& file)
+{
+    int64_t js = 0, jt = 0, ps = 0, pt = 0;
+    return bf6fs::stat_file(thumb_path(file), ps, pt) && ps > 0 && bf6fs::stat_file(file, js, jt) && pt >= jt;
+}
+
 bool find_block(const std::vector<std::string>& dirs, const std::string& name, Block& b)
 {
     const std::string safe = safe_name(name);
@@ -311,7 +324,8 @@ extern "C" int64_t bf6_block_list(const char* request_json, size_t len, uint8_t*
     for (size_t i = 0; i < blocks.size(); ++i) {
         if (i) j += ',';
         j += "{\"name\":" + q(blocks[i].name) + ",\"level\":" + q(blocks[i].level) + ",\"count\":" + std::to_string(blocks[i].members.size())
-           + ",\"file\":" + q(blocks[i].file) + ",\"format\":" + q(blocks[i].format) + "}";
+           + ",\"file\":" + q(blocks[i].file) + ",\"format\":" + q(blocks[i].format)
+           + ",\"thumb\":" + q(thumb_path(blocks[i].file)) + ",\"thumb_fresh\":" + (thumb_fresh(blocks[i].file) ? "true" : "false") + "}";
     }
     return give(j + "]}", out);
 }
@@ -373,7 +387,9 @@ extern "C" int64_t bf6_block_save(const char* request_json, size_t len, uint8_t*
         bf6fs::remove_file(staging);
         return give("{\"error\":" + q("Could not write " + file) + "}", out);
     }
-    return give("{\"name\":" + q(name) + ",\"file\":" + q(file) + ",\"count\":" + std::to_string(members.size())
+    // The old picture shows the old block.
+    bf6fs::remove_file(thumb_path(file));
+    return give("{\"name\":" + q(name) + ",\"file\":" + q(file) + ",\"thumb\":" + q(thumb_path(file)) + ",\"count\":" + std::to_string(members.size())
               + ",\"anchor\":[" + numtxt(anchor[0]) + "," + numtxt(anchor[1]) + "," + numtxt(anchor[2]) + "]}", out);
 }
 
@@ -413,7 +429,7 @@ extern "C" int64_t bf6_block_load(const char* request_json, size_t len, uint8_t*
                 taken.insert(next);
                 pr.second = std::to_string(next);
             }
-    std::string j = "{\"name\":" + q(b.name) + ",\"level\":" + q(b.level) + ",\"format\":" + q(b.format) + ",\"file\":" + q(b.file) + ",\"objects\":[";
+    std::string j = "{\"name\":" + q(b.name) + ",\"level\":" + q(b.level) + ",\"format\":" + q(b.format) + ",\"file\":" + q(b.file) + ",\"thumb\":" + q(thumb_path(b.file)) + ",\"thumb_fresh\":" + (thumb_fresh(b.file) ? "true" : "false") + ",\"objects\":[";
     for (size_t i = 0; i < b.members.size(); ++i) {
         if (i) j += ',';
         j += member_json(b.members[i], shift, (int)i);
@@ -429,6 +445,6 @@ extern "C" int64_t bf6_block_delete(const char* request_json, size_t len, uint8_
     if (!request_json || !parse(std::string(request_json, len ? len : std::strlen(request_json)), req)) return -1;
     Block b;
     const bool found = find_block(list_dirs(req), str(req.find("name")), b);
-    if (found) bf6fs::remove_file(b.file);
+    if (found) { bf6fs::remove_file(b.file); bf6fs::remove_file(thumb_path(b.file)); }
     return give(std::string("{\"deleted\":") + (found ? "true" : "false") + ",\"file\":" + q(found ? b.file : std::string()) + "}", out);
 }

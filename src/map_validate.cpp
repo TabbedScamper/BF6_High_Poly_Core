@@ -34,7 +34,7 @@ struct Link {
 
 struct Object {
     const Value* v = nullptr;
-    std::string id, name, type;
+    std::string id, name, type, catalogue_type;
 };
 
 std::string fmt(const char* f, ...)
@@ -131,6 +131,8 @@ extern "C" int64_t bf6_map_validate(const char* scene_json, size_t len, uint8_t*
             o.id = text(v.find("id"));
             o.name = text(v.find("name"));
             o.type = text(v.find("type"));
+            o.catalogue_type = text(v.find("catalogue_type"));
+            if (o.catalogue_type.empty()) o.catalogue_type = o.type;
             objects.push_back(std::move(o));
         }
     }
@@ -185,12 +187,13 @@ extern "C" int64_t bf6_map_validate(const char* scene_json, size_t len, uint8_t*
         const std::string level = text(root.find("level"));
         if (!all_types.empty())
             for (const Object& o : objects) {
-                if (o.type.empty()) continue;
-                if (!all_types.count(o.type)) {
+                const std::string& ct = o.catalogue_type;
+                if (ct.empty()) continue;
+                if (!all_types.count(ct)) {
                     if (flag(o.v->find("from_library")))
-                        add(0, o.id, fmt("'%s' is not in this SDK's catalogue at all - the game has nothing to load for it. It may have been renamed or removed in an SDK update.", o.type.c_str()));
-                } else if (!level_types.empty() && !level_types.count(o.type)) {
-                    add(1, o.id, fmt("'%s' is not listed for %s in this SDK release. It usually still loads - objects move between folders and map lists between releases - but check it in game before shipping.", o.type.c_str(), level.c_str()));
+                        add(0, o.id, fmt("'%s' is not in this SDK's catalogue at all - the game has nothing to load for it. It may have been renamed or removed in an SDK update.", ct.c_str()));
+                } else if (!level_types.empty() && !level_types.count(ct)) {
+                    add(1, o.id, fmt("'%s' is not listed for %s in this SDK release. It usually still loads - objects move between folders and map lists between releases - but check it in game before shipping.", ct.c_str(), level.c_str()));
                 }
             }
     }

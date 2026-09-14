@@ -108,10 +108,12 @@ int main()
         {"id":"b","name":"B","type":"Crate","from_library":true,"obj_id":5,"scale":[1,2,1]},
         {"id":"c","name":"C","type":"Barrel","from_library":true,"obj_id":7},
         {"id":"d","name":"D","type":"Ghost","from_library":true,"obj_id":7},
-        {"id":"e","name":"E","type":"Ghost","obj_id":-1}
+        {"id":"e","name":"E","type":"Ghost","obj_id":-1},
+        {"id":"f","name":"F","type":"Label","catalogue_type":"Crate","from_library":true}
     ]})");
     check(count(v, 1, "'Barrel' is not listed for MP_Test", "c") == 1, "a known type off the level list is a warning");
     check(count(v, 0, "'Ghost' is not in this SDK's catalogue", "d") == 1 && count(v, 0, "'Ghost'", "e") == 0, "an unknown type is a problem only from the library");
+    check(count(v, 0, "Label") == 0 && count(v, 0, "Crate", "f") == 0 && count(v, 1, "Crate", "f") == 0, "the catalogue reads catalogue_type when given");
     check(count(v, 1, "Non-uniform scale (1.00, 2.00, 1.00)", "b") == 1 && count(v, 1, "Non-uniform", "a") == 0, "non-uniform scale is a warning");
     check(count(v, 0, "ObjId 5 is used by 2 objects of the same type") == 1, "the same id in one type is a problem");
     check(count(v, 2, "ObjId 7 is shared by 2 objects of different types") == 1, "the same id across types is advice");

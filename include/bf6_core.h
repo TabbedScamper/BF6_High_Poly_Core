@@ -1600,7 +1600,8 @@ BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fi
  *    the catalogue check runs only with all_types), "upload_bytes",
  *    "upload_limit" (optional),
  *    "objects":[{"id" (the engine's handle, echoed back), "name" (the link name
- *      other objects' props use), "type", "from_library" (placed from the
+ *      other objects' props use), "type", "catalogue_type" (the name the catalogue knows
+ *      it by when that differs; default type), "from_library" (placed from the
  *      object library), "obj_id" (-1 unset), "scale":[x,y,z],
  *      "props":{prop: [link name...] | "a,b" | "legacy"},
  *      "loop":[[x,z]...] (a volume's world points, game metres), "height"}]}

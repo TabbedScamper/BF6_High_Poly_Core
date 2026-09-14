@@ -678,6 +678,26 @@ BF6_API void bf6_set_progress(bf6_ctx*, bf6_progress_fn, void* user);
 /* Mount/schema only, without the placement walk. 0 success, 1 failure. */
 BF6_API int bf6_prepare_level(bf6_ctx*, const char* level, char* err, int err_len);
 
+/* Every entry of one mounted table, for a binding that keeps its own copy of the
+ * index (the Godot reader's cache file). The callback returns 0 to continue.
+ * Values, by table:
+ *   BF6_MOUNT_EBX            name; v = chunk_id, cas_index, offset, size, declared size; bundle
+ *   BF6_MOUNT_RES            name; v = the five above, type, rid; bundle
+ *   BF6_MOUNT_LOOSE_CHUNKS   guid hex; v = chunk_id, cas_index, offset, size
+ *   BF6_MOUNT_BUNDLE_CHUNKS  as loose chunks
+ *   BF6_MOUNT_PARTITIONS     partition guid; no values; `bundle` holds "<name>.ebx"
+ * Returns the number visited, or -1. Reading BF6_MOUNT_PARTITIONS builds the
+ * partition index if it is not built yet. */
+#define BF6_MOUNT_EBX           0
+#define BF6_MOUNT_RES           1
+#define BF6_MOUNT_LOOSE_CHUNKS  2
+#define BF6_MOUNT_BUNDLE_CHUNKS 3
+#define BF6_MOUNT_PARTITIONS    4
+typedef int (*bf6_mount_visit_fn)(void* user, const char* name, int32_t name_len,
+                                  const uint64_t* v, int32_t nv,
+                                  const char* bundle, int32_t bundle_len);
+BF6_API int64_t bf6_mount_visit(bf6_ctx*, int table, bf6_mount_visit_fn fn, void* user);
+
 BF6_API int bf6_open_level(bf6_ctx*, const char* level, const char* exe_path,
                    int all_levels, char* err, int err_len);
 

@@ -102,6 +102,17 @@ partition's name and leaf before it could resolve the level root. The first few 
 now scan the mapped names without allocating, and give the same first match. The map is
 only built if a walk keeps missing.
 
+## Reading the tables from a binding
+
+`bf6_mount_visit(ctx, table, fn, user)` visits every entry of one mounted table (ebx,
+res, loose chunks, bundle chunks) or the partition index. The Godot plugin uses it to
+write its GDScript reader's own index files in Godot's Variant encoding
+(`BF6Core.write_reader_index`), so a cold Godot map open reads the index from the core
+instead of building it in script: mp_battery mount 11.0 s to 1.7 s and partition index
+7.8 s to 0.6 s. Every key and the whole partition index match the script-built index,
+and a digest of every placed row and every built mesh's texture bindings is
+unchanged on mp_battery and mp_dumbo.
+
 ## Tests
 
 - `mount_snapshot_test <game> <level>` compares a direct mount with a snapshot miss and

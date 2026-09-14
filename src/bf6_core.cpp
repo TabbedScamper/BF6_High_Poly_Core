@@ -3329,6 +3329,54 @@ int bf6_prepare_level(bf6_ctx* c, const char* level, char* err, int err_len)
     return 0;
 }
 
+int64_t bf6_mount_visit(bf6_ctx* c, int table, bf6_mount_visit_fn fn, void* user)
+{
+    if (!c || !fn) return -1;
+    int64_t n = 0;
+    bool stop = false;
+    auto emit = [&](const char* name, size_t len, const uint64_t* v, int nv, const std::string* bundle) {
+        if (stop) return;
+        if (fn(user, name, (int32_t)len, v, nv, bundle ? bundle->data() : "",
+               bundle ? (int32_t)bundle->size() : 0) != 0) stop = true;
+        else ++n;
+    };
+    switch (table) {
+    case BF6_MOUNT_EBX:
+        for (const auto& kv : c->src.ebx()) {
+            const uint64_t v[5] = { kv.second.loc.chunk_id, kv.second.loc.cas_ix, kv.second.loc.off,
+                                    kv.second.loc.size, kv.second.dsize };
+            emit(kv.first.data(), kv.first.size(), v, 5, &c->src.bundle_of_ebx(kv.first));
+            if (stop) break;
+        }
+        break;
+    case BF6_MOUNT_RES:
+        for (const auto& kv : c->src.res()) {
+            const uint64_t v[7] = { kv.second.loc.chunk_id, kv.second.loc.cas_ix, kv.second.loc.off,
+                                    kv.second.loc.size, kv.second.dsize, kv.second.type, kv.second.rid };
+            emit(kv.first.data(), kv.first.size(), v, 7, &c->src.bundle_of(kv.first));
+            if (stop) break;
+        }
+        break;
+    case BF6_MOUNT_LOOSE_CHUNKS:
+    case BF6_MOUNT_BUNDLE_CHUNKS:
+        for (const auto& kv : table == BF6_MOUNT_LOOSE_CHUNKS ? c->src.loose_chunks() : c->src.bundle_chunks()) {
+            const uint64_t v[4] = { kv.second.chunk_id, kv.second.cas_ix, kv.second.off, kv.second.size };
+            emit(kv.first.data(), kv.first.size(), v, 4, nullptr);
+            if (stop) break;
+        }
+        break;
+    case BF6_MOUNT_PARTITIONS:
+        for (const auto& kv : c->src.partition_index()) {
+            emit(kv.first.data(), kv.first.size(), nullptr, 0, &kv.second);
+            if (stop) break;
+        }
+        break;
+    default:
+        return -1;
+    }
+    return n;
+}
+
 // Copy a std::string into a fixed field, always terminated. Truncation is
 // reported by the caller's own eyes rather than silently: the fields are sized
 // well past the longest name in the game (a VE partition path is about 60).

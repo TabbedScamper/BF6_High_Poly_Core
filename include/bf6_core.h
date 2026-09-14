@@ -1558,6 +1558,37 @@ BF6_API int  bf6_decal_draws_get(const bf6_decal_draws*, int index, bf6_decal_dr
 BF6_API int  bf6_decal_draws_stats(const bf6_decal_draws*, bf6_decal_draw_stats* out);
 BF6_API void bf6_decal_draws_free(bf6_decal_draws*);
 
+/* ---------------------------------------------------------- loadout
+ *
+ * What a LootSpawner can drop and how it looks, for every engine. All three
+ * mount the front end first (bf6_mount_frontend) and return a core-allocated
+ * record in *out (bf6_blob_free), or -1.
+ *
+ * bf6_loadout_catalogue: JSON {"items":[{"id","label","group","asset"}]}.
+ *   id is <class>/<name> (e.g. "carbine/m4a1"); group is Weapon, Gadget or
+ *   Throwable; labels are the game's localised weapon names where it has one.
+ *
+ * bf6_loadout_attachments: JSON {"item","attachments":[{"id","label","slot",
+ *   "bundle","description","icon_atlas","icon_index"}]}. `portal_enums` is the
+ *   Portal WeaponAttachmentsItem enum, newline-separated (e.g. Muzzle_...). An
+ *   attachment is offered only when its catalogue row joins exactly one part
+ *   token and exactly one enum; id is that enum, slot the three-letter code.
+ *
+ * bf6_loadout_weapon: the configured weapon's geometry, skinned by the
+ * configured palette and placed by each part's attach transform, in game
+ * space. `fits` is "slot=enum" lines over the factory configuration (empty =
+ * factory). Record: u32 'BLWP', u32 1, u32 json bytes, JSON (space padded to 4),
+ * then a float body. JSON {"item","error","sections":[{"mesh","bundle",
+ * "state_key" (hex; resolve against "bundle"), "vertex_count","index_count",
+ * "positions","normals","uvs","indices" (float offsets into the body, -1 when
+ * absent; indices are uint32 bit patterns), "alpha_test","translucent",
+ * "alpha_from_albedo","nsm","base_color","roughness","textures":[[slot, id,
+ * name]]}],"anchors":{"scp":[x,y,z],...}}. A non-empty error means no weapon. */
+BF6_API int64_t bf6_loadout_catalogue(bf6_ctx*, uint8_t** out);
+BF6_API int64_t bf6_loadout_attachments(bf6_ctx*, const char* item_id, const char* portal_enums, uint8_t** out);
+BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fits,
+                                   const char* portal_enums, uint8_t** out);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

@@ -1428,6 +1428,68 @@ BF6_API int bf6_water_draw_tree(const bf6_water_view* view, const double* bounds
                                 double height_m, bf6_water_tile* out, int out_max,
                                 bf6_water_tree_stats* stats);
 
+/* ---------------------------------------------------------- terrain mesh
+ *
+ * The ground both engines draw, built from a heightfield (bf6_read_terrain):
+ * a base grid of `base_side` samples a side (default 2049; the native step is
+ * (size-1)/(base_side-1)), cut into tiles of `tile_quads` base cells (default
+ * 128). When the native step is a power of two, each base cell is refined by
+ * halving until every native sample it covers lies within 0.50 m (cells over
+ * 2 m), 0.25 m (over 1 m) or 0.10 m of the cell's bilinear plane. A coarse cell
+ * next to a finer one takes the finer one's edge points, so tiles and cells
+ * meet with no cracks and no skirts.
+ *
+ * Positions are GAME space metres (x across, y up, z along); height is
+ * raw * height_scale / 65536 with no offset. Normals are the heightfield's
+ * central differences at native resolution, so they agree across tiles. UV is
+ * (sx, sz) / (size - 1). An engine that swaps axes applies the same
+ * permutation to positions and normals. The default winding is the Unreal
+ * plugin's; flip_winding reverses every triangle.
+ *
+ * The mesh BORROWS `heights`: keep them alive until bf6_terrain_mesh_free.
+ * Tiles can be built from several threads at once (distinct indices). */
+typedef struct {
+    int32_t base_side;      /* 0 = 2049 */
+    int32_t tile_quads;     /* 0 = 128 */
+    int32_t flip_winding;
+} bf6_terrain_mesh_options;
+
+typedef struct bf6_terrain_mesh bf6_terrain_mesh;
+
+typedef struct {
+    int32_t native_size, base_side, native_step, tile_quads, tiles_per_side;
+    int32_t base_cells, max_level, adaptive;
+    double  native_spacing_m, base_spacing_m, finest_spacing_m;
+    double  height_per_unit;          /* metres per raw height unit */
+    int64_t cells_by_level[8];        /* level 0 = base spacing */
+} bf6_terrain_mesh_info;
+
+typedef struct {
+    int32_t tile_x, tile_z;
+    int32_t vertex_count, index_count;
+    const float*    positions;        /* xyz, game metres */
+    const float*    normals;          /* xyz, game space */
+    const float*    uvs;              /* uv */
+    const uint32_t* indices;
+} bf6_terrain_tile;
+
+BF6_API bf6_terrain_mesh* bf6_terrain_mesh_build(const uint16_t* heights, int32_t size,
+                                                 const double* world_min, const double* world_max,
+                                                 float height_scale,
+                                                 const bf6_terrain_mesh_options* options);
+BF6_API int  bf6_terrain_mesh_describe(const bf6_terrain_mesh*, bf6_terrain_mesh_info* out);
+/* Tile `index` is tile_z * tiles_per_side + tile_x. Returns 1 with the tile's
+ * arrays (owned by the mesh, valid until released or freed), 0 for an empty
+ * tile. */
+BF6_API int  bf6_terrain_mesh_tile(bf6_terrain_mesh*, int32_t index, bf6_terrain_tile* out);
+BF6_API void bf6_terrain_mesh_release_tile(bf6_terrain_mesh*, int32_t index);
+/* Height in metres of the drawn surface at game (x, z): what decals drape on. */
+BF6_API double bf6_terrain_mesh_height_at(const bf6_terrain_mesh*, double x, double z);
+/* Each base cell's refinement level (0 = base spacing), row-major over
+ * base_cells x base_cells. Returns the cell count; fills up to out_max. */
+BF6_API int64_t bf6_terrain_mesh_cell_levels(const bf6_terrain_mesh*, uint8_t* out, int64_t out_max);
+BF6_API void bf6_terrain_mesh_free(bf6_terrain_mesh*);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

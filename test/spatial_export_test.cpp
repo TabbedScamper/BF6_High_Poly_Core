@@ -227,6 +227,9 @@ int main(int argc, char** argv)
     check(restricted && wrong && r.report.find("skipped")->arr.size() == 2, "the report names restrictions, dropped links and skipped objects");
     check(r.text.find("{\n    \"Portal_Dynamic\": [\n        {\n            \"name\": \"TEAM_1_HQ\"") == 0, "the SDK's four-space layout");
     check(r.text.find("0.70710677") != std::string::npos, "a float stays as short as the scene wrote it");
+    Result printed = run(head + R"("objects":[{"key":"S","type":"SpawnPoint","origin":[0.101055979728699,285.191009521484,0.5]}]})");
+    check(printed.text.find("\"x\": 0.10105598,") != std::string::npos && printed.text.find("\"y\": 285.191,") != std::string::npos
+          && printed.text.find("\"z\": 0.5") != std::string::npos, "a float printed to 15 digits comes back to its own short text");
 
     Result m = run(head + "\"pretty\":false,\"short_ids\":true," + objects);
     const Value* mhq = entry(m.json, "Portal_Dynamic", "a");

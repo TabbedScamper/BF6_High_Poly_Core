@@ -189,10 +189,12 @@ std::string number_text(double v)
         std::snprintf(b, sizeof(b), "%lld", (long long)v);
         return b;
     }
+    // A float as an editor's scene holds it, even when it arrives printed to 15
+    // digits (0.101055979728699 is the float 0.10105598).
     const float f = (float)v;
-    if ((double)f == v) {
+    if (std::fabs(v) < 3.0e38 && std::fabs((double)f - v) <= std::fabs(v) * 1e-13) {
         for (int p = 6; p <= 9; ++p) {
-            std::snprintf(b, sizeof(b), "%.*g", p, v);
+            std::snprintf(b, sizeof(b), "%.*g", p, (double)f);
             if ((float)std::strtod(b, nullptr) == f) return b;
         }
     }

@@ -757,8 +757,8 @@ extern "C" int64_t bf6_spatial_export(const char* request_json, size_t len, uint
     }
 
     // Unreal's minifier: every Portal_Dynamic name and id becomes a, b, ... aa.
+    std::map<std::string, std::string> map;
     if (short_ids) {
-        std::map<std::string, std::string> map;
         int n = 1;
         for (Out& e : dynamic.a) if (Out* id = e.get("id"); id && id->k == Out::Str && !map.count(id->s)) map[id->s] = short_name(n++);
         auto rename = [&](Out& v) { if (v.k == Out::Str) if (auto it = map.find(v.s); it != map.end()) v.s = it->second; };
@@ -792,7 +792,10 @@ extern "C" int64_t bf6_spatial_export(const char* request_json, size_t len, uint
             if (i) r.push_back(',');
             r += "{\"key\":"; quote(r, skipped[i].first); r += ",\"why\":"; quote(r, skipped[i].second); r += "}";
         }
-        r += "],\"warnings\":";
+        r += "],\"short_ids\":{";
+        bool first = true;
+        for (const auto& kv : map) { if (!first) r.push_back(','); first = false; quote(r, kv.first); r.push_back(':'); quote(r, kv.second); }
+        r += "},\"warnings\":";
         json_list(r, warnings);
         r += ",\"errors\":";
         json_list(r, errors);

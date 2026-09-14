@@ -228,8 +228,9 @@ int main(int argc, char** argv)
     Result m = run(head + "\"pretty\":false,\"short_ids\":true," + objects);
     const Value* mhq = entry(m.json, "Portal_Dynamic", "a");
     check(mhq && mhq->find("name")->str == "a" && mhq->find("HQArea")->str == "b" && mhq->find("InfantrySpawns")->arr[0].str == "c"
-          && m.text.find('\n') == std::string::npos && m.text.size() < r.text.size() / 2,
-          "minified: no whitespace, short names and ids, links renamed with them");
+          && m.text.find('\n') == std::string::npos && m.text.size() < r.text.size() / 2
+          && m.report.find("short_ids") && m.report.find("short_ids")->find("TEAM_1_HQ") && m.report.find("short_ids")->find("TEAM_1_HQ")->str == "a",
+          "minified: no whitespace, short names and ids, links renamed with them, the map reported");
 
     Result big = run(head + R"("objects":[{"key":"CA","type":"CombatArea","props":{"CombatVolume":"V"}},
         {"key":"V","type":"PolygonVolume","points":[[0,0,0],[5000,0,0],[5000,0,5000],[0,0,5000]]},

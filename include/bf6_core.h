@@ -1775,7 +1775,8 @@ BF6_API int64_t bf6_block_delete(const char* request_json, size_t len, uint8_t**
  * "x,y,z", a link as "a,b". A link names an object by key, authored id, or name.
  * Objects are written in the order given.
  * *out: the spatial JSON (bf6_blob_free). *report, when not NULL: {"dynamic",
- * "static","bytes","skipped":[{"key","why"}],"warnings":[..],"errors":[..]} -
+ * "static","bytes","skipped":[{"key","why"}],"short_ids":{id: short name},
+ * "warnings":[..],"errors":[..]} -
  * errors are what the SDK exporter refuses to write (a combat area too large, a
  * RingOfFire missing its shapes, a volume under 3 points).
  * Returns the length of *out, or -1 (the report then carries the reason). */

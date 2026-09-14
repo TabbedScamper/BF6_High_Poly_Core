@@ -40,6 +40,12 @@ static bf6json::Value call(int64_t (*fn)(const char*, size_t, uint8_t**), const 
     return v;
 }
 
+static std::string jval_text(const bf6json::Value& v)
+{
+    if (v.type == bf6json::Value::Num) { char b[32]; std::snprintf(b, sizeof(b), "%g", v.num); return b; }
+    return v.is_str() ? v.str : std::string();
+}
+
 static bool close_to(double a, double b, double eps = 1e-6) { return std::fabs(a - b) < eps; }
 
 int main()
@@ -92,6 +98,12 @@ int main()
     check(objs.size() == 2 && objs[1].find("basis")->arr[2].num == -1 && objs[0].find("props")->find("ObjId")->num == 301
           && objs[0].find("props")->find("Team")->str == "Team1" && objs[0].find("links")->find("InfantrySpawns")->arr[0].str == "@1",
           "basis, typed props and links come back");
+
+    auto again = call(bf6_block_load, "{\"dirs\":[" + jq(lib) + "],\"name\":\"Guard Post_\",\"at\":[0,0,0],\"used_ids\":[200,301,302,305]}");
+    auto fresh = call(bf6_block_load, "{\"dirs\":[" + jq(lib) + "],\"name\":\"Guard Post_\",\"at\":[0,0,0],\"used_ids\":[200]}");
+    check(std::string(jval_text(*again.find("objects")->arr[0].find("props")->find("ObjId"))) == "306"
+          && std::string(jval_text(*fresh.find("objects")->arr[0].find("props")->find("ObjId"))) == "301",
+          "a copy takes the next free ObjId in its hundred, and keeps a free one");
 
     // The Unreal tool's first format: centimetres, a rotator, props as tags.
     bf6fs::make_dirs(legacy);

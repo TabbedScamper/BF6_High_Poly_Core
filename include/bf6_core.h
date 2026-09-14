@@ -1736,9 +1736,10 @@ BF6_API int64_t bf6_budget(const char* request_json, size_t len, uint8_t** out);
  *   {"name","file","count","anchor"} or {"error"}. The anchor is the centroid on
  *   the ground plane at the lowest point (a zone counts by its points); links
  *   to members become "@i".
- * bf6_block_load: {"dirs","name","at":[x,y,z]} -> {"name","level","format",
- *   "file","objects":[{"index", ...the object with origin in world space}]} or
- *   {"error"}.
+ * bf6_block_load: {"dirs","name","at":[x,y,z],"used_ids":[...]} ->
+ *   {"name","level","format","file","objects":[{"index", ...the object with
+ *   origin in world space}]} or {"error"}. An ObjId the level already uses moves
+ *   to the next free one in its hundred.
  * bf6_block_delete: {"dirs","name"} -> {"deleted","file"}. */
 BF6_API int64_t bf6_block_library(uint8_t** out);
 BF6_API int64_t bf6_block_list(const char* request_json, size_t len, uint8_t** out);

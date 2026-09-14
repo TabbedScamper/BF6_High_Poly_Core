@@ -388,6 +388,31 @@ extern "C" int64_t bf6_block_load(const char* request_json, size_t len, uint8_t*
         return give("{\"error\":" + q("Block '" + str(req.find("name")) + "' could not be read.") + "}", out);
     const std::vector<double> at = nums(req.find("at"), 3, 0.0);
     const double shift[3] = {at[0], at[1], at[2]};
+
+    // A copy never repeats an ObjId the level already uses: a colliding one
+    // moves to the next free id in its hundred (flags stay in the 200s).
+    std::set<int> taken;
+    if (const Value* used = req.find("used_ids"); used && used->is_arr())
+        for (const Value& u : used->arr) if (u.type == Value::Num) taken.insert((int)u.num);
+    if (!taken.empty())
+        for (Member& m : b.members)
+            for (auto& pr : m.props) {
+                if (pr.first != "ObjId") continue;
+                std::string txt = pr.second;
+                if (txt.size() >= 2 && txt.front() == '"') txt = txt.substr(1, txt.size() - 2);
+                char* end = nullptr;
+                const long id = std::strtol(txt.c_str(), &end, 10);
+                if (txt.empty() || (end && *end)) continue;
+                int next = (int)id;
+                if (taken.count(next)) {
+                    const int band = (int)(id / 100) * 100;
+                    next = band;
+                    for (int u : taken) if (u >= band && u < band + 100) next = std::max(next, u + 1);
+                    if (next >= band + 100 || taken.count(next)) next = *taken.rbegin() + 1;
+                }
+                taken.insert(next);
+                pr.second = std::to_string(next);
+            }
     std::string j = "{\"name\":" + q(b.name) + ",\"level\":" + q(b.level) + ",\"format\":" + q(b.format) + ",\"file\":" + q(b.file) + ",\"objects\":[";
     for (size_t i = 0; i < b.members.size(); ++i) {
         if (i) j += ',';

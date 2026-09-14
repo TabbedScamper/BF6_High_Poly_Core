@@ -1612,6 +1612,53 @@ BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fi
  * Returns its length, or -1 for unreadable input. */
 BF6_API int64_t bf6_map_validate(const char* scene_json, size_t len, uint8_t** out);
 
+/* ---------------------------------------------------------- mode setup
+ *
+ * bf6_mode_plan: what MODE SETUP and its one-click pieces build, so both SDK
+ * editors place the same objects, names, ObjIds and links. Request JSON (len 0 =
+ * NUL-terminated), by "op":
+ *   {"op":"bundles"} -> {"bundles":[{"key","label","sub"}]}
+ *   {"op":"bundle","key":"HQ1"|"HQ2"|"FLAG"|"SECTOR"|"MCOM","at":[x,y,z],
+ *    "used_ids":[ObjId...]} -> a plan; ids come from the next free number in
+ *    the community bands (flags 200, sectors 100, HQs 301, MCOMs 400).
+ *   {"op":"wizard","mode":"Conquest"|"Breakthrough","count","step"} -> {"mode",
+ *    "count","total","step","done","title","body","step_label","finish_clean",
+ *    "finish_problems" ({n} and {s} to fill)}; with "at" and "flags":[{"name",
+ *    "at"}] (the flags or objectives placed so far in this sector) it also
+ *    returns "plan" for this step, "record_flag" (add plan.root and at to
+ *    flags), "reset_flags" (a sector was wired; start a new list) and
+ *    "finishes" (the last step: run the checks).
+ * A plan: {"root" (the name to select),"objects":[{"key","type","name",
+ *   "parent" (a key, or ""),"at":[x,y,z] world game metres,"facing":[x,z] (the
+ *   object's local +X on the ground: Unreal yaw atan2(z,x), Godot rotation.y
+ *   its negative),"props":{name:number} (Team and AltTeam are team numbers),
+ *   "links":{prop:[key or "@name" of an object in this plan or the level]},
+ *   "volume":{"height","points":[[x,z]...] local}}]}, owners before children.
+ * Record in *out (bf6_blob_free); returns its length, or -1. */
+BF6_API int64_t bf6_mode_plan(const char* request_json, size_t len, uint8_t** out);
+
+/* ---------------------------------------------------------- scatter
+ *
+ * bf6_scatter_layout: SCATTER's placements, the same pattern for a seed in both
+ * editors. Request JSON: {"shape" 0 circle|1 square|2 ring|3 drawn|4 painted,
+ * "center":[x,y,z],"radius","count" (1..1000),"rotation" (yaw arc, degrees),
+ * "wobble_x","wobble_y" (lean arcs),"elevation" (+/- metres),"vary" (+/- size
+ * fraction),"seed","follow_terrain","terrain_only","pool" (source count; 0 =
+ * copies of the selection),"unit_width" (widest source, metres; spacing),
+ * "keep_center" (default pool == 0),"poly":[[x,y,z]...] (shape 3),
+ * "strokes":[{"radius","stamps":[[x,y,z]...]}] (shape 4)}. World game metres.
+ * ground(user, x, z, ref_y, terrain_only, &y) answers what is under a point,
+ * searching down from ref_y: nonzero with *y on a hit. With terrain_only a miss
+ * skips the copy; otherwise a miss keeps ref_y. May be NULL.
+ * Record in *out (bf6_blob_free): JSON {"targets":[{"at":[x,y,z],"yaw",
+ * "tilt_x","tilt_y" (degrees, Unreal's sense about up, forward and right;
+ * Godot negates them),"scale","pool" (-1 = the selection)}]} plus, for shape 4,
+ * "cell" and "cells":[[i,k]...] (the painted area, cell * index in x and z).
+ * Returns its length, or -1. */
+typedef int (*bf6_scatter_ground_fn)(void* user, double x, double z, double ref_y, int terrain_only, double* out_y);
+BF6_API int64_t bf6_scatter_layout(const char* request_json, size_t len, bf6_scatter_ground_fn ground,
+                                   void* user, uint8_t** out);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

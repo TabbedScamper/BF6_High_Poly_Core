@@ -50,10 +50,16 @@ void load_costs(const std::string& path)
                     const std::string type = str(row.find("type"));
                     if (type.empty()) continue;
                     int cost = 0;
+                    std::string mesh;
                     if (const Value* k = row.find("constants"); k && k->is_arr())
-                        for (const Value& con : k->arr)
-                            if (str(con.find("name")) == "physicsCost") cost = (int)num(con.find("value"), 0);
+                        for (const Value& con : k->arr) {
+                            const std::string name = str(con.find("name"));
+                            if (name == "physicsCost") cost = (int)num(con.find("value"), 0);
+                            else if (name == "mesh") mesh = str(con.find("value"));
+                        }
                     c.cost[type] = cost;
+                    // An object known only by its mesh costs what its type does.
+                    if (!mesh.empty() && !c.cost.count(mesh)) c.cost[mesh] = cost;
                 }
     }
     g_costs = std::move(c);

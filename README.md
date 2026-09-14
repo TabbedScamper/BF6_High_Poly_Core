@@ -52,4 +52,21 @@ cmake -S . -B out-build -A x64 -DBF6_BUILD_TOOLS=ON
   `bf6_core.cpp`).
 - `ui_runtime/` - installed UI sound playback used by the core, plus UI runtime pieces
   used by tools.
+- `viewer/` - the standalone native viewer and its UI adapters (tools build only).
+- `third_party/imgui/` - Dear ImGui with its Win32 and Direct3D 11 backends, for the
+  viewer only (MIT, `third_party/imgui/LICENSE.txt`).
 - `test/`, `probes/`, `tools/` - validation and packaging tooling.
+
+## Using the core from an engine
+
+Each engine repository carries this repository as a git submodule, pinned to a
+commit, rather than a copy of its files:
+
+- Godot plugin: `core/`. `native/build.bat` builds `bf6_core` from it and links the
+  binding against the result.
+- Unreal SDK: `Source/ThirdParty/libbf6/core/`. `Tools/build-core.ps1` builds a
+  package from it and stages `include/` and `bin/Win64/` beside it.
+
+To upgrade both engines, commit here, then move each submodule to that commit and
+rebuild. `tools/build_core_package.py` records the source commit in
+`reader-manifest.json`, so a staged binary names the core it came from.

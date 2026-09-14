@@ -61,6 +61,73 @@ BF6_API int bf6_decode_vertex_attribute(const uint8_t* data, int64_t data_bytes,
     int64_t first, int64_t stride, int32_t count, int32_t format,
     float* out, int64_t out_capacity);
 
+/* RENDERABLE MESHSET SECTIONS, stateless and engine-neutral.
+ *
+ * Decodes one LOD of a MeshSet RES payload with the Godot add-on's reader rules:
+ * `lod` indexes the LODs that parse (not the stored LOD number); shadow, zonly
+ * and depth sections are dropped unless KEEP_SHADOW; UVs are TexCoord0; uv2 is
+ * the declB TexCoord4 unwrap (or the second declared set); indices are
+ * section-local, winding-swapped, with degenerate and out-of-range triangles
+ * dropped. `chunk` is the LOD's [vertex buffer][index buffer], or NULL/0 for an
+ * inline MeshSet. Thread-safe; retains nothing.
+ *
+ * *out receives a record (free with bf6_blob_free); returns its length or -1.
+ * All values little-endian, 4-byte aligned:
+ *   u32 magic 'BMSL' (0x4C534D42), u32 version 1, u32 section_count, str error
+ *   per section:
+ *     str material, u64 state_key, u32 material_id, u32 vertex_count (V),
+ *     u32 present (1 normals, 2 uv2, 4 parts, 8 palette), u32 uv2_src
+ *     (0 none, 1 uv0, 2 tc4, 3 second), u32 uv_rule (0 none, 1 unique.tc0,
+ *     2 carpaint.tc0, 3 default.tc0), s32 uv_usage, u32 pal_mask,
+ *     u32 uv_set_count, u32 usages[uv_set_count],
+ *     f32 positions[3V], f32 uvs[2V], [f32 normals[3V]], [f32 uv2[2V]],
+ *     u32 index_count, s32 indices[index_count], [s32 parts[V]],
+ *     [u8 palette[V] padded to 4], u32 uv_all_count,
+ *     uv_all_count x (u32 usage, f32 uv[2V])  (all sets when KEEP_ALL_UVS or car paint)
+ *   str = u32 length, bytes, padded to 4. */
+#define BF6_MESHSET_KEEP_SHADOW   0x1
+#define BF6_MESHSET_KEEP_ALL_UVS  0x2
+BF6_API int64_t bf6_meshset_sections(const uint8_t* res, int64_t res_len, int lod,
+    const uint8_t* chunk, int64_t chunk_len, int flags, uint8_t** out);
+
+/* MERGED SURFACES from the same sections: one surface per shader state key, or
+ * per canonical colour where a palette split applies; triangles whose first
+ * vertex's destruction part is in `hidden` are dropped; an attribute is kept only
+ * when every section feeding the surface carries it (uv2 only for a real
+ * TexCoord4 unwrap). Caller decisions from the depot:
+ *   uv_overrides   (section index, texcoord usage) pairs: car paint wrap channel
+ *   canon_keys/tables  per state key, 8 canonical colour groups for its entries
+ * Record (free with bf6_blob_free), little-endian, 4-byte aligned:
+ *   u32 magic 'BMSF' (0x46534D42), u32 version 1, u32 surface_count,
+ *   u32 section_count, str error,
+ *   per section: str material, u64 state_key, u32 vertex_count, u32 uv_rule,
+ *     s32 uv_usage, u32 uv_set_count, u32 usages[uv_set_count]
+ *   u32 key_count, key_count x (u64 state_key, u32 selected-entry mask; 0 unusable)
+ *   u32 split_count, u64 split_keys[split_count]
+ *   per surface: str name ("<key>" or "<key>@e1,e2"), u32 vertex_count (V),
+ *     u32 present (1 normals, 2 uvs, 4 uv2), f32 positions[3V], [f32 normals[3V]],
+ *     [f32 uvs[2V]], [f32 uv2[2V]], u32 index_count, s32 indices[index_count] */
+BF6_API int64_t bf6_meshset_surfaces(const uint8_t* res, int64_t res_len, int lod,
+    const uint8_t* chunk, int64_t chunk_len, int flags,
+    const int32_t* hidden, int32_t hidden_count,
+    const int32_t* uv_overrides, int32_t uv_override_count,
+    const int64_t* canon_keys, const uint8_t* canon_tables, int32_t canon_count,
+    uint8_t** out);
+
+/* The same surfaces from a mesh reference record (bf6_mesh_reference): the RES
+ * and geometry chunk are read by location from the installation and the
+ * record's hidden destruction parts are applied. No context; thread-safe.
+ * Returns -2 when `lod` is not the LOD the record located. */
+/* Many CAS references read and decompressed at once on a persistent worker pool.
+ * spec: one "path<TAB>offset<TAB>size" line per reference (an empty or invalid line
+ * yields an empty entry). Record in *out (bf6_blob_free): u32 'BCRB' (0x42524342),
+ * u32 count, then per line u32 length and bytes padded to 4. Thread-safe. */
+BF6_API int64_t bf6_cas_read_batch(const char* game_dir, const char* spec, uint8_t** out);
+
+BF6_API int64_t bf6_meshset_surfaces_reference(const char* game_dir, const uint8_t* record,
+    int64_t record_len, int lod, int flags, const int32_t* uv_overrides, int32_t uv_override_count,
+    const int64_t* canon_keys, const uint8_t* canon_tables, int32_t canon_count, uint8_t** out);
+
 /* Open an install: mount, read the type schema, and OOA-lift the executable in
  * memory if it is DRM-wrapped (EA App). All storefront divergence lives behind
  * this one call. Returns NULL on failure and writes a reason into err.
@@ -5492,6 +5559,39 @@ BF6_API int  bf6_precache_build_wait(bf6_precache*);
 /* 1 when every level of the last started build is complete for this key. */
 BF6_API int bf6_precache_ready(bf6_precache*);
 BF6_API int bf6_precache_map_ready(bf6_precache*, const char* level);
+
+/* READING A BUILT CACHE. The mesh reference record a level's placements use for
+ * a mesh resource (e.g. ".../foo_mesh"); returns its length and a record in *out
+ * (bf6_blob_free), 0 when the cache has none, -1 on error. */
+BF6_API int64_t bf6_precache_mesh_record(bf6_precache*, const char* level, const char* mesh_res, uint8_t** out);
+/* The exact record for one placement scope: the mesh resource, its placing
+ * bundle and its variation, as bf6_level_instances reports them (NULL or "" for
+ * none). Decode with bf6_mesh_decode_reference. Returns its length, 0 when the
+ * cache has none, -1 on error; *out is freed with bf6_blob_free. */
+BF6_API int64_t bf6_precache_mesh_record_scoped(bf6_precache*, const char* mesh_res, const char* placing_bundle,
+                                                const char* variation, uint8_t** out);
+/* A texture's reference record (bf6_texture_reference), for
+ * bf6_texture_decode_reference. Same return convention. */
+BF6_API int64_t bf6_precache_texture_record(bf6_precache*, const char* texture_res, uint8_t** out);
+/* Merged surfaces (bf6_meshset_surfaces_reference, no depot decisions) for many
+ * meshes of one level at once, decoded on `threads` workers (0: all cores).
+ * mesh_names is newline-separated. Record in *out (bf6_blob_free):
+ *   u32 magic 'BMSB' (0x42534D42), u32 count, then per name in order:
+ *   s64 length (0 not cached, -1 failed, -2 other LOD), then that many bytes of a
+ *   bf6_meshset_surfaces record, padded to 4. */
+BF6_API int64_t bf6_precache_mesh_surfaces(bf6_precache*, const char* level, const char* mesh_names,
+                                           int lod, int threads, uint8_t** out);
+/* The texture resource names the given meshes' records use, unique, in first-use
+ * order, newline-separated (a text record in *out; bf6_blob_free). */
+BF6_API int64_t bf6_precache_mesh_texture_names(bf6_precache*, const char* level, const char* mesh_names, uint8_t** out);
+/* For each newline-separated texture name: its header resource and the payload
+ * chunk a decoder capped at max_dim reads first (the streamed mip0 chunk unless
+ * the texture exceeds the cap or has none, then the embedded chain), decompressed,
+ * read on `threads` workers. Record in *out (bf6_blob_free), 4-byte aligned:
+ *   u32 'BTXB' (0x42585442), u32 count, per name: str name, str header,
+ *   str chunk guid (hex as stored in the header; empty when unavailable), str chunk
+ *   where str = u32 length, bytes, padding. */
+BF6_API int64_t bf6_precache_texture_chunks(bf6_precache*, const char* texture_names, int max_dim, int threads, uint8_t** out);
 
 typedef struct {
     int32_t struct_size;          /* set to sizeof(bf6_precache_progress) */

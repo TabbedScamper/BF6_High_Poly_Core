@@ -51,7 +51,7 @@ int main(int argc, char** argv)
         rotated += std::string(assault[0].abilities[i].id) == expected[(i + 1) % 4];
     }
     const int fake = bf6_field_upgrade_paths(
-        context, "codex_fake_role", nullptr, 0);
+        context, "absent_fake_role", nullptr, 0);
     std::printf("paths=%d abilities=%d named=%d exact=%d rotated=%d fake=%d\n",
                 paths, abilities, named, exact, rotated, fake);
     bf6_close(context);

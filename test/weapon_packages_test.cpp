@@ -22,7 +22,7 @@ int main(int argc, char** argv)
     for (const bf6_weapon_package_row& row : rows)
         std::printf("package\t%d\t%s\t%s\t%s\n", row.ordinal, row.key,
                     row.name, row.icon_asset);
-    const int fake = bf6_weapon_packages(c, "codex_fake_weapon_7f93", nullptr, 0);
+    const int fake = bf6_weapon_packages(c, "absent_fake_weapon_7f93", nullptr, 0);
     const bool factoryFirst = !rows.empty() &&
         (std::string(rows[0].name) == "Factory" || std::string(rows[0].key) == "Factory");
     std::printf("m4a1 rows=%d/%d factory-first=%d; fake=%d (negative control)\n",
@@ -65,7 +65,7 @@ int main(int argc, char** argv)
                     config.ordinal, pn, signature.size());
     }
     const int fakeConfig = bf6_weapon_package_configs(
-        c, "common/hardware/weapons/carbine/m4a1/equipment_codex_fake", nullptr, 0);
+        c, "common/hardware/weapons/carbine/m4a1/equipment_absent_fake", nullptr, 0);
     std::printf("gameplay assemblies=%d/%d unique=%zu configured=%d presentations=%zu; fake=%d control\n",
                 cn, cgot, identities.size(), configured, presentations.size(), fakeConfig);
     bf6_close(c);

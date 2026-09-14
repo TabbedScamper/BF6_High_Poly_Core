@@ -52,7 +52,7 @@ int main(int argc, char** argv)
                     svg.canvas[0], svg.canvas[1], ok ? 1 : 0);
     }
     const int fake = bf6_rime_texture_id(
-        context, "common/ui/assets/images/classes/codex_fake_class_icon");
+        context, "common/ui/assets/images/classes/absent_fake_class_icon");
     const char* vehicleIcon =
         "common/ui/assets/images/classes/t_ui_iconvehicles";
     bf6_rime_svg_info vehicleSvg{};
@@ -104,7 +104,7 @@ int main(int argc, char** argv)
     }
     const int fakeDbd = bf6_rime_dbd_fields(
         context, "common/ui/loadout/shared/assets/databindings/"
-                 "codex_fake_loadoutclassdbd",
+                 "absent_fake_loadoutclassdbd",
         nullptr, 0, nullptr, 0);
     std::printf("dbds=%d/%zu fake-dbd=%d\n", dbdDecoded,
                 std::size(dbds), fakeDbd);

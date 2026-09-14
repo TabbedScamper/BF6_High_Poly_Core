@@ -11,5 +11,7 @@ derived from it, must retain this NOTICE file and give visible credit to
 screen, as required by section 4(d) of the Apache License, Version 2.0.
 
 Third-party components:
-- None bundled. src/json.hpp is this project's own minimal JSON parser.
+- Dear ImGui (third_party/imgui), MIT License, Copyright (c) 2014-2024 Omar Cornut.
+  Used only by the standalone viewer; it is not part of bf6_core.dll.
+- src/json.hpp is this project's own minimal JSON parser.
 - Oodle is not included; it is loaded at runtime from the user's own Battlefield 6 installation.

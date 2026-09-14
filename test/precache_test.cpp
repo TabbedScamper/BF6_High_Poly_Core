@@ -107,7 +107,7 @@ int main(int argc, char** argv)
     // ---- C API end to end with the self-test layers
     const std::string root = (scratch / "root").u8string();
     char e[256] = {};
-    bf6_precache* c = bf6_precache_open_identity("identity-one", root.c_str(), e, sizeof e);
+    bf6_precache* c = bf6_precache_open_identity("bf6-cache-source-v1:rootA:content1", root.c_str(), e, sizeof e);
     check(c != nullptr, "precache opens for an identity");
     const char* levels[] = { "mp_one", "mp_two", "mp_three" };
     check(bf6_precache_build_start(c, levels, 3, 0) == -2, "a cache opened by identity refuses a game build (no installation)");
@@ -170,15 +170,23 @@ int main(int argc, char** argv)
     check(progress_of(c).state != BF6_PRECACHE_FAILED, "cancel ends a build without failing it");
     bf6_precache_close(c);
 
-    // A different installation gets its own root; sweeping removes only our old roots.
+    // Another installation folder (a second storefront copy) keeps its cache.
     const fs::path foreign = fs::u8path(root) / "bf6hp-cache" / ("v" + std::to_string(kFormat)) / "not-ours";
     fs::create_directories(foreign);
     { std::ofstream(foreign / "keep.txt") << "user data"; }
-    bf6_precache* c2 = bf6_precache_open_identity("identity-two", root.c_str(), e, sizeof e);
-    check(c2 && std::string(bf6_precache_key(c2)) != cache_dir.filename().u8string(), "another installation gets another key");
+    bf6_precache* other = bf6_precache_open_identity("bf6-cache-source-v1:rootB:content1", root.c_str(), e, sizeof e);
+    check(other && std::string(bf6_precache_key(other)) != cache_dir.filename().u8string(), "another installation gets another key");
+    check(bf6_precache_sweep_stale(other, e, sizeof e) == 0 && fs::exists(cache_dir), "sweeping one install keeps another install's cache");
+    const fs::path other_dir = fs::u8path(root) / "bf6hp-cache" / ("v" + std::to_string(kFormat)) / bf6_precache_key(other);
+    bf6_precache_close(other);
+
+    // The same folder after a game update: the old content key is stale.
+    bf6_precache* c2 = bf6_precache_open_identity("bf6-cache-source-v1:rootA:content2", root.c_str(), e, sizeof e);
+    check(c2 && std::string(bf6_precache_key(c2)) != cache_dir.filename().u8string(), "an updated installation gets another key");
     check(bf6_precache_ready(c2) == 0, "the new key starts empty");
     const int removed = bf6_precache_sweep_stale(c2, e, sizeof e);
-    check(removed == 1 && !fs::exists(cache_dir) && fs::exists(foreign / "keep.txt"), "sweep removes the old cache and keeps folders it did not create");
+    check(removed == 1 && !fs::exists(cache_dir) && fs::exists(foreign / "keep.txt") && fs::exists(other_dir),
+          "sweep removes this install's old cache and keeps other installs and folders it did not create");
     bf6_precache_close(c2);
 
     std::printf("precache_test: %d checks, %d failures\n", g_checks, g_failures);

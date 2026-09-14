@@ -17,6 +17,7 @@ set(BF6_SOURCES
     src/source.cpp
     src/armory.cpp
     src/meshset.cpp
+    src/meshset_sections.cpp
     src/placeables.cpp
     src/types.cpp
     src/ebx.cpp
@@ -112,6 +113,18 @@ if(BF6_BUILD_CORE_TESTS)
     target_include_directories(precache_run PRIVATE src include)
     if(WIN32)
         target_link_libraries(precache_run PRIVATE xaudio2 ole32)
+    endif()
+    add_executable(precache_ue_parity test/precache_ue_parity.cpp)
+    target_link_libraries(precache_ue_parity PRIVATE bf6_core_static)
+    target_include_directories(precache_ue_parity PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(precache_ue_parity PRIVATE xaudio2 ole32)
+    endif()
+    add_executable(precache_texbench test/precache_texbench.cpp)
+    target_link_libraries(precache_texbench PRIVATE bf6_core_static)
+    target_include_directories(precache_texbench PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(precache_texbench PRIVATE xaudio2 ole32)
     endif()
     # Timing harness against a real installation (not a CTest test).
     add_executable(precache_bench test/precache_bench.cpp)
@@ -289,10 +302,13 @@ if(WIN32)
   target_link_libraries(terrainrows_test PRIVATE bf6_core_static)
   # Existing research-hub evidence dumper. Its .dxbc/.json outputs are
   # disassembly evidence only and are never runtime inputs to libbf6.
-  add_executable(terrainkernel_dump_test
-    ../../../../../BF6_Frostbite_Research/impl/terrain_static_join/tkdump_test.cpp)
-  target_include_directories(terrainkernel_dump_test PRIVATE src include)
-  target_link_libraries(terrainkernel_dump_test PRIVATE bf6_core_static)
+  # Built only beside a research checkout that has the source.
+  set(BF6_TKDUMP_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../BF6_Frostbite_Research/impl/terrain_static_join/tkdump_test.cpp)
+  if(EXISTS ${BF6_TKDUMP_SOURCE})
+    add_executable(terrainkernel_dump_test ${BF6_TKDUMP_SOURCE})
+    target_include_directories(terrainkernel_dump_test PRIVATE src include)
+    target_link_libraries(terrainkernel_dump_test PRIVATE bf6_core_static)
+  endif()
 endif()
 
 add_executable(bindingset_test test/bindingset_test.cpp)
@@ -1260,10 +1276,13 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${IMGUI}/imgui.cpp)
   target_link_libraries(bf6viewer PRIVATE
     bf6_core_static bf6_rime_runtime d3d11 dxgi d3dcompiler
     mfplat mfreadwrite mfuuid shlwapi ole32 winhttp xaudio2)
-  add_custom_command(TARGET bf6viewer POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_CURRENT_SOURCE_DIR}/viewer/assets
-            $<TARGET_FILE_DIR:bf6viewer>/assets)
+  # Local viewer assets are optional and never part of the repository.
+  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/viewer/assets)
+    add_custom_command(TARGET bf6viewer POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              ${CMAKE_CURRENT_SOURCE_DIR}/viewer/assets
+              $<TARGET_FILE_DIR:bf6viewer>/assets)
+  endif()
 endif()
 
 # CTest is an inventory and repeatable runner for the proof harnesses. The

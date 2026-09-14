@@ -32,6 +32,18 @@ def source_inventory(root):
     return {p.relative_to(root).as_posix(): sha(p) for p in sorted(paths)}
 
 
+def source_commit(root):
+    """The core commit a package was built from, marked dirty when it has local edits."""
+    try:
+        head = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(['git', '-C', str(root), 'status', '--porcelain', '--untracked-files=no'],
+                               capture_output=True, text=True, check=True).stdout.strip()
+        return head + ('-dirty' if dirty else '')
+    except (OSError, subprocess.CalledProcessError):
+        return 'unknown'
+
+
 def run(command, log):
     with log.open('w', encoding='utf-8') as stream:
         stream.write(json.dumps([str(x) for x in command]) + '\n')
@@ -72,9 +84,11 @@ def main():
     (package / 'bin').mkdir(parents=True)
     (package / 'include').mkdir()
     (package / 'lib').mkdir()
-    for source, target in ((build / 'Release/bf6_core.dll', package / 'bin/bf6_core.dll'),
-                           (build / 'Release/bf6_core.lib', package / 'lib/bf6_core.lib'),
-                           (root / 'include/bf6_core.h', package / 'include/bf6_core.h')):
+    copies = [(build / 'Release/bf6_core.dll', package / 'bin/bf6_core.dll'),
+              (build / 'Release/bf6_core.lib', package / 'lib/bf6_core.lib')]
+    # Every public header: the header-only helpers ship with the binary they match.
+    copies += [(h, package / 'include' / h.name) for h in sorted((root / 'include').glob('*.h'))]
+    for source, target in copies:
         shutil.copy2(source, target)
     # Header and source may be edited while staging, too.
     if before != source_inventory(root):
@@ -99,6 +113,7 @@ def main():
     manifest = {'schema': 1, 'created_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                 'status': 'development-engine-parity-unvalidated', 'abi': abi,
                 'architecture': 'x64', 'configuration': 'Release', 'source_root': str(root),
+                'source_commit': source_commit(root),
                 'source_files': before, 'files': contents, 'declared_exports_checked': len(declared),
                 'validation': {'abi_getter_matches_header': True, 'all_declared_symbols_present': True,
                                'engine_parity': 'not-run', 'struct_layout_parity': 'not-run'},

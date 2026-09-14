@@ -29,6 +29,7 @@
 #include "source.h"
 #include "oodle.h"
 #include "cas.h"
+#include "cache/thread_pool.h"
 #include "meshset.h"
 #include "depot.h"
 #include "decals.h"
@@ -173,6 +174,9 @@ struct bf6_ctx {
     std::unique_ptr<bf6::TypeDb> types;
     std::unique_ptr<bf6::Walk>   walk;
     std::string                  walked_level;
+    // Which asset catalogue `walk` holds, independent of whether its last run
+    // succeeded: -1 none (a level walk), 0 the full mount, 1 frontend-bounded.
+    int                          asset_catalog = -1;
     // The level whose archives are MOUNTED, which is a weaker thing than
     // walked and the only thing the ground and water readers need. They are
     // kept apart on purpose: on an EA App install the walk cannot run at all
@@ -1975,6 +1979,7 @@ int bf6_open_level(bf6_ctx* c, const char* level, const char* exe_path,
 
     c->report("reading the object graph", 0, 0);
     c->walk.reset(new bf6::Walk(c->src, *c->types));
+    c->asset_catalog = -1;   // a level walk, not an asset catalogue
     c->walk->set_progress(tick);
     c->walk->build_catalog();
     if (!c->walk->run(level, e)) { c->walk.reset(); return fail(e); }
@@ -3714,12 +3719,17 @@ int bf6_asset_instances(bf6_ctx* c, const char* asset,
         };
         const bool frontend = std::string(asset).find(
             "game/glacierflow/flow_mainmenu") == 0;
+        // Reusable whenever this walk holds an asset catalogue of the same
+        // scope, including after a traversal that failed: the catalogue is the
+        // mount's immutable index, and rebuilding it after every miss cost about
+        // half a second per unresolvable asset.
         const bool reusableAssetCatalog = c->walk &&
-            c->walked_level.rfind("@asset:", 0) == 0 &&
+            c->asset_catalog == (frontend ? 1 : 0) &&
             c->walk->catalog_bounded_frontend() == frontend;
         if (!reusableAssetCatalog) {
             c->walk.reset(new bf6::Walk(c->src, *c->types));
             c->walk->build_catalog(frontend);
+            c->asset_catalog = frontend ? 1 : 0;
         }
         c->walk->set_progress(tick);
         c->walk->set_include_frontend(true);
@@ -4097,6 +4107,120 @@ int64_t bf6_mesh_reference(bf6_ctx* c, const char* res_name, int lod,
 }
 
 void bf6_blob_free(uint8_t* blob) { std::free(blob); }
+
+int64_t bf6_meshset_surfaces_reference(const char* game_dir, const uint8_t* record, int64_t record_len,
+    int lod, int flags, const int32_t* uv_overrides, int32_t uv_override_count,
+    const int64_t* canon_keys, const uint8_t* canon_tables, int32_t canon_count, uint8_t** out)
+{
+    if (!out) return -1;
+    *out = nullptr;
+    if (!game_dir || !*game_dir || !record || record_len <= 8) return -1;
+    try {
+        static std::mutex oodle_mutex;
+        {
+            std::lock_guard<std::mutex> lock(oodle_mutex);
+            if (!bf6::oodle_open(game_dir)) return -1;
+        }
+        RefReader r{ record, (size_t)record_len };
+        if (r.u32() != kMeshRefMagic || r.u32() != kMeshRefVersion) return -1;
+        const std::string res_path = game_path(game_dir, r.str());
+        const uint32_t res_off = r.u32(), res_size = r.u32(), res_dsize = r.u32();
+        const int ref_lod = (int)r.u32();
+        const std::string chunk_guid = r.str();
+        std::string chunk_path; uint32_t chunk_off = 0, chunk_size = 0;
+        if (!chunk_guid.empty()) { chunk_path = game_path(game_dir, r.str()); chunk_off = r.u32(); chunk_size = r.u32(); }
+        const uint32_t hidden_count = r.u32();
+        std::vector<int32_t> hidden;
+        for (uint32_t k = 0; r.ok && k < hidden_count; ++k) { uint16_t part = 0; r.pod(&part, 2); hidden.push_back(part); }
+        if (!r.ok) return -1;
+        // The record located one LOD's geometry; any other LOD needs a live read.
+        if (lod != ref_lod) return -2;
+        std::string err;
+        std::vector<uint8_t> res = bf6::cas_read(res_path, res_off, res_size, false, err);
+        if (res.size() != res_dsize) return -1;
+        std::vector<uint8_t> chunk;
+        if (!chunk_guid.empty()) {
+            chunk = bf6::cas_read(chunk_path, chunk_off, chunk_size, false, err);
+            if (chunk.empty()) return -1;
+        }
+        return bf6_meshset_surfaces(res.data(), (int64_t)res.size(), lod,
+            chunk.empty() ? nullptr : chunk.data(), (int64_t)chunk.size(), flags,
+            hidden.data(), (int32_t)hidden.size(), uv_overrides, uv_override_count,
+            canon_keys, canon_tables, canon_count, out);
+    } catch (...) {
+        return -1;
+    }
+}
+
+int64_t bf6_cas_read_batch(const char* game_dir, const char* spec, uint8_t** out)
+{
+    if (!out) return -1;
+    *out = nullptr;
+    if (!game_dir || !*game_dir || !spec) return -1;
+    try {
+        {
+            static std::mutex oodle_mutex;
+            std::lock_guard<std::mutex> lock(oodle_mutex);
+            if (!bf6::oodle_open(game_dir)) return -1;
+        }
+        struct Item { std::string path; int64_t off = 0, size = 0; std::vector<uint8_t> bytes; };
+        std::vector<Item> items;
+        const std::string all = spec;
+        for (size_t s = 0; s < all.size();) {
+            size_t e = all.find('\n', s);
+            if (e == std::string::npos) e = all.size();
+            const std::string line = all.substr(s, e - s);
+            s = e + 1;
+            const size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+            Item it;
+            if (t2 != std::string::npos) {
+                it.path = line.substr(0, t1);
+                it.off = std::strtoll(line.c_str() + t1 + 1, nullptr, 10);
+                it.size = std::strtoll(line.c_str() + t2 + 1, nullptr, 10);
+            }
+            items.push_back(std::move(it));
+        }
+        // A persistent pool: its threads keep archive handles open between batches.
+        static std::mutex pool_mutex;
+        static std::unique_ptr<bf6::cache::ThreadPool> pool;
+        std::lock_guard<std::mutex> batch(pool_mutex);
+        if (!pool) {
+#ifdef _WIN32
+            if (_getmaxstdio() < 8192) _setmaxstdio(8192);
+#endif
+            pool = std::make_unique<bf6::cache::ThreadPool>(0);
+        }
+        for (size_t i = 0; i < items.size(); ++i) {
+            pool->submit([&items, i] {
+                Item& it = items[i];
+                if (it.path.empty() || it.size <= 0) return;
+                std::string err;
+                it.bytes = bf6::cas_read(it.path, it.off, it.size, false, err);
+            });
+        }
+        pool->wait();
+        size_t total = 8;
+        for (const Item& it : items) total += 4 + ((it.bytes.size() + 3) & ~size_t(3));
+        auto* blob = (uint8_t*)std::malloc(total);
+        if (!blob) return -1;
+        const uint32_t head[2] = { 0x42524342, (uint32_t)items.size() };   // "BCRB"
+        std::memcpy(blob, head, 8);
+        size_t at = 8;
+        for (Item& it : items) {
+            const uint32_t n = (uint32_t)it.bytes.size();
+            std::memcpy(blob + at, &n, 4);
+            if (n) std::memcpy(blob + at + 4, it.bytes.data(), n);
+            const size_t step = 4 + ((n + 3) & ~size_t(3));
+            if (step > 4 + (size_t)n) std::memset(blob + at + 4 + n, 0, step - 4 - n);
+            at += step;
+            std::vector<uint8_t>().swap(it.bytes);
+        }
+        *out = blob;
+        return (int64_t)total;
+    } catch (...) {
+        return -1;
+    }
+}
 
 bf6_mesh* bf6_mesh_decode_reference(const char* game_dir, const uint8_t* record, int64_t record_len)
 {

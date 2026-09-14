@@ -53,7 +53,7 @@ int main(int argc, char** argv)
     const std::vector<std::string> oracle = {
         "amo=fmj", "brl=shortbarrel", "mag=regular", "mzl=m4qdflashhider", "scp=xps3"
     };
-    const int fake = bf6_weapon_factory_fits(c, "codex_fake_equipment_7f93", nullptr, 0);
+    const int fake = bf6_weapon_factory_fits(c, "absent_fake_equipment_7f93", nullptr, 0);
     std::printf("m4a1 rows=%d oracle_match=%d; fake rows=%d (negative control)\n",
                 n, got == oracle ? 1 : 0, fake);
     bf6_close(c);

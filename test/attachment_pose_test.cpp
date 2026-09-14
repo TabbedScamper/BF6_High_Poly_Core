@@ -97,7 +97,7 @@ int main(int argc, char** argv)
     if (md.empty()) { std::printf("md_m4a1 not found\n"); bf6_close(c); return 1; }
 
     bf6_weapon_fit canted{ "sca", "cantedreflex" };
-    bf6_weapon_fit fake{ "sca", "codex_fake_attachment_7f93" };
+    bf6_weapon_fit fake{ "sca", "absent_fake_attachment_7f93" };
     const Snapshot base = read(c, md, nullptr);
     const Snapshot control = read(c, md, &fake);
     const Snapshot fitted = read(c, md, &canted);

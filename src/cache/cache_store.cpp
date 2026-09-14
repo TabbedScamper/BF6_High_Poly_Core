@@ -252,6 +252,15 @@ bool Store::install_complete(const std::vector<std::string>& levels) const
     return true;
 }
 
+// "bf6-cache-source-v<n>:<root fingerprint>:<content>" -> the root fingerprint.
+static std::string install_root_of(const std::string& identity)
+{
+    const std::size_t a = identity.find(':');
+    if (a == std::string::npos) return identity;
+    const std::size_t b = identity.find(':', a + 1);
+    return identity.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1);
+}
+
 int Store::sweep_stale(std::string& err) const
 {
     if (root_.empty()) { err = "store is not open"; return -1; }
@@ -269,6 +278,9 @@ int Store::sweep_stale(std::string& err) const
             if (!read_file(p / "root.json", text)) continue;          // not ours: keep
             bf6json::Value j;
             if (!parse_json(text, j) || str_of(j, "marker") != kMarker) continue;
+            // Only an older cache of THIS installation folder is stale. Another
+            // install (a second storefront copy) keeps its own cache.
+            if (install_root_of(str_of(j, "identity")) != install_root_of(identity_)) continue;
             std::error_code rm;
             fs::remove_all(p, rm);
             if (rm) { err = "could not remove " + p.u8string() + ": " + rm.message(); continue; }

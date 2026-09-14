@@ -308,7 +308,7 @@ int main(int argc, char** argv)
     int fake_weapon_rows = 0;
     for (const bf6_weapon_name_row& row : weapon_names) {
         if (std::strcmp(row.weapon, "m4a1") == 0) m4_name = &row;
-        if (std::strcmp(row.weapon, "codex_fake_weapon_7f93") == 0)
+        if (std::strcmp(row.weapon, "absent_fake_weapon_7f93") == 0)
             ++fake_weapon_rows;
     }
     const char* factory_localized =
@@ -322,7 +322,7 @@ int main(int argc, char** argv)
     const int fake_icon_texture = bf6_texture_id_by_name(
         ctx,
         "common/ui/assets/images/hardware/generated/control/"
-        "t_ui_codex_fake_weapon_7f93_archetype_icon");
+        "t_ui_absent_fake_weapon_7f93_archetype_icon");
     rime::Screen armory_card;
     const bool armory_card_ok = load_item_screen(
         ctx, rime_list::kGridItemCellPartition, armory_card);

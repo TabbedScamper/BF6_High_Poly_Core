@@ -53,7 +53,7 @@ int main(int argc, char** argv)
         }
     }
     const int fake = bf6_texture_id_by_name(c,
-        "common/ui/assets/images/cosmetics/generated/weaponpackages/t_ui_codex_fake_icon_small_cropped");
+        "common/ui/assets/images/cosmetics/generated/weaponpackages/t_ui_absent_fake_icon_small_cropped");
     std::printf("fake id=%d (negative control)\n", fake);
     bf6_close(c);
     return fake < 0 ? 0 : 1;

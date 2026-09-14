@@ -18,8 +18,11 @@ def digest(path):
 def check(package, consumer_header):
     errors = []
     manifest = json.loads((package / 'reader-manifest.json').read_text(encoding='utf-8'))
-    expected = {'bin/bf6_core.dll', 'lib/bf6_core.lib', 'include/bf6_core.h'}
-    if set(manifest.get('files', {})) != expected:
+    required = {'bin/bf6_core.dll', 'lib/bf6_core.lib', 'include/bf6_core.h'}
+    listed = set(manifest.get('files', {}))
+    # The binary, its import library and the public headers; nothing else.
+    expected = required | {n for n in listed if re.fullmatch(r'include/bf6_\w+\.h', n)}
+    if listed != expected:
         errors.append('Package file manifest does not match the required allowlist.')
     for name in sorted(expected):
         item, record = package / name, manifest.get('files', {}).get(name, {})

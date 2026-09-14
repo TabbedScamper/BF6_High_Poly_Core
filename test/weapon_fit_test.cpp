@@ -129,7 +129,7 @@ int main(int argc, char** argv)
     if (md.empty()) { std::printf("md_m4a1 not found\n"); bf6_close(c); return 1; }
 
     bf6_weapon_fit real{ "rgt", "modulemk3" };
-    bf6_weapon_fit fake{ "rgt", "codex_fake_attachment_7f93" };
+    bf6_weapon_fit fake{ "rgt", "absent_fake_attachment_7f93" };
     bf6_weapon_fit optic{ "scp", "compm5b" };
     bf6_weapon_fit canted{ "sca", "cantedreflex" };
     const auto base = read_parts(c, md, nullptr);

@@ -407,7 +407,7 @@ int main(int argc, char** argv)
     const rime_list::RouteReport fake = rime_list::route_contract(
         context,
         "common/ui/loadout/shared/assets/databindings/"
-        "codex_fake_loadoutclassitemdbd",
+        "absent_fake_loadoutclassitemdbd",
         kFooterView, kCell, rime_list::Record{});
     std::printf("class-cell exact=%d/%zu fake=%d\n", routed,
                 std::size(probes), fake.connected);

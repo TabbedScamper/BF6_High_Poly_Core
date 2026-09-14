@@ -102,62 +102,61 @@ mode it is disabled or served from a fixed precomputed page set.
 ## C API (implemented in bf6_core.h, additive to interface version 6)
 
 The exported names are `bf6_precache_*` (the C++ namespace `bf6_cache` is taken by
-`bf6_cache_identity.h`). The sketch below shows the shape; the header is authoritative.
+`bf6_cache_identity.h`). `include/bf6_core.h` is authoritative; this is the shape.
 
 ```c
-typedef struct bf6_cache bf6_cache;
+typedef struct bf6_precache bf6_precache;
 
-/* Opens or creates the cache for this installation. Never touches game files
- * beyond the identity check. */
-bf6_cache* bf6_cache_open(const char* game_dir, const char* cache_root, char* err, int err_len);
-void       bf6_cache_close(bf6_cache*);
+/* Open or create the cache for this installation (identity check only). */
+bf6_precache* bf6_precache_open(const char* game_dir, const char* cache_root, char* err, int err_len);
+void          bf6_precache_close(bf6_precache*);
+const char*   bf6_precache_key(bf6_precache*);
+/* Remove older keys of the same installation folder. Other installs are kept. */
+int           bf6_precache_sweep_stale(bf6_precache*, char* err, int err_len);
 
-/* 1 when every map and the shared store are complete for the current key. */
-int bf6_cache_ready(bf6_cache*);
-int bf6_cache_map_ready(bf6_cache*, const char* level);
+/* Build on a core-owned thread. Complete maps are verified, not rebuilt, and a
+ * complete cache never mounts the game. */
+int  bf6_precache_build_start(bf6_precache*, const char* const* levels, int level_count, int flags);
+void bf6_precache_build_cancel(bf6_precache*);
+int  bf6_precache_ready(bf6_precache*);
+int  bf6_precache_map_ready(bf6_precache*, const char* level);
 
-/* Starts the whole-install build on core-owned threads. Non-blocking. */
-int  bf6_cache_build_start(bf6_cache*, const char* const* levels, int level_count, int flags);
-void bf6_cache_build_cancel(bf6_cache*);   /* stops after the current unit; resumable */
+/* Progress snapshots, cheap enough to poll every frame. */
+int bf6_precache_progress_get(bf6_precache*, bf6_precache_progress* out);
+int bf6_precache_map_progress_get(bf6_precache*, bf6_precache_map_progress* out, int out_max);
 
-/* Snapshot of progress; safe to call every frame from the UI thread. */
-typedef struct {
-    int32_t struct_size;
-    int32_t state;            /* idle, running, cancelling, done, failed */
-    double  overall;          /* 0..1, monotonic, weighted by measured cost */
-    int32_t map_count, maps_done;
-    int64_t bytes_written;
-    char    current_map[64];
-    char    current_layer[32];
-    char    current_item[128]; /* "roads: 812 / 1435 records" */
-    double  seconds_since_update;
-} bf6_cache_progress;
-int bf6_cache_progress_get(bf6_cache*, bf6_cache_progress* out);
-
-typedef struct {
-    char    level[64];
-    int32_t state;            /* waiting, running, done, failed */
-    double  progress;         /* 0..1 */
-    double  layer_progress[16];
-} bf6_cache_map_progress;
-int bf6_cache_map_progress_get(bf6_cache*, bf6_cache_map_progress* out, int out_max);
-
-/* Cache-only readers: same result structs as the live readers. */
+/* Reading a built cache. */
+int64_t bf6_precache_mesh_record(bf6_precache*, const char* level, const char* mesh_res, uint8_t** out);
+int64_t bf6_precache_mesh_surfaces(bf6_precache*, const char* level, const char* mesh_names,
+                                   int lod, int threads, uint8_t** out);
+int64_t bf6_precache_mesh_texture_names(bf6_precache*, const char* level, const char* mesh_names, uint8_t** out);
+int64_t bf6_precache_texture_chunks(bf6_precache*, const char* texture_names, int max_dim, int threads, uint8_t** out);
 ```
 
-The engine adapters own only: the cover screen, uploading cached buffers into engine
-meshes/textures/materials, rendering previews from object descriptors, and gating
-their controls on `bf6_cache_ready`.
+Context-free readers used with the cache:
+
+- `bf6_meshset_sections` and `bf6_meshset_surfaces` decode and merge a MeshSet
+  with the Godot add-on's reader rules. `bf6_meshset_surfaces_reference` does the
+  same from a mesh reference record.
+- `bf6_cas_read_batch` reads and decompresses many CAS references at once on a
+  persistent pool.
+- `bf6_texture_decode_reference`, `bf6_mesh_decode_reference` and
+  `bf6_terrain_decode_reference` rebuild the live readers' results from records.
+
+The engine adapters own only: the cover screen, uploading decoded buffers into
+engine meshes, textures and materials, rendering previews, and gating their
+controls on readiness.
 
 ## Phases
 
-1. (done) Cache root, key, manifests, progress API, thread pool, pack writer/reader (no layers).
-   Unit tests with synthetic data (`-DBF6_BUILD_CORE_TESTS=ON`). Timing harness: next.
-2. Single-context whole-install scan (mount, index, types, lift once) and the
-   content-addressed store for meshes and textures. Measure against today.
-3. Terrain, ground, roads, water (including exported simulation parameters).
-4. Placements/grouping moved into the core; lights, FX, scatter, gamemode, catalogue.
-5. Godot adapter: cover screen, gating, cache-only loading, previews; remove old
-   preparation and buttons.
-6. Unreal adapter: same.
+1. (done) Cache root, key, manifests, progress API, thread pool, pack writer and
+   reader. Unit tests with synthetic data (`-DBF6_BUILD_CORE_TESTS=ON`).
+2. (done) Single-context whole-install scan and the content-addressed store:
+   placements, mesh, texture and terrain references. 28 maps in 8.1 minutes, 1.07 GB.
+3. Roads, decals, water surfaces and simulation parameters.
+4. Placements and grouping moved into the core; lights, FX, scatter, gamemode, catalogue.
+5. (in progress) Godot adapter. Done: the cover screen, gating, removal of the
+   old buttons, geometry from the cache, texture read-ahead, and index-only map
+   preparation. Next: the placement walk from the cache, and previews.
+6. Unreal adapter: the same.
 7. Release: both engines on the same core tag.

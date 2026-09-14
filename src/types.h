@@ -113,6 +113,14 @@ public:
     // must not pay for a diagnostic it will never print.
     void entropy(double& out_bits, double& out_zero_pct, size_t sample = 1u << 20) const;
     bool looks_encrypted() const;
+    // A 64-bit fingerprint of the image as read (after any lift), for tests that
+    // check two decrypt paths produce the same bytes.
+    uint64_t image_digest() const
+    {
+        uint64_t h = 1469598103934665603ull;
+        for (uint8_t b : data_) h = (h ^ b) * 1099511628211ull;
+        return h;
+    }
 
     // "C:/.../Battlefield 6" -> the executables worth trying, best first. The SP
     // and MP builds carry DIFFERENT databases, so which one is loaded is a real

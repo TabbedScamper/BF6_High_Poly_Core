@@ -285,7 +285,7 @@ void Walk::build_catalog(bool bounded_frontend)
     {
         std::string asset = lower(kv.first);
         if (asset.rfind("win32/", 0) == 0) asset.erase(0, 6);
-        if (src_.ebx().find(asset) != src_.ebx().end())
+        if (src_.ebx().lookup(asset))
             scope_index.emplace(asset, kv.first);
     }
     // Exact front-end asset walks always start from a full mounted path, and
@@ -293,16 +293,26 @@ void Walk::build_catalog(bool bounded_frontend)
     // already that exact lower-case name index; duplicating every name plus a
     // leaf alias into a second hash map dominated 101-row actor walks. Bare
     // playable-level lookup retains the legacy alias catalogue.
-    if (!bounded_frontend)
-        for (const auto& kv : src_.ebx())
-        {
-            const std::string low = lower(kv.first);
-            const std::string ref = kv.first + ".ebx";
-            by_name_.emplace(low, ref);
-            by_name_.emplace(leaf_of(low), ref);
-        }
+    //
+    // BUILT ON FIRST MISS, not here. An exact name resolves through Source::ebx
+    // directly, and a level walk rarely asks for anything else; building the
+    // alias map for every partition up front cost more than the walk it serves.
+    by_name_built_ = bounded_frontend;
     gi_ = bounded_frontend ? &src_.armory_partition_index()
                            : &src_.partition_index();
+}
+
+void Walk::ensure_aliases() const
+{
+    if (by_name_built_) return;
+    by_name_built_ = true;
+    for (const auto& kv : src_.ebx())
+    {
+        const std::string low = lower(kv.first);
+        const std::string ref = kv.first + ".ebx";
+        by_name_.emplace(low, ref);
+        by_name_.emplace(leaf_of(low), ref);
+    }
 }
 
 std::string Walk::resolve_name(const std::string& name) const
@@ -310,8 +320,41 @@ std::string Walk::resolve_name(const std::string& name) const
     if (name.empty()) return "";
     std::string n = lower(name);
     if (ends_with(n, ".ebx")) n.resize(n.size() - 4);
-    const auto exact = src_.ebx().find(n);
-    if (exact != src_.ebx().end()) return exact->first + ".ebx";
+    if (src_.ebx().lookup(n)) return n + ".ebx";
+
+    // THE FIRST FEW MISSES SCAN; ONLY A WALK THAT KEEPS MISSING BUILDS THE MAP.
+    // The alias map answers "the first partition, in catalogue order, whose
+    // lower-case name or leaf is this key". Opening a level by its bare name
+    // misses twice before its leaf resolves, and building 450,000 aliases for
+    // that cost more than the walk. A scan over the mapped names gives the same
+    // first match without allocating.
+    if (!by_name_built_ && alias_scans_ < 6)
+    {
+        ++alias_scans_;
+        const std::string keys[3] = { n, leaf_of(n), n + ".ebx" };
+        std::string found[3];
+        auto ieq = [](const char* a, size_t an, const std::string& b) {
+            if (an != b.size()) return false;
+            for (size_t i = 0; i < an; ++i)
+                if ((char)std::tolower((unsigned char)a[i]) != b[i]) return false;
+            return true;
+        };
+        bool done = false;
+        src_.ebx().for_each_view([&](const char* p, size_t len, const EbxEntry&) {
+            if (done) return;
+            size_t slash = len;
+            while (slash > 0 && p[slash - 1] != '/') --slash;
+            for (int k = 0; k < 3; ++k) {
+                if (!found[k].empty()) continue;
+                if (ieq(p, len, keys[k]) || ieq(p + slash, len - slash, keys[k]))
+                    found[k] = std::string(p, len) + ".ebx";
+            }
+            done = !found[0].empty();
+        });
+        for (const std::string& f : found) if (!f.empty()) return f;
+        return "";
+    }
+    ensure_aliases();
     auto it = by_name_.find(n);
     if (it != by_name_.end()) return it->second;
     it = by_name_.find(leaf_of(n));
@@ -602,6 +645,7 @@ bool Walk::run(const std::string& level_rel, std::string& err)
         // a caller should not have to. Anchored on '/levels/<leaf>/<leaf>'
         // rather than a substring: a loose match would happily pick a
         // neighbouring level whose name merely CONTAINS this one.
+        ensure_aliases();
         std::vector<std::string> tails{ "/levels/" + leaf + "/" + leaf };
         if (leaf.rfind("mp_", 0) != 0)
             tails.push_back("/levels/mp_" + leaf + "/mp_" + leaf);

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iomanip>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -167,10 +168,7 @@ std::vector<uint8_t> Source::read_seg(const CasLoc& seg, bool allow_raw, std::st
     return cas_read(path, seg.off, seg.size, allow_raw, err);
 }
 
-bool Source::mount_toc(const std::string& toc_path, std::string& err) {
-    // bf6_open and later targeted mounts share the same non-level TOCs. A
-    // second parse cannot add anything under the first-wins law, so remember
-    // successful paths and make repeated mount requests free.
+static std::string toc_identity(const std::string& toc_path) {
     std::string identity = std::filesystem::path(toc_path).lexically_normal().generic_string();
 #ifdef _WIN32
     std::transform(identity.begin(), identity.end(), identity.begin(),
@@ -178,7 +176,19 @@ bool Source::mount_toc(const std::string& toc_path, std::string& err) {
 #endif
     // Keep the literal-path route solely for regression/performance comparisons.
     if (env_value("BF6_MOUNT_LITERAL_PATH") == "1") identity = toc_path;
+    return identity;
+}
+
+bool Source::mount_toc(const std::string& toc_path, std::string& err) {
+    // bf6_open and later targeted mounts share the same non-level TOCs. A
+    // second parse cannot add anything under the first-wins law, so remember
+    // successful paths and make repeated mount requests free.
+    const std::string identity = toc_identity(toc_path);
     if (mounted_tocs_.find(identity) != mounted_tocs_.end()) return true;
+    // Every attempt is part of the mount sequence, a failed one included: the
+    // same sequence always leaves the same tables, which is what makes a
+    // snapshot of them reusable.
+    seq_add(toc_stamp(toc_path, identity));
     std::vector<uint8_t> raw = read_file(toc_path);
     if (raw.empty()) { err = "cannot read " + toc_path; return false; }
 
@@ -198,7 +208,7 @@ bool Source::mount_toc(const std::string& toc_path, std::string& err) {
 
     // Loose-chunk map, resolved while the toc body is resident.
     for (const TocChunk& c : toc.chunks) {
-        if (!chunks_.count(c.guid)) chunks_[c.guid] = toc.chunk_location(c);
+        chunks_.insert_if_absent(c.guid, toc.chunk_location(c));
     }
 
     const std::vector<uint8_t>& body = toc.body();
@@ -215,11 +225,11 @@ bool Source::mount_toc(const std::string& toc_path, std::string& err) {
         // Positional: entry i of ebx-then-res is segment i+1 (segment 0 is meta).
         size_t si = 1;
         size_t nseg = segs.size();
+        const uint32_t bix = bundle_index(b.name);
         for (const auto& e : pay.ebx) {
-            if (si < nseg && !ebx_.count(e.first)) {
+            if (si < nseg) {
                 EbxEntry ee; ee.loc = segs[si]; ee.dsize = e.second;
-                ebx_[e.first] = ee;
-                ebx_bundle_[e.first] = b.name;
+                ebx_.insert_if_absent(e.first, ee, bix);
             }
             si++;
         }
@@ -229,11 +239,9 @@ bool Source::mount_toc(const std::string& toc_path, std::string& err) {
              * hold, and the whole point is to compare the two. */
             res_entry_type_[r.type]++;
             res_entries_total_++;
-            if (si < nseg && !res_.count(r.name)) {
-                ResEntry re; re.loc = segs[si]; re.dsize = r.size;
-                re.type = r.type; re.rid = r.rid;
-                res_[r.name] = re;
-                res_bundle_[r.name] = b.name;
+            ResEntry re; re.loc = si < nseg ? segs[si] : CasLoc(); re.dsize = r.size;
+            re.type = r.type; re.rid = r.rid;
+            if (si < nseg && res_.insert_if_absent(r.name, re, bix)) {
 
                 // A depot names the bundle it covers, so the index is built
                 // from the name rather than from a second pass.
@@ -245,15 +253,11 @@ bool Source::mount_toc(const std::string& toc_path, std::string& err) {
         }
         // Bundle chunks come after res, and mesh vertex data lives in one.
         for (const std::string& cid : pay.chunk_id) {
-            if (si < nseg && !chunk_seg_.count(cid)) chunk_seg_[cid] = segs[si];
+            if (si < nseg) chunk_seg_.insert_if_absent(cid, segs[si]);
             si++;
         }
     }
-    if (ebx_.size() != before) {
-        pidx_built_ = false; pidx_.clear();
-        light_names_built_ = false; light_names_.clear();
-        armory_pidx_built_ = false; armory_pidx_.clear(); armory_pidx_candidates_.clear();
-    }
+    if (ebx_.size() != before) tables_grew();
     mounted_toc_hashes_[mount_key(toc_path)] = content_id(raw.data(), raw.size());
     mounted_tocs_.insert(identity);
     return true;
@@ -264,7 +268,7 @@ bool Source::mount_ebx_owner(const std::string& toc_path,
                              const std::string& ebx_name,
                              std::string& err)
 {
-    if (ebx_.find(ebx_name) != ebx_.end()) return true;
+    if (ebx_.lookup(ebx_name)) return true;
     const std::filesystem::path requested(toc_path);
     const std::string full = requested.is_absolute()
         ? requested.string()
@@ -292,8 +296,9 @@ bool Source::mount_ebx_owner(const std::string& toc_path,
             if (e.first == ebx_name && si < segs.size())
             {
                 EbxEntry ee; ee.loc = segs[si]; ee.dsize = e.second;
-                ebx_[e.first] = ee;
-                ebx_bundle_[e.first] = b.name;
+                ebx_.insert_if_absent(e.first, ee, bundle_index(b.name));
+                seq_add("owner|" + toc_stamp(toc_path, toc_path) + "|" + b.name + "|" + e.first);
+                tables_grew();
                 pidx_built_ = false; pidx_.clear();
         light_names_built_ = false; light_names_.clear();
                 armory_pidx_built_ = false; armory_pidx_.clear(); armory_pidx_candidates_.clear();
@@ -312,18 +317,16 @@ bool Source::mount_ebx_owner(const std::string& toc_path,
 std::vector<uint8_t> Source::get_chunk(const std::string& guid_hex, std::string& err) {
     std::string g = guid_hex;
     for (char& ch : g) if (ch >= 'A' && ch <= 'Z') ch += 32;   // lower
-    auto it = chunks_.find(g);
-    if (it != chunks_.end()) return read_seg(it->second, false, err);
-    auto it2 = chunk_seg_.find(g);
-    if (it2 != chunk_seg_.end()) return read_seg(it2->second, false, err);
+    if (const CasLoc* at = chunks_.lookup(g)) return read_seg(*at, false, err);
+    if (const CasLoc* at = chunk_seg_.lookup(g)) return read_seg(*at, false, err);
     err = "chunk " + g.substr(0, 16) + " is in no chunk map";
     return std::vector<uint8_t>();
 }
 
 bool Source::locate_res(const std::string& name, std::string& path, ResEntry& entry) const {
-    auto it = res_.find(name);
-    if (it == res_.end()) return false;
-    entry = it->second;
+    const ResEntry* found = res_.lookup(name);
+    if (!found) return false;
+    entry = *found;
     path = loc_.cas_path(entry.loc.chunk_id, entry.loc.cas_ix);
     return !path.empty();
 }
@@ -331,12 +334,11 @@ bool Source::locate_res(const std::string& name, std::string& path, ResEntry& en
 bool Source::locate_chunk(const std::string& guid_hex, std::string& path, CasLoc& loc) const {
     std::string g = guid_hex;
     for (char& ch : g) if (ch >= 'A' && ch <= 'Z') ch += 32;
-    auto it = chunks_.find(g);
-    if (it != chunks_.end()) loc = it->second;
+    if (const CasLoc* at = chunks_.lookup(g)) loc = *at;
     else {
-        auto it2 = chunk_seg_.find(g);
-        if (it2 == chunk_seg_.end()) return false;
-        loc = it2->second;
+        const CasLoc* at2 = chunk_seg_.lookup(g);
+        if (!at2) return false;
+        loc = *at2;
     }
     path = loc_.cas_path(loc.chunk_id, loc.cas_ix);
     return !path.empty();
@@ -345,17 +347,17 @@ bool Source::locate_chunk(const std::string& guid_hex, std::string& path, CasLoc
 bool Source::has_chunk(const std::string& guid_hex) const {
     std::string g = guid_hex;
     for (char& ch : g) if (ch >= 'A' && ch <= 'Z') ch += 32;
-    return chunks_.find(g) != chunks_.end() || chunk_seg_.find(g) != chunk_seg_.end();
+    return chunks_.lookup(g) != nullptr || chunk_seg_.lookup(g) != nullptr;
 }
 
 std::vector<uint8_t> Source::get_res(const std::string& name, std::string& err) {
-    auto it = res_.find(name);
-    if (it == res_.end()) { err = "no res named " + name; return std::vector<uint8_t>(); }
-    std::vector<uint8_t> d = read_seg(it->second.loc, false, err);
-    if (d.size() != it->second.dsize) {
+    const ResEntry* found = res_.lookup(name);
+    if (!found) { err = "no res named " + name; return std::vector<uint8_t>(); }
+    std::vector<uint8_t> d = read_seg(found->loc, false, err);
+    if (d.size() != found->dsize) {
         char m[96];
         std::snprintf(m, sizeof(m), "res declared %u bytes, got %zu",
-                      it->second.dsize, d.size());
+                      found->dsize, d.size());
         err = m;
         return std::vector<uint8_t>();
     }
@@ -363,25 +365,25 @@ std::vector<uint8_t> Source::get_res(const std::string& name, std::string& err) 
 }
 
 std::vector<uint8_t> Source::get_ebx(const std::string& name, std::string& err) {
-    auto it = ebx_.find(name);
-    if (it == ebx_.end()) { err = "no ebx named " + name; return std::vector<uint8_t>(); }
-    std::vector<uint8_t> d = read_seg(it->second.loc, false, err);
-    if (d.size() != it->second.dsize) { err = "ebx size mismatch"; return std::vector<uint8_t>(); }
+    const EbxEntry* found = ebx_.lookup(name);
+    if (!found) { err = "no ebx named " + name; return std::vector<uint8_t>(); }
+    std::vector<uint8_t> d = read_seg(found->loc, false, err);
+    if (d.size() != found->dsize) { err = "ebx size mismatch"; return std::vector<uint8_t>(); }
     return d;
 }
 
 const std::string& Source::bundle_of(const std::string& res_name) const
 {
     static const std::string kEmpty;
-    auto it = res_bundle_.find(res_name);
-    return it == res_bundle_.end() ? kEmpty : it->second;
+    uint32_t b = ResTable::kNoBundle;
+    return res_.lookup(res_name, &b) && b < bundles_.size() ? bundles_[b] : kEmpty;
 }
 
 const std::string& Source::bundle_of_ebx(const std::string& ebx_name) const
 {
     static const std::string kEmpty;
-    auto it = ebx_bundle_.find(ebx_name);
-    return it == ebx_bundle_.end() ? kEmpty : it->second;
+    uint32_t b = EbxTable::kNoBundle;
+    return ebx_.lookup(ebx_name, &b) && b < bundles_.size() ? bundles_[b] : kEmpty;
 }
 
 std::string Source::depot_for_bundle(const std::string& bundle) const
@@ -562,7 +564,7 @@ void Source::read_partition_guids(const PartitionOrder& order, const char* label
             // Safe to run concurrently: cas_path only reads the locator, and
             // the CAS readers use per-thread handles. Nothing here touches
             // Source state.
-            found[i] = partition_guid(order[i]->second.loc, full, &per_worker[w]);
+            found[i] = partition_guid(order[i].loc, full, &per_worker[w]);
         }
     };
 
@@ -597,22 +599,25 @@ const std::map<std::string, std::string>& Source::partition_index()
     if (pidx_built_) return pidx_;
     pidx_built_ = true;
 
+    // STORED BESIDE THE MOUNT SNAPSHOT. The index is a pure function of the
+    // mounted tables and the read mode, so when every table is a snapshot
+    // layer its key is the snapshot's key and the index is read back rather
+    // than rebuilt from a read of every partition.
+    const std::string side = snapshot_side_path(partition_index_full_read() ? "pidx-full" : "pidx");
+    if (!side.empty() && load_partition_index(side)) return pidx_;
+
     // CAS LOCALITY ORDER, not name order. Every partition in the mount is read
     // to get one 16-byte header, so the reads want to run down each archive in
     // the order the blocks lie rather than jumping the disk per name.
-    std::vector<const std::pair<const std::string, EbxEntry>*> order;
+    PartitionOrder order;
     order.reserve(ebx_.size());
-    for (const auto& kv : ebx_) order.push_back(&kv);
+    for (const auto& kv : ebx_) order.push_back({kv.first, kv.second.loc});
     std::sort(order.begin(), order.end(),
-        [](const std::pair<const std::string, EbxEntry>* a,
-           const std::pair<const std::string, EbxEntry>* b)
+        [](const PartitionRef& a, const PartitionRef& b)
         {
-            if (a->second.loc.chunk_id != b->second.loc.chunk_id)
-                return a->second.loc.chunk_id < b->second.loc.chunk_id;
-            if (a->second.loc.cas_ix != b->second.loc.cas_ix)
-                return a->second.loc.cas_ix < b->second.loc.cas_ix;
-            if (a->second.loc.off != b->second.loc.off)
-                return a->second.loc.off < b->second.loc.off;
+            if (a.loc.chunk_id != b.loc.chunk_id) return a.loc.chunk_id < b.loc.chunk_id;
+            if (a.loc.cas_ix != b.loc.cas_ix) return a.loc.cas_ix < b.loc.cas_ix;
+            if (a.loc.off != b.loc.off) return a.loc.off < b.loc.off;
             // SAME BYTES UNDER TWO NAMES. An asset shipped at two paths shares
             // one partition guid, so "first name wins" is decided by whatever
             // order the sort happened to leave them in - which is not an order
@@ -620,7 +625,7 @@ const std::map<std::string, std::string>& Source::partition_index()
             // is at least the same on every run. Note the Godot plugin has no
             // such tie-break, so its pick depends on dictionary order and the
             // two readers can legitimately name the same partition differently.
-            return a->first < b->first;
+            return a.name < b.name;
         });
 
     // READ IN PARALLEL, PUBLISH IN ORDER.
@@ -641,8 +646,9 @@ const std::map<std::string, std::string>& Source::partition_index()
     read_partition_guids(order, "indexing partitions", found, pidx_stats_);
 
     for (size_t i = 0; i < n; i++)
-        if (!found[i].empty() && !pidx_.emplace(found[i], order[i]->first + ".ebx").second)
+        if (!found[i].empty() && !pidx_.emplace(found[i], order[i].name + ".ebx").second)
             pidx_stats_.duplicates++;
+    if (!side.empty() && !pidx_stats_.cancelled) save_partition_index(side);
     return pidx_;
 }
 
@@ -656,20 +662,16 @@ const std::map<std::string, std::string>& Source::armory_partition_index()
     // inside these families (shuffled/non-family control: 0 outside). Keeping
     // whole authored roots also covers gadgets and future names that do not
     // happen to contain the word "weapon".
-    std::vector<const std::pair<const std::string, EbxEntry>*> order;
+    PartitionOrder order;
     order.reserve(ebx_.size() / 4);
-    for (const auto& kv : ebx_) if (armory_candidate(kv.first)) order.push_back(&kv);
+    for (const auto& kv : ebx_) if (armory_candidate(kv.first)) order.push_back({kv.first, kv.second.loc});
     std::sort(order.begin(), order.end(),
-        [](const std::pair<const std::string, EbxEntry>* a,
-           const std::pair<const std::string, EbxEntry>* b)
+        [](const PartitionRef& a, const PartitionRef& b)
         {
-            if (a->second.loc.chunk_id != b->second.loc.chunk_id)
-                return a->second.loc.chunk_id < b->second.loc.chunk_id;
-            if (a->second.loc.cas_ix != b->second.loc.cas_ix)
-                return a->second.loc.cas_ix < b->second.loc.cas_ix;
-            if (a->second.loc.off != b->second.loc.off)
-                return a->second.loc.off < b->second.loc.off;
-            return a->first < b->first;
+            if (a.loc.chunk_id != b.loc.chunk_id) return a.loc.chunk_id < b.loc.chunk_id;
+            if (a.loc.cas_ix != b.loc.cas_ix) return a.loc.cas_ix < b.loc.cas_ix;
+            if (a.loc.off != b.loc.off) return a.loc.off < b.loc.off;
+            return a.name < b.name;
         });
 
     // A cache is useful only when its identity was computed from the current
@@ -727,7 +729,7 @@ const std::map<std::string, std::string>& Source::armory_partition_index()
             if (ok) {
                 const bool suffix = path.size() > 4 && path.compare(path.size() - 4, 4, ".ebx") == 0;
                 const std::string base = suffix ? path.substr(0, path.size() - 4) : std::string();
-                ok = valid_guid(guid) && suffix && armory_candidate(base) && ebx_.find(base) != ebx_.end();
+                ok = valid_guid(guid) && suffix && armory_candidate(base) && ebx_.lookup(base) != nullptr;
                 if (ok) { first.emplace(guid, path); all[guid].push_back(path); }
             }
         }
@@ -752,7 +754,7 @@ const std::map<std::string, std::string>& Source::armory_partition_index()
     for (size_t i = 0; i < n; i++)
         if (!found[i].empty())
         {
-            const std::string path = order[i]->first + ".ebx";
+            const std::string path = order[i].name + ".ebx";
             if (!armory_pidx_.emplace(found[i], path).second) armory_pidx_stats_.duplicates++;
             armory_pidx_candidates_[found[i]].push_back(path);
         }
@@ -916,17 +918,20 @@ bool Source::mount_level(const std::string& level, bool all_levels, std::string&
 {
     const std::vector<std::string> tocs = find_tocs(level, all_levels);
     if (tocs.empty()) { err = "no .toc found under " + game_; return false; }
-    size_t mounted = 0;
-    int done = 0;
-    for (const std::string& t : tocs)
-    {
-        if (progress_ && !progress_("mounting the level's archives", done++, (int)tocs.size()))
-        { err = "cancelled"; return false; }
-        std::string e;
-        if (mount_toc(t, e)) mounted++;
-        // A toc that will not mount is not fatal on its own: the install
-        // carries archives this reader has no business in. An empty mount is.
-    }
+    // A toc that will not mount is not fatal on its own: the install carries
+    // archives this reader has no business in. An empty mount is.
+    //
+    // In two calls, the shared archives and then the level's own, in the same
+    // order as one list: every level shares the first snapshot layer, and each
+    // level stores only what it adds.
+    size_t split = 0;
+    while (split < tocs.size() && !is_level_toc(tocs[split])) ++split;
+    const std::vector<std::string> shared(tocs.begin(), tocs.begin() + (std::ptrdiff_t)split);
+    const std::vector<std::string> own(tocs.begin() + (std::ptrdiff_t)split, tocs.end());
+    size_t mounted = 0, mounted_own = 0;
+    if (!mount_tocs(shared, "mounting the level's archives", mounted, err)) return false;
+    if (!own.empty() && !mount_tocs(own, "mounting the level's archives", mounted_own, err)) return false;
+    mounted += mounted_own;
     if (mounted == 0) { err = "no .toc mounted"; return false; }
     if (!level.empty())
     {
@@ -966,17 +971,636 @@ bool Source::mount_frontend(std::string& err)
     }
     if (selected.empty()) { err = "no front-end archive families found"; return false; }
 
-    int mounted = 0, done = 0;
-    for (const std::string& toc : selected)
-    {
-        if (progress_ && !progress_("mounting front-end archives", done++,
-                                    (int)selected.size()))
-        { err = "cancelled"; return false; }
-        std::string one;
-        if (mount_toc(toc, one)) ++mounted;
-    }
+    size_t mounted = 0;
+    if (!mount_tocs(selected, "mounting front-end archives", mounted, err)) return false;
     if (!mounted) { err = "no front-end archive mounted"; return false; }
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// The mount snapshot
+// ---------------------------------------------------------------------------
+
+uint32_t Source::bundle_index(const std::string& name)
+{
+    auto it = bundle_ix_.find(name);
+    if (it != bundle_ix_.end()) return it->second;
+    const uint32_t ix = (uint32_t)bundles_.size();
+    bundles_.push_back(name);
+    bundle_ix_.emplace(name, ix);
+    return ix;
+}
+
+void Source::seq_add(const std::string& item)
+{
+    ContentId h; h.a = seq_a_; h.b = seq_b_;
+    const uint32_t n = (uint32_t)item.size();
+    h.add(&n, sizeof(n));
+    h.add(item);
+    seq_a_ = h.a; seq_b_ = h.b;
+}
+
+std::string Source::toc_stamp(const std::string& toc_path, const std::string& identity) const
+{
+    std::error_code ec;
+    const uint64_t size = (uint64_t)std::filesystem::file_size(toc_path, ec);
+    const auto when = std::filesystem::last_write_time(toc_path, ec);
+    const int64_t ticks = ec ? 0 : (int64_t)when.time_since_epoch().count();
+    return identity + "|" + std::to_string(ec ? 0 : size) + "|" + std::to_string(ticks);
+}
+
+void Source::tables_grew()
+{
+    pidx_built_ = false; pidx_.clear();
+    light_names_built_ = false; light_names_.clear();
+    armory_pidx_built_ = false; armory_pidx_.clear(); armory_pidx_candidates_.clear();
+}
+
+bool Source::snapshots_enabled() const
+{
+    if (snap_override_ >= 0) return snap_override_ == 1;
+    const std::string v = env_value("BF6_DISABLE_MOUNT_SNAPSHOT");
+    return v.empty() || v == "0";
+}
+
+namespace {
+
+// Format 1. The record sizes are part of the header, so a build whose entry
+// layout differs rejects the file instead of misreading it.
+constexpr char     kSnapMagic[8] = {'B','F','6','M','N','T','S','1'};
+constexpr uint32_t kSnapVersion = 2;
+constexpr uint32_t kSnapSections = 11;
+enum SnapSection : uint32_t {
+    S_RES_RECS, S_RES_SLOTS, S_EBX_RECS, S_EBX_SLOTS, S_CHUNK_RECS, S_CHUNK_SLOTS,
+    S_SEG_RECS, S_SEG_SLOTS, S_NAMES, S_STATE,
+    S_STAMPS     // the TOC stamps this layer mounted, for telling a stale chain
+};
+struct SnapHeader {
+    char     magic[8];
+    uint32_t version;
+    uint32_t sections;
+    uint32_t rec_sizes[4];
+    uint64_t key_a, key_b, parent_a, parent_b;
+    uint64_t off[kSnapSections];
+    uint64_t size[kSnapSections];
+};
+
+uint32_t snap_rec_size(uint32_t i)
+{
+    switch (i) {
+    case 0: return (uint32_t)sizeof(ResTable::Rec);
+    case 1: return (uint32_t)sizeof(EbxTable::Rec);
+    default: return (uint32_t)sizeof(ChunkTable::Rec);
+    }
+}
+
+std::string hex64(uint64_t v)
+{
+    char b[17];
+    std::snprintf(b, sizeof(b), "%016llx", (unsigned long long)v);
+    return b;
+}
+
+void put_str(std::vector<uint8_t>& o, const std::string& s)
+{
+    put_u32(o, (uint32_t)s.size());
+    o.insert(o.end(), s.begin(), s.end());
+}
+bool get_str(const uint8_t* d, size_t& p, size_t end, std::string& s)
+{
+    if (p + 4 > end) return false;
+    uint32_t n = 0; std::memcpy(&n, d + p, 4); p += 4;
+    if (p + n > end) return false;
+    s.assign((const char*)d + p, n); p += n;
+    return true;
+}
+bool get_raw64(const uint8_t* d, size_t& p, size_t end, uint64_t& v)
+{
+    if (p + 8 > end) return false;
+    std::memcpy(&v, d + p, 8); p += 8;
+    return true;
+}
+bool get_raw32(const uint8_t* d, size_t& p, size_t end, uint32_t& v)
+{
+    if (p + 4 > end) return false;
+    std::memcpy(&v, d + p, 4); p += 4;
+    return true;
+}
+
+template <class T>
+bool map_layer(const MappedFile& f, const SnapHeader& h, SnapSection recs, SnapSection slots,
+               typename T::Layer& out)
+{
+    const uint64_t rs = sizeof(typename T::Rec);
+    if (h.size[recs] % rs || h.size[slots] % 4 || h.size[slots] < 4) return false;
+    if (h.off[recs] % alignof(typename T::Rec) || h.off[slots] % 4) return false;
+    out.recs = (const typename T::Rec*)(void*)(f.data() + h.off[recs]);
+    out.count = (uint32_t)(h.size[recs] / rs);
+    out.slots = (const uint32_t*)(void*)(f.data() + h.off[slots]);
+    out.mask = (uint32_t)(h.size[slots] / 4 - 1);
+    out.names = (const char*)f.data() + h.off[S_NAMES];
+    out.names_size = (size_t)h.size[S_NAMES];
+    return T::valid(out);
+}
+
+// A hit marks a file used, so the size cap keeps what is actually opened.
+void touch(const std::string& path)
+{
+    std::error_code ec;
+    std::filesystem::last_write_time(path, std::filesystem::file_time_type::clock::now(), ec);
+}
+
+// SNAPSHOTS ARE BOUNDED PER INSTALLATION. A game patch changes every key and
+// the first-layer sweep removes the old chain; this catches the rest (levels
+// opened in unusual sequences, tools mounting other archive sets). Least
+// recently used first, never a file named in `keep`.
+void enforce_snapshot_cap(const std::filesystem::path& dir, const std::string& root,
+                          const std::vector<std::string>& keep)
+{
+    constexpr uint64_t kCap = 2ull << 30;
+    struct F { std::filesystem::path p; uint64_t size; std::filesystem::file_time_type t; };
+    std::vector<F> files;
+    uint64_t total = 0;
+    std::error_code ec;
+    const std::string prefix = root + "-";
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string fn = e.path().filename().string();
+        if (fn.compare(0, prefix.size(), prefix) != 0) continue;
+        std::error_code fe;
+        F f{e.path(), (uint64_t)e.file_size(fe), e.last_write_time(fe)};
+        if (fe) continue;
+        total += f.size;
+        files.push_back(std::move(f));
+    }
+    if (total <= kCap) return;
+    std::sort(files.begin(), files.end(), [](const F& a, const F& b) { return a.t < b.t; });
+    for (const F& f : files) {
+        if (total <= kCap) break;
+        const std::string s = f.p.string();
+        if (std::find(keep.begin(), keep.end(), s) != keep.end()) continue;
+        std::error_code rm;
+        if (std::filesystem::remove(f.p, rm)) total -= f.size;
+    }
+}
+
+std::string snapshot_root(const std::string& game)
+{
+    std::string low = std::filesystem::path(game).lexically_normal().generic_string();
+    std::transform(low.begin(), low.end(), low.begin(),
+        [](unsigned char ch) { return (char)std::tolower(ch); });
+    while (!low.empty() && low.back() == '/') low.pop_back();
+    const auto id = content_id(low.data(), low.size());
+    return hex64(id.first);
+}
+
+} // namespace
+
+std::string Source::snapshot_side_path(const char* tag) const
+{
+    if (!snapshots_enabled() || snap_base_.empty() || res_.layers().empty()) return std::string();
+    if (!res_.overlay().empty() || !ebx_.overlay().empty() ||
+        !chunks_.overlay().empty() || !chunk_seg_.overlay().empty()) return std::string();
+    return (cache_dir() / "mount" / (snapshot_root(game_) + "-" + snap_base_.substr(0, 16) + "-" +
+            hex64(seq_a_) + hex64(seq_b_) + "-" + tag + ".bin")).string();
+}
+
+namespace {
+constexpr char kPidxMagic[8] = {'B','F','6','P','I','D','X','1'};
+}
+
+bool Source::load_partition_index(const std::string& path)
+{
+    std::shared_ptr<MappedFile> f = MappedFile::open(path);
+    if (!f) return false;
+    const uint8_t* d = f->data();
+    const size_t end = f->size();
+    size_t p = 8;
+    uint64_t a = 0, b = 0, partitions = 0, duplicates = 0;
+    uint32_t count = 0;
+    bool ok = end >= 8 && std::memcmp(d, kPidxMagic, 8) == 0 &&
+              get_raw64(d, p, end, a) && get_raw64(d, p, end, b) && a == seq_a_ && b == seq_b_ &&
+              get_raw64(d, p, end, partitions) && get_raw64(d, p, end, duplicates) &&
+              get_raw32(d, p, end, count) && partitions == ebx_.size() && count <= partitions;
+    std::map<std::string, std::string> index;
+    std::string guid, name;
+    auto hint = index.end();
+    for (uint32_t i = 0; ok && i < count; ++i) {
+        ok = get_str(d, p, end, guid) && get_str(d, p, end, name) && valid_guid(guid);
+        if (ok) hint = index.emplace_hint(hint, guid, name);    // written in key order
+    }
+    ok = ok && p == end && index.size() == count;
+    if (!ok) return false;
+    pidx_.swap(index);
+    touch(path);
+    pidx_stats_ = PartitionIndexStats();
+    pidx_stats_.built = pidx_stats_.from_cache = true;
+    pidx_stats_.full_read = partition_index_full_read();
+    pidx_stats_.partitions = partitions;
+    pidx_stats_.guids = count + duplicates;
+    pidx_stats_.duplicates = duplicates;
+    return true;
+}
+
+void Source::save_partition_index(const std::string& path) const
+{
+    std::vector<uint8_t> raw(kPidxMagic, kPidxMagic + 8);
+    put_u64(raw, seq_a_); put_u64(raw, seq_b_);
+    put_u64(raw, pidx_stats_.partitions); put_u64(raw, pidx_stats_.duplicates);
+    put_u32(raw, (uint32_t)pidx_.size());
+    for (const auto& kv : pidx_) { put_str(raw, kv.first); put_str(raw, kv.second); }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    const auto nonce = (uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    const std::string tmp = path + "." + std::to_string(nonce) + ".tmp";
+    {
+        std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+        if (!o) return;
+        o.write((const char*)raw.data(), (std::streamsize)raw.size());
+        o.close();
+        if (!o) { std::filesystem::remove(tmp, ec); return; }
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) std::filesystem::remove(tmp, ec);
+}
+
+bool Source::load_snapshot(const std::string& path, uint64_t parent_a, uint64_t parent_b,
+                           uint64_t key_a, uint64_t key_b, std::string& why)
+{
+    std::shared_ptr<MappedFile> f = MappedFile::open(path);
+    if (!f) { why = "no snapshot"; return false; }
+    if (f->size() < sizeof(SnapHeader)) { why = "snapshot too small"; return false; }
+    SnapHeader h;
+    std::memcpy(&h, f->data(), sizeof(h));
+    if (std::memcmp(h.magic, kSnapMagic, 8) != 0 || h.version != kSnapVersion ||
+        h.sections != kSnapSections) { why = "snapshot format differs"; return false; }
+    for (uint32_t i = 0; i < 3; ++i)
+        if (h.rec_sizes[i] != snap_rec_size(i)) { why = "snapshot record layout differs"; return false; }
+    if (h.key_a != key_a || h.key_b != key_b || h.parent_a != parent_a || h.parent_b != parent_b)
+    { why = "snapshot key differs"; return false; }
+    for (uint32_t i = 0; i < kSnapSections; ++i)
+        if (h.off[i] > f->size() || h.size[i] > f->size() - h.off[i])
+        { why = "snapshot section out of bounds"; return false; }
+
+    ResTable::Layer rl; EbxTable::Layer el; ChunkTable::Layer cl, sl;
+    if (!map_layer<ResTable>(*f, h, S_RES_RECS, S_RES_SLOTS, rl) ||
+        !map_layer<EbxTable>(*f, h, S_EBX_RECS, S_EBX_SLOTS, el) ||
+        !map_layer<ChunkTable>(*f, h, S_CHUNK_RECS, S_CHUNK_SLOTS, cl) ||
+        !map_layer<ChunkTable>(*f, h, S_SEG_RECS, S_SEG_SLOTS, sl))
+    { why = "snapshot table is corrupt"; return false; }
+
+    // The small state is stored whole: it replaces what is here.
+    const uint8_t* d = f->data();
+    size_t p = (size_t)h.off[S_STATE];
+    const size_t end = p + (size_t)h.size[S_STATE];
+    std::unordered_set<std::string> tocs;
+    std::map<std::string, std::pair<uint64_t, uint64_t>> hashes;
+    std::map<uint32_t, uint64_t> types;
+    std::map<std::string, std::string> depots;
+    std::vector<std::string> bundles;
+    uint64_t total = 0;
+    uint32_t n = 0;
+    bool ok = get_raw32(d, p, end, n);
+    for (uint32_t i = 0; ok && i < n; ++i) { std::string s; ok = get_str(d, p, end, s); tocs.insert(s); }
+    ok = ok && get_raw32(d, p, end, n);
+    for (uint32_t i = 0; ok && i < n; ++i) {
+        std::string s; uint64_t a = 0, b = 0;
+        ok = get_str(d, p, end, s) && get_raw64(d, p, end, a) && get_raw64(d, p, end, b);
+        hashes[s] = {a, b};
+    }
+    ok = ok && get_raw32(d, p, end, n);
+    for (uint32_t i = 0; ok && i < n; ++i) {
+        uint32_t k = 0; uint64_t v = 0;
+        ok = get_raw32(d, p, end, k) && get_raw64(d, p, end, v);
+        types[k] = v;
+    }
+    ok = ok && get_raw64(d, p, end, total) && get_raw32(d, p, end, n);
+    for (uint32_t i = 0; ok && i < n; ++i) {
+        std::string a, b;
+        ok = get_str(d, p, end, a) && get_str(d, p, end, b);
+        depots.emplace(a, b);
+    }
+    ok = ok && get_raw32(d, p, end, n);
+    if (ok) bundles.reserve(n);
+    for (uint32_t i = 0; ok && i < n; ++i) { std::string s; ok = get_str(d, p, end, s); bundles.push_back(std::move(s)); }
+    ok = ok && p == end;
+    if (ok) {
+        for (uint32_t i = 0; ok && i < rl.count; ++i)
+            ok = rl.recs[i].bundle == ResTable::kNoBundle || rl.recs[i].bundle < bundles.size();
+        for (uint32_t i = 0; ok && i < el.count; ++i)
+            ok = el.recs[i].bundle == EbxTable::kNoBundle || el.recs[i].bundle < bundles.size();
+    }
+    if (!ok) { why = "snapshot state is corrupt"; return false; }
+
+    res_.clear_overlay(); ebx_.clear_overlay(); chunks_.clear_overlay(); chunk_seg_.clear_overlay();
+    res_.add_layer(rl); ebx_.add_layer(el); chunks_.add_layer(cl); chunk_seg_.add_layer(sl);
+    mounted_tocs_.swap(tocs);
+    mounted_toc_hashes_.swap(hashes);
+    res_entry_type_.swap(types);
+    res_entries_total_ = total;
+    depot_by_bundle_.swap(depots);
+    bundles_.swap(bundles);
+    bundle_ix_.clear();
+    bundle_ix_.reserve(bundles_.size());
+    for (uint32_t i = 0; i < bundles_.size(); ++i) bundle_ix_.emplace(bundles_[i], i);
+    seq_a_ = key_a; seq_b_ = key_b;
+    snap_files_.push_back(std::move(f));
+    tables_grew();
+    return true;
+}
+
+bool Source::save_snapshot(const std::string& path, uint64_t key_a, uint64_t key_b,
+                           uint64_t parent_a, uint64_t parent_b,
+                           const std::vector<std::string>& stamps, std::string& why)
+{
+    std::vector<uint8_t> sec[kSnapSections];
+    put_u32(sec[S_STAMPS], (uint32_t)stamps.size());
+    for (const std::string& s : stamps) put_str(sec[S_STAMPS], s);
+    std::vector<uint8_t> names;
+    res_.write_overlay(sec[S_RES_RECS], sec[S_RES_SLOTS], names);
+    ebx_.write_overlay(sec[S_EBX_RECS], sec[S_EBX_SLOTS], names);
+    chunks_.write_overlay(sec[S_CHUNK_RECS], sec[S_CHUNK_SLOTS], names);
+    chunk_seg_.write_overlay(sec[S_SEG_RECS], sec[S_SEG_SLOTS], names);
+    sec[S_NAMES].swap(names);
+
+    std::vector<uint8_t>& st = sec[S_STATE];
+    put_u32(st, (uint32_t)mounted_tocs_.size());
+    for (const std::string& s : mounted_tocs_) put_str(st, s);
+    put_u32(st, (uint32_t)mounted_toc_hashes_.size());
+    for (const auto& kv : mounted_toc_hashes_) { put_str(st, kv.first); put_u64(st, kv.second.first); put_u64(st, kv.second.second); }
+    put_u32(st, (uint32_t)res_entry_type_.size());
+    for (const auto& kv : res_entry_type_) { put_u32(st, kv.first); put_u64(st, kv.second); }
+    put_u64(st, res_entries_total_);
+    put_u32(st, (uint32_t)depot_by_bundle_.size());
+    for (const auto& kv : depot_by_bundle_) { put_str(st, kv.first); put_str(st, kv.second); }
+    put_u32(st, (uint32_t)bundles_.size());
+    for (const std::string& s : bundles_) put_str(st, s);
+
+    SnapHeader h{};
+    std::memcpy(h.magic, kSnapMagic, 8);
+    h.version = kSnapVersion;
+    h.sections = kSnapSections;
+    for (uint32_t i = 0; i < 3; ++i) h.rec_sizes[i] = snap_rec_size(i);
+    h.key_a = key_a; h.key_b = key_b; h.parent_a = parent_a; h.parent_b = parent_b;
+    uint64_t at = sizeof(SnapHeader);
+    for (uint32_t i = 0; i < kSnapSections; ++i) {
+        at = (at + 7) & ~7ull;                  // every section 8-aligned for in-place reads
+        h.off[i] = at; h.size[i] = sec[i].size();
+        at += sec[i].size();
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    const auto nonce = (uint64_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    const std::string tmp = path + "." + std::to_string(nonce) + ".tmp";
+    {
+        std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+        if (!o) { why = "cannot write " + tmp; return false; }
+        o.write((const char*)&h, sizeof(h));
+        uint64_t pos = sizeof(h);
+        static const char zeros[8] = {0};
+        for (uint32_t i = 0; i < kSnapSections; ++i) {
+            if (h.off[i] > pos) o.write(zeros, (std::streamsize)(h.off[i] - pos));
+            if (!sec[i].empty()) o.write((const char*)sec[i].data(), (std::streamsize)sec[i].size());
+            pos = h.off[i] + sec[i].size();
+        }
+        o.close();
+        if (!o) { std::filesystem::remove(tmp, ec); why = "short write " + tmp; return false; }
+    }
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        // Another process got there first (and may have it mapped): use theirs.
+        std::filesystem::remove(tmp, ec);
+    }
+    return true;
+}
+
+bool Source::mount_tocs(const std::vector<std::string>& toc_paths, const char* label,
+                        size_t& mounted, std::string& err)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    snap_stats_ = MountSnapshotStats();
+    mounted = 0;
+
+    // The same identity twice in one list mounts once.
+    std::vector<std::string> todo;
+    std::vector<std::string> ids;
+    {
+        std::unordered_set<std::string> seen;
+        for (const std::string& p : toc_paths) {
+            std::string id = toc_identity(p);
+            if (mounted_tocs_.count(id) || !seen.insert(id).second) continue;
+            todo.push_back(p);
+            ids.push_back(std::move(id));
+        }
+    }
+    auto finish = [&]() {
+        for (const std::string& p : toc_paths) if (mounted_tocs_.count(toc_identity(p))) mounted++;
+        snap_stats_.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return true;
+    };
+    if (todo.empty()) { snap_stats_.note = "already mounted"; return finish(); }
+
+    // A snapshot only stacks on tables that are themselves all snapshot (or
+    // empty): an overlay means this process mounted something the key cannot
+    // describe as a stored layer. Three layers at most - bf6_open's archives,
+    // the rest of the shared archives, one level - so the stored files are
+    // exactly the ones an ordinary open asks for; a second level in the same
+    // context mounts in memory.
+    const bool overlays_empty = res_.overlay().empty() && ebx_.overlay().empty() &&
+                                chunks_.overlay().empty() && chunk_seg_.overlay().empty();
+    const bool use = snapshots_enabled() && overlays_empty && res_.layers().size() < 3;
+    const uint64_t parent_a = seq_a_, parent_b = seq_b_;
+    uint64_t key_a = seq_a_, key_b = seq_b_;
+    std::string path, base;
+    const std::string root = snapshot_root(game_);
+    std::vector<std::string> stamps;
+    if (use) {
+        // The key the mount below would leave: exactly what mount_toc adds.
+        stamps.reserve(todo.size());
+        for (size_t i = 0; i < todo.size(); ++i) {
+            stamps.push_back(toc_stamp(todo[i], ids[i]));
+            seq_add(stamps.back());
+        }
+        key_a = seq_a_; key_b = seq_b_;
+        seq_a_ = parent_a; seq_b_ = parent_b;
+        const std::string key = hex64(key_a) + hex64(key_b);
+        base = snap_base_.empty() ? key : snap_base_;
+        path = (cache_dir() / "mount" / (root + "-" + base.substr(0, 16) + "-" + key + ".bf6m")).string();
+        snap_stats_.path = path;
+        if (progress_ && !progress_(label, 0, (int)todo.size())) { err = "cancelled"; return false; }
+        std::string why;
+        if (load_snapshot(path, parent_a, parent_b, key_a, key_b, why)) {
+            if (snap_base_.empty()) snap_base_ = base;
+            touch(path);
+            snap_stats_.loaded = true;
+            if (progress_) progress_(label, (int)todo.size(), (int)todo.size());
+            return finish();
+        }
+        snap_stats_.note = why;
+    } else {
+        snap_stats_.note = !snapshots_enabled() ? "disabled" :
+                           !overlays_empty ? "tables already hold unsnapshotted mounts" : "layer limit";
+    }
+
+    int done = 0;
+    for (const std::string& t : todo) {
+        if (progress_ && !progress_(label, done++, (int)todo.size())) { err = "cancelled"; return false; }
+        std::string e;
+        mount_toc(t, e);
+    }
+
+    // Write what this call added, then read it back from the file so the heap
+    // copy goes. Small mounts are not worth a file.
+    const size_t added = res_.overlay().size() + ebx_.overlay().size() +
+                         chunks_.overlay().size() + chunk_seg_.overlay().size();
+    if (use && added >= 20000 && seq_a_ == key_a && seq_b_ == key_b) {
+        const auto s0 = std::chrono::steady_clock::now();
+        std::string why;
+        if (save_snapshot(path, key_a, key_b, parent_a, parent_b, stamps, why)) {
+            snap_stats_.saved = true;
+            if (snap_base_.empty()) sweep_stale_chains(root, base.substr(0, 16));
+            enforce_snapshot_cap(cache_dir() / "mount", root, {path});
+            // Re-open from the file: identical tables, no heap copy.
+            // load_snapshot swaps the overlays for the mapped layer only when
+            // the file validates; on failure the heap tables stay as they are.
+            std::string why2;
+            if (load_snapshot(path, parent_a, parent_b, key_a, key_b, why2)) {
+                if (snap_base_.empty()) snap_base_ = base;
+            } else {
+                snap_stats_.note = "saved but not reopened: " + why2;
+            }
+        } else {
+            snap_stats_.note = "not saved: " + why;
+        }
+        snap_stats_.save_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - s0).count();
+    }
+    return finish();
+}
+
+// A GAME PATCH LEAVES WHOLE CHAINS UNREACHABLE. When a new first layer is
+// written, every other first layer of this installation folder is checked
+// against the files it was built from; a chain whose TOCs are gone or changed is
+// deleted. A chain that merely started from a different archive set (a
+// front-end context, a tool) is still valid and stays.
+void Source::sweep_stale_chains(const std::string& root, const std::string& keep_base) const
+{
+    const std::filesystem::path dir = cache_dir() / "mount";
+    const std::string prefix = root + "-";
+    std::set<std::string> bases;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string fn = e.path().filename().string();
+        if (fn.size() < prefix.size() + 17 || fn.compare(0, prefix.size(), prefix) != 0) continue;
+        const std::string b = fn.substr(prefix.size(), 16);
+        if (b != keep_base) bases.insert(b);
+    }
+    for (const std::string& b : bases) {
+        bool stale = true;
+        // The first layer's own key starts with its base.
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+            const std::string fn = e.path().filename().string();
+            if (fn.rfind(prefix + b + "-" + b, 0) != 0 || e.path().extension() != ".bf6m") continue;
+            std::shared_ptr<MappedFile> f = MappedFile::open(e.path().string());
+            if (!f || f->size() < sizeof(SnapHeader)) break;
+            SnapHeader hd;
+            std::memcpy(&hd, f->data(), sizeof(hd));
+            if (std::memcmp(hd.magic, kSnapMagic, 8) != 0 || hd.version != kSnapVersion ||
+                hd.off[S_STAMPS] > f->size() || hd.size[S_STAMPS] > f->size() - hd.off[S_STAMPS]) break;
+            const uint8_t* d = f->data();
+            size_t p = (size_t)hd.off[S_STAMPS];
+            const size_t end = p + (size_t)hd.size[S_STAMPS];
+            uint32_t n = 0;
+            if (!get_raw32(d, p, end, n) || n == 0) break;
+            stale = false;
+            for (uint32_t i = 0; i < n && !stale; ++i) {
+                std::string s;
+                if (!get_str(d, p, end, s)) { stale = true; break; }
+                const size_t bar = s.find('|');
+                const std::string id = s.substr(0, bar);
+                stale = toc_stamp(id, id) != s;
+            }
+            break;
+        }
+        if (!stale) continue;
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+            const std::string fn = e.path().filename().string();
+            if (fn.rfind(prefix + b + "-", 0) == 0) {
+                std::error_code rm;
+                std::filesystem::remove(e.path(), rm);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MappedFile
+// ---------------------------------------------------------------------------
+
+#ifdef _WIN32
+}  // namespace bf6
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+namespace bf6 {
+
+std::shared_ptr<MappedFile> MappedFile::open(const std::string& path)
+{
+    const std::wstring wide = std::filesystem::path(path).wstring();
+    HANDLE file = CreateFileW(wide.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return nullptr;
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0) { CloseHandle(file); return nullptr; }
+    HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping) { CloseHandle(file); return nullptr; }
+    void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!view) { CloseHandle(mapping); CloseHandle(file); return nullptr; }
+    std::shared_ptr<MappedFile> f(new MappedFile());
+    f->data_ = (const uint8_t*)view;
+    f->size_ = (size_t)size.QuadPart;
+    f->file_ = file;
+    f->mapping_ = mapping;
+    return f;
+}
+
+MappedFile::~MappedFile()
+{
+    if (data_) UnmapViewOfFile(data_);
+    if (mapping_) CloseHandle((HANDLE)mapping_);
+    if (file_) CloseHandle((HANDLE)file_);
+}
+#else
+}  // namespace bf6
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+namespace bf6 {
+
+std::shared_ptr<MappedFile> MappedFile::open(const std::string& path)
+{
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return nullptr;
+    struct stat s;
+    if (fstat(fd, &s) != 0 || s.st_size <= 0) { ::close(fd); return nullptr; }
+    void* view = mmap(nullptr, (size_t)s.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    ::close(fd);
+    if (view == MAP_FAILED) return nullptr;
+    std::shared_ptr<MappedFile> f(new MappedFile());
+    f->data_ = (const uint8_t*)view;
+    f->size_ = (size_t)s.st_size;
+    return f;
+}
+
+MappedFile::~MappedFile()
+{
+    if (data_) munmap((void*)data_, size_);
+}
+#endif
 
 }  // namespace bf6

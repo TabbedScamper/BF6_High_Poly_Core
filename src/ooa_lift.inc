@@ -100,14 +100,49 @@ static void aes_decrypt_block(const uint8_t rk[176], uint8_t s[16])
     }
 }
 
-static bool aes_cbc_decrypt(const uint8_t key[16], const uint8_t iv[16],
-                            uint8_t* buf, size_t n)
+#if defined(_M_X64) || defined(__x86_64__)
+#define BF6_AESNI 1
+static bool aesni_available()
 {
-    if (n % 16) return false;
-    uint8_t rk[176];
-    aes_expand(key, rk);
+    int info[4] = {0};
+#ifdef _MSC_VER
+    __cpuid(info, 1);
+#else
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    __get_cpuid(1, &a, &b, &c, &d);
+    info[2] = (int)c;
+#endif
+    return (info[2] & (1 << 25)) != 0;
+}
+
+#if !defined(_MSC_VER)
+__attribute__((target("aes,sse2")))
+#endif
+static void aesni_cbc_decrypt_range(const uint8_t rk[176], const uint8_t prev_block[16],
+                                    uint8_t* buf, size_t n)
+{
+    __m128i dk[11];
+    dk[0] = _mm_loadu_si128((const __m128i*)(rk + 160));
+    for (int r = 1; r < 10; r++)
+        dk[r] = _mm_aesimc_si128(_mm_loadu_si128((const __m128i*)(rk + (10 - r) * 16)));
+    dk[10] = _mm_loadu_si128((const __m128i*)rk);
+    __m128i prev = _mm_loadu_si128((const __m128i*)prev_block);
+    for (size_t o = 0; o < n; o += 16) {
+        const __m128i c = _mm_loadu_si128((const __m128i*)(buf + o));
+        __m128i s = _mm_xor_si128(c, dk[0]);
+        for (int r = 1; r < 10; r++) s = _mm_aesdec_si128(s, dk[r]);
+        s = _mm_aesdeclast_si128(s, dk[10]);
+        _mm_storeu_si128((__m128i*)(buf + o), _mm_xor_si128(s, prev));
+        prev = c;
+    }
+}
+#endif
+
+static void soft_cbc_decrypt_range(const uint8_t rk[176], const uint8_t prev_block[16],
+                                   uint8_t* buf, size_t n)
+{
     uint8_t prev[16];
-    std::memcpy(prev, iv, 16);
+    std::memcpy(prev, prev_block, 16);
     for (size_t o = 0; o < n; o += 16) {
         uint8_t cipher[16], block[16];
         std::memcpy(cipher, buf + o, 16);
@@ -116,6 +151,61 @@ static bool aes_cbc_decrypt(const uint8_t key[16], const uint8_t iv[16],
         for (int k = 0; k < 16; k++) buf[o + k] = (uint8_t)(block[k] ^ prev[k]);
         std::memcpy(prev, cipher, 16);
     }
+}
+
+/* CBC DECRYPTION IS PARALLEL: plaintext block i is D(C_i) xor C_(i-1), and both
+ * inputs are ciphertext that is already there. The buffer is split into runs,
+ * each run is handed the ciphertext block before it, and the runs decrypt on
+ * their own threads with the CPU's AES instructions where it has them. Each
+ * run's own "previous" block is copied before any thread writes, because a
+ * neighbour decrypts that block in place. */
+static bool aes_cbc_decrypt(const uint8_t key[16], const uint8_t iv[16],
+                            uint8_t* buf, size_t n)
+{
+    if (n % 16) return false;
+    aes_init_inv();
+    uint8_t rk[176];
+    aes_expand(key, rk);
+    // BF6_OOA_LIFT_SOFT=1: the original one-thread software path, the control
+    // the fast path is checked against.
+    const char* soft_env = std::getenv("BF6_OOA_LIFT_SOFT");
+    const bool soft = soft_env && *soft_env && std::strcmp(soft_env, "0") != 0;
+#ifdef BF6_AESNI
+    const bool hw = !soft && aesni_available();
+#else
+    const bool hw = false;
+#endif
+    const size_t blocks = n / 16;
+    unsigned threads = soft ? 1 : std::thread::hardware_concurrency();
+    if (threads == 0) threads = 4;
+    if (threads > 16) threads = 16;
+    const size_t min_run = (size_t)1 << 16;               // blocks: ~1 MB per thread at least
+    size_t runs = std::min<size_t>(threads, (blocks + min_run - 1) / min_run);
+    if (runs < 1) runs = 1;
+    const size_t per = (blocks + runs - 1) / runs;
+
+    std::vector<std::array<uint8_t, 16>> prevs(runs);
+    for (size_t r = 0; r < runs; ++r) {
+        const size_t first = r * per;
+        if (first == 0) std::memcpy(prevs[r].data(), iv, 16);
+        else if (first < blocks) std::memcpy(prevs[r].data(), buf + (first - 1) * 16, 16);
+    }
+    auto work = [&](size_t r) {
+        const size_t first = r * per;
+        if (first >= blocks) return;
+        const size_t count = std::min(per, blocks - first);
+#ifdef BF6_AESNI
+        if (hw) { aesni_cbc_decrypt_range(rk, prevs[r].data(), buf + first * 16, count * 16); return; }
+#endif
+        soft_cbc_decrypt_range(rk, prevs[r].data(), buf + first * 16, count * 16);
+    };
+    if (runs == 1) { work(0); return true; }
+    std::vector<std::thread> pool;
+    pool.reserve(runs - 1);
+    for (size_t r = 1; r < runs; ++r) pool.emplace_back(work, r);
+    work(0);
+    for (std::thread& t : pool) t.join();
+    (void)hw;
     return true;
 }
 

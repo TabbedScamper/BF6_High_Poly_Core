@@ -108,7 +108,10 @@ private:
     Source& src_;
     TypeDb& types_;
 
-    std::unordered_map<std::string, std::string> by_name_;   // lower name -> "<name>.ebx"
+    mutable std::unordered_map<std::string, std::string> by_name_;   // lower name -> "<name>.ebx"
+    mutable bool by_name_built_ = false;
+    mutable int  alias_scans_ = 0;
+    void ensure_aliases() const;
     // Source owns and caches this immutable index for the mounted generation.
     // Borrow it: copying the 100k+ entry map for every small asset walk made
     // bounded front-end traversals spend seconds duplicating identical data.

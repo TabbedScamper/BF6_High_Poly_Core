@@ -1107,12 +1107,12 @@ bf6_ctx* bf6_open(const char* game_dir, char* err, int err_len) {
     std::string dir = std::string(game_dir) + "/Data/Win32";
     std::error_code ec;
     if (fs::is_directory(dir, ec)) {
-        for (const auto& f : fs::directory_iterator(dir, ec)) {
-            if (f.path().extension() == ".toc") {
-                std::string me;
-                c->src.mount_toc(f.path().string(), me);
-            }
-        }
+        std::vector<std::string> tocs;
+        for (const auto& f : fs::directory_iterator(dir, ec))
+            if (f.path().extension() == ".toc") tocs.push_back(f.path().string());
+        size_t mounted = 0;
+        std::string me;
+        c->src.mount_tocs(tocs, "mounting the shared archives", mounted, me);
     }
     if (c->src.res_count() == 0) {
         if (err && err_len > 0)

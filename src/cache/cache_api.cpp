@@ -231,10 +231,16 @@ struct bf6_precache {
         bool failed = false;
         std::string first_error;
         // Opened on the first map that needs building: a complete cache never mounts the game.
+        //
+        // A FRESH CONTEXT PER MAP, the way an editor opens one. With the mount
+        // snapshot and the schema decrypt that costs tens of milliseconds, and
+        // each map's mount is then the same stored snapshot a later editor
+        // session opens instead of a stack of every map built before it.
         bf6_ctx* ctx = nullptr;
         for (const std::string& level : levels) {
             if (cancel.load()) break;
             if (store.map_complete(level, req)) { progress.map_done(level, true); continue; }
+            if (ctx) { bf6_close(ctx); ctx = nullptr; }
             if (!ctx) {
                 char e[1024] = {};
                 ctx = bf6_open(game_dir.c_str(), e, sizeof e);

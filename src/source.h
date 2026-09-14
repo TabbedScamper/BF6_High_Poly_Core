@@ -18,12 +18,27 @@
 
 #include "cas.h"
 #include "caslocator.h"
+#include "mount_table.h"
 #include "toc.h"
 
 namespace bf6 {
 
 struct ResEntry { CasLoc loc; uint32_t dsize = 0; uint32_t type = 0; uint64_t rid = 0; };
 struct EbxEntry { CasLoc loc; uint32_t dsize = 0; };
+
+using ResTable   = MountTable<ResEntry, false>;
+using EbxTable   = MountTable<EbxEntry, false>;
+using ChunkTable = MountTable<CasLoc, true>;
+
+// What the last mount_tocs call did, for benches and tests.
+struct MountSnapshotStats {
+    bool        loaded = false;     // the tables came from a mapped snapshot
+    bool        saved = false;      // a snapshot was written after mounting
+    double      seconds = 0.0;      // the whole call
+    double      save_seconds = 0.0;
+    std::string path;
+    std::string note;               // why a snapshot was not used, when it was not
+};
 
 // A partition's own GUID out of its EFIX chunk, in the EBX reader's spelling.
 // Two routes to the same answer: from a fully decoded record, and through a
@@ -51,6 +66,21 @@ class Source {
 public:
     bool open(const std::string& game_dir, std::string& err);   // build the locator
     bool mount_toc(const std::string& toc_path, std::string& err);
+
+    // MOUNT SEVERAL TOCS, IN ORDER, THROUGH THE MOUNT SNAPSHOT.
+    //
+    // The tables a sequence of TOCs produces depend only on those TOCs (path,
+    // size, modification time), their order, and what was mounted before. That
+    // is the snapshot key. On a hit the tables are mapped from disk and nothing
+    // is read from the archives; on a miss the TOCs are mounted as usual and
+    // the result is written, then mapped, so the process also stops holding the
+    // tables as heap strings. `mounted` receives how many of `toc_paths` are
+    // mounted; false only when the progress callback cancels.
+    // BF6_DISABLE_MOUNT_SNAPSHOT=1 mounts every TOC directly.
+    bool mount_tocs(const std::vector<std::string>& toc_paths, const char* label,
+                    size_t& mounted, std::string& err);
+    const MountSnapshotStats& mount_snapshot_stats() const { return snap_stats_; }
+    void set_mount_snapshots(bool enabled) { snap_override_ = enabled ? 1 : 0; }
 
     // Add one EBX from its proven TOC + bundle owner without importing every
     // unrelated name in that archive into the active mount/index.
@@ -185,8 +215,8 @@ public:
     // Registration paths use this when payload bytes are consumed later by a
     // dedicated decoder.
     bool has_res(const std::string& name) const
-    { return res_.find(name) != res_.end(); }
-    const std::unordered_map<std::string, ResEntry>& res() const { return res_; }
+    { return res_.lookup(name) != nullptr; }
+    const ResTable& res() const { return res_; }
 
     /* RES ENTRIES SEEN BEFORE DEDUP, per type. res_ keys by NAME and the first
      * bundle wins, so res_.size() is a DISTINCT-NAME count. A resource shared
@@ -196,13 +226,13 @@ public:
      * distinct names cannot explain but listings can. */
     const std::map<uint32_t, uint64_t>& res_entries_by_type() const { return res_entry_type_; }
     uint64_t res_entries_total() const { return res_entries_total_; }
-    const std::unordered_map<std::string, EbxEntry>& ebx() const { return ebx_; }
+    const EbxTable& ebx() const { return ebx_; }
     // The chunk tables, for a caller that enumerates rather than asking for one
     // guid it already knows. Two of them because they ARE two: a loose chunk is
     // in the TOC's own chunk list, a bundle chunk is a segment of a bundle, and
     // get_chunk looks in both.
-    const std::map<std::string, CasLoc>& loose_chunks() const { return chunks_; }
-    const std::map<std::string, CasLoc>& bundle_chunks() const { return chunk_seg_; }
+    const ChunkTable& loose_chunks() const { return chunks_; }
+    const ChunkTable& bundle_chunks() const { return chunk_seg_; }
     // Is this guid in either chunk map, WITHOUT reading it. A resource names
     // its chunk in one of two byte orders and the only way to know which is to
     // look; doing that with get_chunk would decompress a megabyte to answer a
@@ -212,20 +242,46 @@ public:
 private:
     std::string game_;
     CasLocator  loc_;
-    std::unordered_map<std::string, ResEntry> res_;
+    ResTable res_;
     std::map<uint32_t, uint64_t> res_entry_type_;
     uint64_t res_entries_total_ = 0;
-    std::unordered_map<std::string, EbxEntry> ebx_;
+    EbxTable ebx_;
     std::unordered_set<std::string>           mounted_tocs_;
     // Full-content fingerprints of the exact live TOCs accepted into this
     // mount. They key the disposable armory index cache, so a patched install
     // cannot silently consume an index produced from older archive metadata.
     std::map<std::string, std::pair<uint64_t, uint64_t>> mounted_toc_hashes_;
-    std::map<std::string, CasLoc>             chunks_;    // loose-chunk guid -> loc
-    std::map<std::string, CasLoc>             chunk_seg_; // bundle-chunk guid -> loc
+    ChunkTable                                chunks_;    // loose-chunk guid -> loc
+    ChunkTable                                chunk_seg_; // bundle-chunk guid -> loc
     Progress                                  progress_;
-    std::unordered_map<std::string, std::string> res_bundle_;  // res -> bundle
-    std::unordered_map<std::string, std::string> ebx_bundle_;  // ebx -> bundle
+    // Bundle names, indexed by the bundle field of res_ and ebx_ entries. One
+    // string per bundle rather than one per resource.
+    std::vector<std::string>                  bundles_;
+    std::unordered_map<std::string, uint32_t> bundle_ix_;
+    uint32_t bundle_index(const std::string& name);
+
+    // The mount sequence so far, folded into a key (see mount_tocs), and the
+    // snapshot files whose layers the tables are reading.
+    uint64_t seq_a_ = 0x6d6f756e74736571ull;
+    uint64_t seq_b_ = 0x9e3779b97f4a7c15ull;
+    void     seq_add(const std::string& item);
+    std::string toc_stamp(const std::string& toc_path, const std::string& identity) const;
+    std::vector<std::shared_ptr<MappedFile>>  snap_files_;
+    std::string                               snap_base_;   // key of the first layer
+    MountSnapshotStats                        snap_stats_;
+    int                                       snap_override_ = -1; // -1: environment
+    bool snapshots_enabled() const;
+    bool load_snapshot(const std::string& path, uint64_t parent_a, uint64_t parent_b,
+                       uint64_t key_a, uint64_t key_b, std::string& why);
+    bool save_snapshot(const std::string& path, uint64_t key_a, uint64_t key_b,
+                       uint64_t parent_a, uint64_t parent_b,
+                       const std::vector<std::string>& stamps, std::string& why);
+    void sweep_stale_chains(const std::string& root, const std::string& keep_base) const;
+    void tables_grew();
+    // "" unless every table is a snapshot layer; else a file keyed like them.
+    std::string snapshot_side_path(const char* tag) const;
+    bool load_partition_index(const std::string& path);
+    void save_partition_index(const std::string& path) const;
     std::map<std::string, std::string>        depot_by_bundle_; // bundle -> depot res
     std::map<std::string, std::string>        pidx_;      // partition guid -> name.ebx
     bool                                      pidx_built_ = false;
@@ -239,7 +295,8 @@ private:
     PartitionIndexStats                       armory_pidx_stats_;
 
     std::vector<uint8_t> read_seg(const CasLoc& seg, bool allow_raw, std::string& err);
-    using PartitionOrder = std::vector<const std::pair<const std::string, EbxEntry>*>;
+    struct PartitionRef { std::string name; CasLoc loc; };
+    using PartitionOrder = std::vector<PartitionRef>;
     void read_partition_guids(const PartitionOrder& order, const char* label,
                               std::vector<std::string>& found, PartitionIndexStats& st);
 };

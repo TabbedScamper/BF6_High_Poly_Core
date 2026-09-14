@@ -5,6 +5,17 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <array>
+#include <thread>
+#include <vector>
+#if defined(_M_X64) || defined(__x86_64__)
+#  ifdef _MSC_VER
+#    include <intrin.h>
+#  else
+#    include <cpuid.h>
+#  endif
+#  include <wmmintrin.h>
+#endif
 
 #include "stdio_compat.h"
 

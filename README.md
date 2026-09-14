@@ -56,6 +56,8 @@ cmake -S . -B out-build -A x64 -DBF6_BUILD_TOOLS=ON
 - `third_party/imgui/` - Dear ImGui with its Win32 and Direct3D 11 backends, for the
   viewer only (MIT, `third_party/imgui/LICENSE.txt`).
 - `test/`, `probes/`, `tools/` - validation and packaging tooling.
+- `docs/` - `PRECACHE.md` (the up-front cache) and `LEVEL-OPEN.md` (the mount
+  snapshot and the other stored or accelerated steps of opening a level).
 
 ## Using the core from an engine
 

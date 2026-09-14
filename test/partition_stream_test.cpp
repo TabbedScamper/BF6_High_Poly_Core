@@ -82,6 +82,9 @@ int main(int argc, char** argv) {
 #endif
 
     bf6::Source src;
+    // Every round must be a real build, so not the index stored beside a
+    // mount snapshot.
+    src.set_mount_snapshots(false);
     std::string err;
     if (!src.open(game, err)) { std::fprintf(stderr, "open: %s\n", err.c_str()); return 1; }
     const bool mounted = armory ? src.mount_frontend(err) : src.mount_level(level, false, err);
@@ -120,15 +123,15 @@ int main(int argc, char** argv) {
 
     // Per-record agreement on a deterministic stride sample, over every mounted
     // partition the index considered (duplicate losers included).
-    std::vector<const std::pair<const std::string, bf6::EbxEntry>*> all;
-    for (const auto& kv : src.ebx()) all.push_back(&kv);
-    std::sort(all.begin(), all.end(), [](auto* a, auto* b) { return a->first < b->first; });
+    std::vector<std::pair<std::string, bf6::EbxEntry>> all;
+    for (const auto& kv : src.ebx()) all.emplace_back(kv.first, kv.second);
+    std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     if (armory) {
         // Keep only names the armory index could have published.
         std::map<std::string, int> inidx;
         for (const auto& kv : src.armory_partition_candidates()) for (const auto& p : kv.second) inidx[p] = 1;
-        std::vector<const std::pair<const std::string, bf6::EbxEntry>*> keep;
-        for (auto* e : all) if (inidx.count(e->first + ".ebx")) keep.push_back(e);
+        std::vector<std::pair<std::string, bf6::EbxEntry>> keep;
+        for (auto& e : all) if (inidx.count(e.first + ".ebx")) keep.push_back(e);
         all.swap(keep);
     }
     const size_t stride = std::max<size_t>(1, all.size() / sample);
@@ -136,12 +139,12 @@ int main(int argc, char** argv) {
     size_t checked = 0, agree = 0, nonempty = 0, shifted_hits = 0, shuffled_hits = 0, shown = 0;
     std::vector<std::string> sampled;
     for (size_t i = 0; i < all.size(); i += stride) {
-        const bf6::CasLoc& loc = all[i]->second.loc;
+        const bf6::CasLoc& loc = all[i].second.loc;
         const std::string a = src.partition_guid(loc, true, &fs);
         const std::string b = src.partition_guid(loc, false, &bs);
         ++checked;
         if (a == b) ++agree;
-        else if (shown++ < 10) std::printf("MISMATCH %s full=%s bounded=%s\n", all[i]->first.c_str(), a.c_str(), b.c_str());
+        else if (shown++ < 10) std::printf("MISMATCH %s full=%s bounded=%s\n", all[i].first.c_str(), a.c_str(), b.c_str());
         if (!b.empty()) ++nonempty;
         sampled.push_back(b);
         // CONTROL: the same reference shifted one byte.

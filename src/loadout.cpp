@@ -538,23 +538,39 @@ extern "C" int64_t bf6_loadout_weapon(bf6_ctx* c, const char* item_id, const cha
             std::snprintf(buf, sizeof(buf), ",\"uvs\":%lld", s.uv0 ? (long long)body.size() : -1LL);
             sections_json += buf;
             if (s.uv0) body.insert(body.end(), s.uv0, s.uv0 + (size_t)s.vertex_count * 2);
-            /* Indices ride in the float body as their exact bit patterns. */
+            /* Indices and colours ride in the float body as exact bit patterns. */
             std::snprintf(buf, sizeof(buf), ",\"indices\":%zu", body.size());
             sections_json += buf;
             const size_t at = body.size();
             body.resize(at + (size_t)s.index_count);
             std::memcpy(&body[at], s.indices, (size_t)s.index_count * sizeof(uint32_t));
+            std::snprintf(buf, sizeof(buf), ",\"colors\":%lld,\"decal\":%d", s.colors ? (long long)body.size() : -1LL, s.is_decal);
+            sections_json += buf;
+            if (s.colors) {
+                const size_t cat = body.size();
+                body.resize(cat + (size_t)s.vertex_count);
+                std::memcpy(&body[cat], s.colors, (size_t)s.vertex_count * sizeof(uint32_t));
+            }
             if (m->materials && s.material >= 0 && s.material < m->material_count) {
                 const bf6_material_desc& d = m->materials[s.material];
                 std::snprintf(buf, sizeof(buf),
                               ",\"alpha_test\":%d,\"translucent\":%d,\"alpha_from_albedo\":%d,\"nsm\":%d,"
-                              "\"base_color\":[%.6g,%.6g,%.6g],\"roughness\":%.6g,\"textures\":[",
-                              d.alpha_test, d.translucent, d.alpha_from_albedo, d.normal_is_nsm,
+                              "\"terrain_decal_receiver\":%d,\"base_color\":[%.9g,%.9g,%.9g],\"roughness\":%.9g,\"textures\":[",
+                              d.alpha_test, d.translucent, d.alpha_from_albedo, d.normal_is_nsm, d.terrain_decal_receiver,
                               d.base_color[0], d.base_color[1], d.base_color[2], d.roughness);
                 sections_json += buf;
                 for (int b = 0; b < d.texture_count; ++b) {
                     const char* tn = bf6_texture_name_at(c, d.textures[b].texture);
                     std::snprintf(buf, sizeof(buf), "%s[%d,%d,", b ? "," : "", (int)d.textures[b].slot, d.textures[b].texture);
+                    sections_json += buf;
+                    json_str(sections_json, tn ? tn : "");
+                    sections_json += ']';
+                }
+                sections_json += "],\"shader_textures\":[";
+                for (int b = 0; b < d.shader_texture_count; ++b) {
+                    const char* tn = bf6_texture_name_at(c, d.shader_textures[b].texture);
+                    std::snprintf(buf, sizeof(buf), "%s[%u,%d,", b ? "," : "", d.shader_textures[b].name32,
+                                  d.shader_textures[b].texture);
                     sections_json += buf;
                     json_str(sections_json, tn ? tn : "");
                     sections_json += ']';

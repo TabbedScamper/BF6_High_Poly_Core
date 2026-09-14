@@ -1580,10 +1580,12 @@ BF6_API void bf6_decal_draws_free(bf6_decal_draws*);
  * factory). Record: u32 'BLWP', u32 1, u32 json bytes, JSON (space padded to 4),
  * then a float body. JSON {"item","error","sections":[{"mesh","bundle",
  * "state_key" (hex; resolve against "bundle"), "vertex_count","index_count",
- * "positions","normals","uvs","indices" (float offsets into the body, -1 when
- * absent; indices are uint32 bit patterns), "alpha_test","translucent",
- * "alpha_from_albedo","nsm","base_color","roughness","textures":[[slot, id,
- * name]]}],"anchors":{"scp":[x,y,z],...}}. A non-empty error means no weapon. */
+ * "positions","normals","uvs","indices","colors" (float offsets into the body,
+ * -1 when absent; indices and colours are uint32 bit patterns, colours RGBA8
+ * with R in the low byte), "decal", "alpha_test","translucent",
+ * "alpha_from_albedo","nsm","terrain_decal_receiver","base_color","roughness",
+ * "textures":[[slot, id, name]],"shader_textures":[[name32, id, name]]}],
+ * "anchors":{"scp":[x,y,z],...}}. A non-empty error means no weapon. */
 BF6_API int64_t bf6_loadout_catalogue(bf6_ctx*, uint8_t** out);
 BF6_API int64_t bf6_loadout_attachments(bf6_ctx*, const char* item_id, const char* portal_enums, uint8_t** out);
 BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fits,

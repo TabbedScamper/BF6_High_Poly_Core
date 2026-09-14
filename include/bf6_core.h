@@ -1490,6 +1490,74 @@ BF6_API double bf6_terrain_mesh_height_at(const bf6_terrain_mesh*, double x, dou
 BF6_API int64_t bf6_terrain_mesh_cell_levels(const bf6_terrain_mesh*, uint8_t* out, int64_t out_max);
 BF6_API void bf6_terrain_mesh_free(bf6_terrain_mesh*);
 
+/* ---------------------------------------------------------- decal draws
+ *
+ * The level's road paint and ground decals, ready to draw: every
+ * bf6_level_decals row classified, styled, ordered and draped on the shared
+ * terrain mesh, exactly as the Unreal plugin draws them, so every engine
+ * composites the same street.
+ *
+ *   - Rows without vertices are dropped; draw_index counts the rest.
+ *   - A row with no colour sheet and no colour constant is not drawn
+ *     (puddles and modulators need a normal/roughness-only material).
+ *   - Each triangle is split so no edge exceeds 4 m (1 m where it touches a
+ *     pool, see touches_pool), up to 32 (128) segments, and every point is
+ *     projected: onto a receiver surface when `sample` finds one, else onto
+ *     the terrain mesh; `lift_m` (default 0.06) above it. A triangle whose
+ *     centre falls in a pool hole is clipped.
+ *
+ * The material each draw asks for (the Unreal "Road" parent):
+ *   base colour = albedo sheet (white when -1) * tint, sampled with mip_bias
+ *   normal      = normal sheet RG * 2 - 1, Z derived; roughness = 1 - A
+ *                 (neutral sheet when -1: RG 0.5, A 1)
+ *   opacity     = dot(opacity sheet RGBA, mask_select) (white when -1)
+ *                 * vertex alpha * opacity_scale
+ *   translucent, lit per pixel, casts no shadow; composite in ascending
+ *   sort_key (band 0 fill, 2000 detail, 4000 wear, 6000 marking, + draw_index).
+ * `marking` asks for the higher marking texture resolution. */
+typedef int (*bf6_decal_receiver_fn)(void* user, double x, double z, double y_min, double y_max,
+                                     double* y_out, int* pool_hole_out);
+typedef int (*bf6_decal_pool_fn)(void* user, double min_x, double min_z, double max_x, double max_z);
+
+typedef struct {
+    bf6_decal_receiver_fn sample;       /* optional; called from several threads */
+    bf6_decal_pool_fn     touches_pool; /* optional */
+    void*                 user;
+    float                 lift_m;       /* 0 = 0.06 */
+    int32_t               uv_swapped;
+} bf6_decal_drape_options;
+
+typedef struct {
+    int32_t record;                     /* bf6_level_decals row */
+    int32_t draw_index;
+    int32_t sort_key, band, marking, wear;
+    int32_t albedo, normal, opacity;    /* texture ids, -1 = neutral default */
+    float   tint[3];
+    float   opacity_scale;
+    float   mask_select[4];
+    float   mip_bias;
+    /* x, y, z, u, v, r, g, b, a per vertex; a triangle list in GAME metres. */
+    const float* verts;
+    int32_t vertex_count;
+} bf6_decal_draw;
+
+typedef struct {
+    int32_t records, drawn, triangles, painted, colourless;
+    int32_t tint_clamped, second_colour, markings, wear_softened;
+    int32_t base_surface_blended, surface_blended;
+    int32_t receiver_verts, pool_hole_tris, elevated_candidates, elevated, band_only_rejected;
+} bf6_decal_draw_stats;
+
+typedef struct bf6_decal_draws bf6_decal_draws;
+
+BF6_API bf6_decal_draws* bf6_level_decal_draws(bf6_ctx*, const char* level,
+                                               const bf6_terrain_mesh* ground,
+                                               const bf6_decal_drape_options* options);
+BF6_API int  bf6_decal_draws_count(const bf6_decal_draws*);
+BF6_API int  bf6_decal_draws_get(const bf6_decal_draws*, int index, bf6_decal_draw* out);
+BF6_API int  bf6_decal_draws_stats(const bf6_decal_draws*, bf6_decal_draw_stats* out);
+BF6_API void bf6_decal_draws_free(bf6_decal_draws*);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

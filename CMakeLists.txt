@@ -29,6 +29,7 @@ set(BF6_SOURCES
     src/decals.cpp
     src/water_tree.cpp
     src/terrain_mesh.cpp
+    src/decal_draws.cpp
     src/splat.cpp
     src/terrainlayers.cpp
     src/terrainstatic.cpp
@@ -150,6 +151,12 @@ if(BF6_BUILD_CORE_TESTS)
         target_link_libraries(types_open_bench PRIVATE xaudio2 ole32)
     endif()
     # Mount snapshot parity and timing against a real installation.
+    add_executable(decal_draws_test test/decal_draws_test.cpp)
+    target_link_libraries(decal_draws_test PRIVATE bf6_core_static)
+    target_include_directories(decal_draws_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(decal_draws_test PRIVATE xaudio2 ole32)
+    endif()
     add_executable(terrain_mesh_test test/terrain_mesh_test.cpp)
     target_link_libraries(terrain_mesh_test PRIVATE bf6_core_static)
     target_include_directories(terrain_mesh_test PRIVATE src include)

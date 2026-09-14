@@ -162,6 +162,19 @@ int main()
     auto paint = parse(layout(R"({"shape":4,"count":15,"seed":3,"strokes":[{"radius":4,"stamps":[[0,0,0],[6,0,0]]}]})"));
     check(paint.find("cells") && !paint.find("cells")->arr.empty() && paint.find("cell")->num >= 1.2
           && !paint.find("targets")->arr.empty(), "a painted stroke becomes cells and gets filled");
+    {
+        // While a stroke runs: filling the whole painting's cells as already
+        // filled leaves nothing to add; an empty filled list fills it all.
+        std::string cells_json = "[";
+        const auto& cl = paint.find("cells")->arr;
+        for (size_t i = 0; i < cl.size(); ++i)
+            cells_json += (i ? "," : "") + std::string("[") + std::to_string((int)cl[i].arr[0].num) + "," + std::to_string((int)cl[i].arr[1].num) + "]";
+        cells_json += "]";
+        const std::string stroke = R"("shape":4,"count":15,"seed":3,"strokes":[{"radius":4,"stamps":[[0,0,0],[6,0,0]]}])";
+        auto none_left = parse(layout("{" + stroke + R"(,"incremental":{"filled":)" + cells_json + R"(,"existing":[]}})"));
+        auto all_new = parse(layout("{" + stroke + R"(,"incremental":{"filled":[],"existing":[]}})"));
+        check(none_left.find("targets")->arr.empty() && !all_new.find("targets")->arr.empty(), "an incremental fill adds copies only in cells not yet filled");
+    }
     auto empty = parse(layout(R"({"shape":4,"count":15,"strokes":[]})"));
     check(empty.find("targets")->arr.empty(), "nothing painted, nothing laid");
 

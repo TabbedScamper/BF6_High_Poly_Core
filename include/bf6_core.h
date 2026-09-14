@@ -1646,7 +1646,10 @@ BF6_API int64_t bf6_mode_plan(const char* request_json, size_t len, uint8_t** ou
  * fraction),"seed","follow_terrain","terrain_only","pool" (source count; 0 =
  * copies of the selection),"unit_width" (widest source, metres; spacing),
  * "keep_center" (default pool == 0),"poly":[[x,y,z]...] (shape 3),
- * "strokes":[{"radius","stamps":[[x,y,z]...]}] (shape 4)}. World game metres.
+ * "strokes":[{"radius","stamps":[[x,y,z]...]}] (shape 4),"incremental":{"filled":
+ * [[i,k]...],"existing":[[x,y,z]...]} (shape 4 while a stroke runs: only the
+ * painted cells not in "filled" get copies, spaced from "existing", at the
+ * density the whole painting carries)}. World game metres.
  * ground(user, x, z, ref_y, terrain_only, &y) answers what is under a point,
  * searching down from ref_y: nonzero with *y on a hit. With terrain_only a miss
  * skips the copy; otherwise a miss keeps ref_y. May be NULL.
@@ -1655,6 +1658,52 @@ BF6_API int64_t bf6_mode_plan(const char* request_json, size_t len, uint8_t** ou
  * Godot negates them),"scale","pool" (-1 = the selection)}]} plus, for shape 4,
  * "cell" and "cells":[[i,k]...] (the painted area, cell * index in x and z).
  * Returns its length, or -1. */
+/* ---------------------------------------------------------- the Portal log
+ *
+ * What a mod printed while it ran, for the editors' LOG screens. Battlefield
+ * writes PortalLog.txt on PC in a "Battlefield*" folder under %TEMP% whose name
+ * carries a mojibake trademark sign, so it is found by pattern; the newest
+ * folder holding the file wins. temp_dir NULL or "" uses TEMP, then TMP.
+ *
+ * bf6_game_log_locate: JSON {"folder","path","why"} (why set when not found).
+ * bf6_game_log_read: path NULL or "" locates it. offset < 0 reads the whole file
+ *   (the last max_entries lines when max_entries > 0); offset >= 0 reads what was
+ *   added since, whole lines only, at most 4 MB, and a file shorter than offset
+ *   is a new session read from the top. JSON {"found","path","why","bytes",
+ *   "written" (unix),"offset" (pass back next time),"reset","entries":[{"time"
+ *   (UTC text, may be empty),"kind" ("console.log"|"error"|"script"|"system"),
+ *   "text"}]}. The file is shared with the game while it writes.
+ * Both return a record in *out (bf6_blob_free) and its length, or -1. */
+BF6_API int64_t bf6_game_log_locate(const char* temp_dir, uint8_t** out);
+BF6_API int64_t bf6_game_log_read(const char* path, const char* temp_dir, int64_t offset, int32_t max_entries,
+                                  uint8_t** out);
+
+/* ---------------------------------------------------------- CHANGES
+ *
+ * What the installed SDK, the Portal website (from captures already on disk),
+ * the installed game and the watchlist each say is available, kept as
+ * content-addressed snapshots with an append-only observation log per source
+ * under "root", and what moved between the last two observations. A key missing
+ * from a scope not completed both times is reported as not observed, never
+ * removed. Requests are JSON (len 0 = NUL-terminated); each call returns a
+ * record in *out (bf6_blob_free) and its length, or -1.
+ *
+ * bf6_caps_scan: {"root","sources":{"sdk":{"root"},"portal":{"blocks_file",
+ *   "settings_catalog"},"game":{"install","reader"},"watchlist":{}}} - only the
+ *   sources present are collected. -> {"report" (markdown),"file" (the report
+ *   saved under root/reports)}.
+ * bf6_caps_status: {"root"} -> {"root","sources":[{"source","scans","contents",
+ *   "newest":{"seq","observed","id","build","records","scopes"}}]}.
+ * bf6_caps_probe: {"script" (TypeScript that asks a running game which watched
+ *   names exist, calling none),"hash"}.
+ * bf6_caps_ingest_probe: {"root","lines":[log text...]} -> {"updated",
+ *   "summary"}; only a run that began, ended, passed its controls and answered
+ *   everything it promised is recorded. */
+BF6_API int64_t bf6_caps_scan(const char* request_json, size_t len, uint8_t** out);
+BF6_API int64_t bf6_caps_status(const char* request_json, size_t len, uint8_t** out);
+BF6_API int64_t bf6_caps_probe(uint8_t** out);
+BF6_API int64_t bf6_caps_ingest_probe(const char* request_json, size_t len, uint8_t** out);
+
 typedef int (*bf6_scatter_ground_fn)(void* user, double x, double z, double ref_y, int terrain_only, double* out_y);
 BF6_API int64_t bf6_scatter_layout(const char* request_json, size_t len, bf6_scatter_ground_fn ground,
                                    void* user, uint8_t** out);

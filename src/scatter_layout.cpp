@@ -159,8 +159,57 @@ extern "C" int64_t bf6_scatter_layout(const char* request_json, size_t len, bf6_
 
     std::string j = "{\"targets\":[";
     int made = 0;
+    const Value* inc = shape == 4 ? req.find("incremental") : nullptr;
     const bool can_lay = !(shape == 4 && cells.empty()) && !(shape == 3 && !drawn);
-    if (can_lay) {
+    if (inc && inc->is_obj() && can_lay) {
+        // WHILE A STROKE RUNS: fill only the cells it just gained, at the density
+        // the whole painting carries now. Rebuilding every copy ten times a second
+        // is what made painting crawl; the authoritative full fill still runs
+        // when the stroke ends.
+        std::set<int64_t> filled;
+        if (const Value* f = inc->find("filled"); f && f->is_arr())
+            for (const Value& e : f->arr)
+                if (e.is_arr() && e.arr.size() >= 2)
+                    filled.insert(((int64_t)(int)getn(&e.arr[0], 0) << 32) ^ (int64_t)(uint32_t)(int)getn(&e.arr[1], 0));
+        std::vector<P3> near = points(inc->find("existing"));
+        std::vector<std::pair<int, int>> fresh;
+        for (const auto& cp : cells) {
+            const int64_t key = ((int64_t)cp.first << 32) ^ (int64_t)(uint32_t)cp.second;
+            if (!filled.count(key)) fresh.push_back(cp);
+        }
+        const double density = (double)count / std::max(area, 1.0);
+        int want = (int)std::lround(density * (double)fresh.size() * cell * cell);
+        want = std::min(want, 400);   // one stamp is never a whole map
+        if (!fresh.empty() && want > 0) {
+            const double fit = std::sqrt(1.0 / std::max(density, 1e-12) / 2.6);
+            const double min_dist = std::min(std::max(std::min(unit_w * 0.7, fit), 0.4), 40.0);
+            Rng rng(seed * 7919 + (int64_t)near.size() * 104729 + (int64_t)fresh.size());
+            for (int s = 0; s < want * 20 && made < want; ++s) {
+                const auto& cp = fresh[(size_t)rng.range(0, (int)fresh.size() - 1)];
+                P3 p = {(cp.first + rng.frand()) * cell, 0.0, (cp.second + rng.frand()) * cell};
+                bool close = false;
+                for (const P3& q : near)
+                    if ((p.x - q.x) * (p.x - q.x) + (p.z - q.z) * (p.z - q.z) < min_dist * min_dist) { close = true; break; }
+                if (close) continue;
+                double y = 0.0;
+                // Nothing under it is a skip either way: there is no drawn height to fall back on.
+                if (!ground || !ground(user, p.x, p.z, 500.0, terrain_only ? 1 : 0, &y)) continue;
+                p.y = y;
+                const double yaw = (rng.frand() - 0.5) * rot;
+                const double tx = (rng.frand() - 0.5) * wob_x;
+                const double ty = (rng.frand() - 0.5) * wob_y;
+                const double scale = 1.0 + (rng.frand() * 2.0 - 1.0) * vary;
+                p.y += (rng.frand() * 2.0 - 1.0) * elev;
+                const int pick = pool > 0 ? rng.range(0, pool - 1) : -1;
+                near.push_back(p);
+                if (made) j += ',';
+                j += "{\"at\":[" + num(p.x) + "," + num(p.y) + "," + num(p.z) + "],\"yaw\":" + num(yaw)
+                   + ",\"tilt_x\":" + num(tx) + ",\"tilt_y\":" + num(ty) + ",\"scale\":" + num(scale)
+                   + ",\"pool\":" + std::to_string(pick) + "}";
+                ++made;
+            }
+        }
+    } else if (can_lay) {
         const double fit = std::sqrt(area / ((double)count * 2.6));
         const double min_dist = std::min(std::max(std::min(unit_w * 0.7, fit), 0.5), std::max(R, 1.0));
         std::vector<P3> placed;

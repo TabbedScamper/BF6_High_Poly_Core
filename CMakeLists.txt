@@ -33,6 +33,8 @@ set(BF6_SOURCES
     src/map_validate.cpp
     src/mode_setup.cpp
     src/scatter_layout.cpp
+    src/game_log.cpp
+    src/caps.cpp
     src/loadout.cpp
     src/splat.cpp
     src/terrainlayers.cpp
@@ -160,6 +162,12 @@ if(BF6_BUILD_CORE_TESTS)
     target_include_directories(loadout_test PRIVATE src include)
     if(WIN32)
         target_link_libraries(loadout_test PRIVATE xaudio2 ole32)
+    endif()
+    add_executable(log_caps_test test/log_caps_test.cpp)
+    target_link_libraries(log_caps_test PRIVATE bf6_core_static)
+    target_include_directories(log_caps_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(log_caps_test PRIVATE xaudio2 ole32)
     endif()
     add_executable(mode_scatter_test test/mode_scatter_test.cpp)
     target_link_libraries(mode_scatter_test PRIVATE bf6_core_static)

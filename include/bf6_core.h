@@ -1591,6 +1591,26 @@ BF6_API int64_t bf6_loadout_attachments(bf6_ctx*, const char* item_id, const cha
 BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fits,
                                    const char* portal_enums, uint8_t** out);
 
+/* ---------------------------------------------------------- map checks
+ *
+ * bf6_map_validate: the VALIDATE rules both SDK editors run, so a map gets the
+ * same problems, warnings and advice, worded the same, in either. No context:
+ * the engine describes its scene as JSON (len 0 = NUL-terminated):
+ *   {"level", "level_types":[type...], "all_types":[type...] (both optional;
+ *    the catalogue check runs only with all_types), "upload_bytes",
+ *    "upload_limit" (optional),
+ *    "objects":[{"id" (the engine's handle, echoed back), "name" (the link name
+ *      other objects' props use), "type", "from_library" (placed from the
+ *      object library), "obj_id" (-1 unset), "scale":[x,y,z],
+ *      "props":{prop: [link name...] | "a,b" | "legacy"},
+ *      "loop":[[x,z]...] (a volume's world points, game metres), "height"}]}
+ * "legacy" marks a reference the engine holds but cannot name; it is skipped.
+ * Record in *out (bf6_blob_free): JSON {"items":[{"severity" (0 problem,
+ * 1 warning, 2 advice),"id" (empty = the whole map),"message","fix"
+ * ("winding": reverse the volume's point order, or empty)}]}, problems first.
+ * Returns its length, or -1 for unreadable input. */
+BF6_API int64_t bf6_map_validate(const char* scene_json, size_t len, uint8_t** out);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

@@ -1402,13 +1402,14 @@ bool Source::mount_tocs(const std::vector<std::string>& toc_paths, const char* l
 
     // A snapshot only stacks on tables that are themselves all snapshot (or
     // empty): an overlay means this process mounted something the key cannot
-    // describe as a stored layer. Three layers at most - bf6_open's archives,
-    // the rest of the shared archives, one level - so the stored files are
-    // exactly the ones an ordinary open asks for; a second level in the same
-    // context mounts in memory.
+    // describe as a stored layer. Four layers at most - bf6_open's archives,
+    // the rest of the shared archives, one level, and every other level on top
+    // of that (the object catalogue, whose own level must still win) - so the
+    // stored files are the ones ordinary opens ask for. Anything past that
+    // mounts in memory.
     const bool overlays_empty = res_.overlay().empty() && ebx_.overlay().empty() &&
                                 chunks_.overlay().empty() && chunk_seg_.overlay().empty();
-    const bool use = snapshots_enabled() && overlays_empty && res_.layers().size() < 3;
+    const bool use = snapshots_enabled() && overlays_empty && res_.layers().size() < 4;
     const uint64_t parent_a = seq_a_, parent_b = seq_b_;
     uint64_t key_a = seq_a_, key_b = seq_b_;
     std::string path, base;

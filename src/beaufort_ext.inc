@@ -196,23 +196,13 @@ static bool BF6_ReadBeaufortForce(bf6_ctx* c, const std::string& lvl, float& for
     return false;
 }
 
-extern "C" int bf6_level_ocean_sea_state(bf6_ctx* c, const char* level,
-                                         bf6_ocean_sea_state* out)
+/* The sea state for one level directory. Shared by the walked-level call and
+ * the isolated route, so both describe a level the same way. */
+static int BF6_SeaStateInDir(bf6_ctx* c, const std::string& lvl, bf6_ocean_sea_state* out)
 {
-    if (!out) return 0;
     *out = bf6_ocean_sea_state{};
     out->wind_curve_index = -1;
-    if (!c || !level || !*level || !c->types || !c->walk) return 0;
-    if (c->walked_level != level) return 0;
-
-    /* Same level-directory derivation as the cascade reader, so the two calls
-     * cannot disagree about which level they are describing. */
-    std::string lvl = c->walk->root;
-    if (lvl.size() > 4 && lvl.compare(lvl.size() - 4, 4, ".ebx") == 0)
-        lvl.resize(lvl.size() - 4);
-    const size_t slash = lvl.find_last_of('/');
-    lvl = slash == std::string::npos ? std::string() : lvl.substr(0, slash);
-
+    if (!c || !c->types || lvl.empty()) return 0;
     float force = 0.f;
     if (!BF6_ReadBeaufortForce(c, lvl, force)) return 0;
     out->found = 1;
@@ -273,4 +263,79 @@ extern "C" int bf6_level_ocean_sea_state(bf6_ctx* c, const char* level,
         }
     }
     return 1;
+}
+
+extern "C" int bf6_level_ocean_sea_state(bf6_ctx* c, const char* level,
+                                         bf6_ocean_sea_state* out)
+{
+    if (!out) return 0;
+    *out = bf6_ocean_sea_state{};
+    out->wind_curve_index = -1;
+    if (!c || !level || !*level || !c->types || !c->walk) return 0;
+    if (c->walked_level != level) return 0;
+
+    /* Same level-directory derivation as the cascade reader, so the two calls
+     * cannot disagree about which level they are describing. */
+    std::string lvl = c->walk->root;
+    if (lvl.size() > 4 && lvl.compare(lvl.size() - 4, 4, ".ebx") == 0)
+        lvl.resize(lvl.size() - 4);
+    const size_t slash = lvl.find_last_of('/');
+    lvl = slash == std::string::npos ? std::string() : lvl.substr(0, slash);
+    return BF6_SeaStateInDir(c, lvl, out);
+}
+
+/* THE CASCADES BOTH ENGINES SIMULATE. The Unreal plugin applied the level's
+ * Beaufort sea state to the authored rows in its own code and the Godot plugin
+ * never did, so Godot simulated the authored 0.9 m/s wind: its energy sat in
+ * ~0.1 m waves, which read as fast boiling where Unreal drew a broad swell.
+ * The rule, moved here unchanged from BF6HighPolyCore.cpp:
+ *   - wind: the sea state's Beaufort wind, for every cascade, when the level
+ *     authors a mapping and a wind curve is identified;
+ *   - amplitude: sea curve slot 7 when present and positive (chosen because it
+ *     is the only candidate reaching the meteorological wave height for the
+ *     force without a cascade passing the breaking limit);
+ *   - min wavelength: as authored.
+ * The spectrum is then built by bf6_water_spectrum_h0 from these rows. */
+static constexpr int kSeaAmplitudeCurveSlot = 7;
+
+extern "C" int bf6_level_water_sims_effective(bf6_ctx* c, const char* level, int isolated,
+                                              bf6_water_sim_v2* out, int out_max,
+                                              bf6_ocean_sea_state* sea_out)
+{
+    bf6_ocean_sea_state sea{};
+    sea.wind_curve_index = -1;
+    int count = 0;
+    std::vector<bf6_water_sim_v2> rows;
+    if (isolated) {
+        count = bf6_level_water_sims_isolated(c, level, nullptr, 0);
+        if (count > 0) {
+            rows.resize((size_t)count);
+            count = bf6_level_water_sims_isolated(c, level, rows.data(), count);
+            const std::string lvl = BF6_IsolatedLevelDir(c, level);
+            if (!lvl.empty()) BF6_SeaStateInDir(c, lvl, &sea);
+        }
+    } else {
+        count = bf6_level_water_sims(c, level, nullptr, 0);
+        if (count > 0) {
+            rows.resize((size_t)count);
+            count = bf6_level_water_sims(c, level, rows.data(), count);
+            bf6_level_ocean_sea_state(c, level, &sea);
+        }
+    }
+    if (sea_out) *sea_out = sea;
+    if (count <= 0) return count < 0 ? 0 : count;
+    rows.resize((size_t)count);
+    const bool wind = sea.found && sea.wind_curve_index >= 0 && sea.wind_mps > 0.f;
+    /* Unreal only adopted the curves once a wind was identified; kept. */
+    const bool amp = wind && sea.curve_count > kSeaAmplitudeCurveSlot &&
+                     sea.curve_value[kSeaAmplitudeCurveSlot] > 0.f;
+    for (bf6_water_sim_v2& r : rows) {
+        if (wind) r.wind_speed = sea.wind_mps;
+        if (amp) r.wave_amplitude = sea.curve_value[kSeaAmplitudeCurveSlot];
+    }
+    if (out && out_max > 0) {
+        const int n = std::min<int>(count, out_max);
+        for (int i = 0; i < n; ++i) out[i] = rows[(size_t)i];
+    }
+    return count;
 }

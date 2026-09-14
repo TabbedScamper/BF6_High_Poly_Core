@@ -1371,6 +1371,17 @@ typedef struct {
 BF6_API int bf6_level_ocean_sea_state(bf6_ctx*, const char* level,
                                       bf6_ocean_sea_state* out);
 
+/* The cascades to SIMULATE: bf6_level_water_sims (isolated=0, requires
+ * bf6_open_level) or bf6_level_water_sims_isolated (isolated=1), with the
+ * level's sea state applied - wind_speed from the Beaufort wind curve for every
+ * cascade and wave_amplitude from sea curve slot 7, both only when a wind curve
+ * was identified; min_wavelength stays authored. Every engine builds its
+ * spectrum from these rows so the seas agree. `sea_out` (optional) receives the
+ * sea state that was applied. Same count/fill convention as the calls above. */
+BF6_API int bf6_level_water_sims_effective(bf6_ctx*, const char* level, int isolated,
+                                           bf6_water_sim_v2* out, int out_max,
+                                           bf6_ocean_sea_state* sea_out);
+
 /* ---------------------------------------------------------- water, part 2
  *
  * The full RENDER description of a level's water: the geometry above plus

@@ -1787,6 +1787,8 @@ BF6_API int64_t bf6_block_delete(const char* request_json, size_t len, uint8_t**
  * request {"level","asset_types" (path to FbExportData/asset_types.json),
  *   "pretty" (default true: the SDK's four-space layout; false: no whitespace),
  *   "short_ids" (default false: Portal_Dynamic names and ids become a, b, ...),
+ *   "scene_values" (default false; true: props are exactly what a scene stores,
+ *     so a value equal to its default is still written, as the SDK writes it),
  *   "objects":[{"key" (the object's path in the scene, unique; the default id),
  *     "name","type","id" (an authored id: names it in links only),"origin":[x,y,z],"basis":[9]
  *     (world, game space: columns x, y, z with scale),"props":{field: value},
@@ -1797,6 +1799,10 @@ BF6_API int64_t bf6_block_delete(const char* request_json, size_t len, uint8_t**
  *     entry: name, extra, type, transform, id)}]}
  * A value may be engine text: "true", "12", "Team2" or a selection index,
  * "x,y,z", a link as "a,b". A link names an object by key, authored id, or name.
+ * As the SDK writes them: a link list keeps what resolves to the right type,
+ * even nothing ([]), and a single link naming nothing is null; both are linked,
+ * in the order the object gives its fields. A field the catalogue does not list
+ * (visible, metadata/..., Color(..)) is written from its scene text.
  * Objects are written in the order given.
  * *out: the spatial JSON (bf6_blob_free). *report, when not NULL: {"dynamic",
  * "static","bytes","skipped":[{"key","why"}],"short_ids":{id: short name},

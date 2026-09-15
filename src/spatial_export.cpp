@@ -9,7 +9,11 @@
  *   - a selection is written by name, a link by the id of what it names, and the
  *     "linked" list says which fields are links
  *   - values equal to the type's default are left out, as the SDK scenes never
- *     store them, except the ObjId shim on six types
+ *     store them (unless the request says its values are a scene's), except the
+ *     ObjId shim on six types
+ *   - a link list keeps what is left after unknown and wrong-type entries drop,
+ *     even nothing; a single link naming nothing is null; fields the catalogue
+ *     does not list (visible, metadata) go out from their scene text
  *   - a polygon volume carries world points and a height instead of a transform,
  *     an OBB volume its size, and a waypoint path is its own entity
  *   - the Static layer holds the map's terrain and assets entries
@@ -19,6 +23,7 @@
 #include "utf8_fs.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -451,6 +456,111 @@ bool plain_value(const Prop& p, const Value& v, Out& out)
     }
 }
 
+// A field the catalogue does not know, as the SDK's scene parser reads its text
+// (visible = false, color = Color(...), metadata/...): quoted text a string,
+// true/false, numbers, [..] arrays, a NodePath or SubResource its first
+// argument, any other Name(..) its arguments. A resource by ExtResource id stays
+// out: the core cannot see the path the SDK writes. A non-text value is copied.
+bool scene_value(const std::string& text, Out& out);
+
+bool scene_element(const std::string& t, size_t& at, Out& out)
+{
+    while (at < t.size() && t[at] == ' ') ++at;
+    if (at >= t.size()) return false;
+    if (t[at] == '"') {
+        const size_t e = t.find('"', at + 1);
+        if (e == std::string::npos) return false;
+        out = Out::text(t.substr(at + 1, e - at - 1));
+        at = e + 1;
+        return true;
+    }
+    if (t[at] == '[') {
+        int depth = 0;
+        size_t e = at;
+        for (; e < t.size(); ++e) {
+            if (t[e] == '"') { e = t.find('"', e + 1); if (e == std::string::npos) return false; }
+            else if (t[e] == '[' || t[e] == '(') ++depth;
+            else if ((t[e] == ']' || t[e] == ')') && --depth == 0) break;
+        }
+        if (e >= t.size()) return false;
+        const bool ok = scene_value(t.substr(at, e - at + 1), out);
+        at = e + 1;
+        return ok;
+    }
+    if (t.compare(at, 4, "true") == 0) { out = Out::boolean(true); at += 4; return true; }
+    if (t.compare(at, 5, "false") == 0) { out = Out::boolean(false); at += 5; return true; }
+    size_t e = at;
+    while (e < t.size() && (std::isalnum((unsigned char)t[e]) || t[e] == '_')) ++e;
+    if (e > at && e < t.size() && t[e] == '(' && !std::isdigit((unsigned char)t[at])) {
+        const size_t close = t.find(')', e);
+        if (close == std::string::npos) return false;
+        const bool ok = scene_value(t.substr(at, close - at + 1), out);
+        at = close + 1;
+        return ok;
+    }
+    const char* start = t.c_str() + at;
+    char* end = nullptr;
+    const double d = std::strtod(start, &end);
+    if (end == start) return false;
+    out = Out::number(d);
+    at += (size_t)(end - start);
+    return true;
+}
+
+bool scene_value(const std::string& text, Out& out)
+{
+    const std::string t = trim(text);
+    if (t.empty()) return false;
+    if (t.front() == '"' && t.back() == '"' && t.size() >= 2) { out = Out::text(t.substr(1, t.size() - 2)); return true; }
+    if (t.front() == '[' && t.back() == ']') {
+        // The SDK stops at the first element it cannot read and keeps the rest out.
+        out = Out::array();
+        const std::string body = t.substr(1, t.size() - 2);
+        size_t at = 0;
+        while (true) {
+            while (at < body.size() && (body[at] == ' ' || body[at] == ',')) ++at;
+            if (at >= body.size()) break;
+            Out e;
+            if (!scene_element(body, at, e)) break;
+            out.a.push_back(std::move(e));
+        }
+        return true;
+    }
+    const size_t open = t.find('(');
+    if (open != std::string::npos && t.back() == ')' && open > 0 && !std::isdigit((unsigned char)t[0])) {
+        const std::string kind = t.substr(0, open), args = t.substr(open + 1, t.size() - open - 2);
+        if (kind == "ExtResource") return false;
+        if (kind == "NodePath" || kind == "SubResource") {
+            const std::vector<std::string> parts = split_list(args);
+            out = Out::text(parts.empty() ? std::string() : parts[0]);
+            return true;
+        }
+        out = Out::array();
+        for (const std::string& part : split_list(args)) {
+            char* end = nullptr;
+            const double d = std::strtod(part.c_str(), &end);
+            if (!part.empty() && end && *end == 0) out.a.push_back(Out::number(d));
+            else out.a.push_back(Out::text(part));
+        }
+        return true;
+    }
+    if (t == "true" || t == "false") { out = Out::boolean(t == "true"); return true; }
+    char* end = nullptr;
+    const double d = std::strtod(t.c_str(), &end);
+    if (end && *end == 0) { out = Out::number(d); return true; }
+    out = Out::text(t);   // null included: the SDK writes it as the text "null"
+    return true;
+}
+
+// Not fields, whatever a request carries under these names.
+bool reserved_field(const std::string& n)
+{
+    static const char* const names[] = {"id", "name", "type", "transform", "position", "right", "up", "front", "tscn_type",
+                                        "instance", "script", "shape", "unique_id", "node_paths", "linked"};
+    for (const char* r : names) if (n == r) return true;
+    return false;
+}
+
 // ---------------------------------------------------------------- the scene
 
 struct Obj {
@@ -515,6 +625,9 @@ extern "C" int64_t bf6_spatial_export(const char* request_json, size_t len, uint
     const std::string level = str(req.find("level"));
     const bool pretty = !(req.find("pretty") && req.find("pretty")->type == Value::Bool && !req.find("pretty")->b);
     const bool short_ids = req.find("short_ids") && req.find("short_ids")->type == Value::Bool && req.find("short_ids")->b;
+    // A scene stores only what differs from the script's default, so its values
+    // are written as they are; an editor handing over every field has defaults dropped.
+    const bool scene_values = req.find("scene_values") && req.find("scene_values")->type == Value::Bool && req.find("scene_values")->b;
 
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!load_catalogue(str(req.find("asset_types")), err)) {
@@ -621,6 +734,33 @@ extern "C" int64_t bf6_spatial_export(const char* request_json, size_t len, uint
         const Value* links = o.find("links");
         std::vector<std::string> linked;
         bool objid_unset = false;
+        // A link as the SDK writes one: the ids it names; a list keeps what is
+        // left after unknown and wrong-type entries drop out, even nothing, and a
+        // single link that names nothing is null. Either way it is listed as linked.
+        auto write_link = [&](const std::string& field, const Value& v, bool list, const std::string& ref_type) {
+            std::vector<std::string> refs;
+            if (v.is_arr()) { for (const Value& r : v.arr) if (r.is_str()) for (const std::string& s : split_list(r.str)) refs.push_back(s); }
+            else if (v.is_str()) refs = split_list(v.str);
+            std::vector<std::string> ids;
+            for (const std::string& r : refs) {
+                const Obj* t = resolve(r);
+                if (!t) { warnings.push_back(ob.id + " - " + field + " names " + r + ", which is not in the export"); continue; }
+                if (list && !ref_type.empty() && t->type != ref_type) {
+                    warnings.push_back(ob.id + " - " + field + " wants " + ref_type + " but " + t->id + " is " + t->type + ": dropped");
+                    continue;
+                }
+                ids.push_back(t->id);
+            }
+            if (list) {
+                Out arr = Out::array();
+                for (const std::string& id : ids) arr.a.push_back(Out::text(id));
+                e.set(field, std::move(arr));
+            } else {
+                if (refs.empty()) warnings.push_back(ob.id + " - " + field + " links to nothing: written as null");
+                e.set(field, ids.empty() ? Out() : Out::text(ids[0]));
+            }
+            linked.push_back(field);
+        };
         for (const Prop& p : at.props) {
             if ((polygon && (p.name == "points" || p.name == "height")) || (obb && p.name == "size")
                 || (waypoint && (p.name == "points" || p.name == "isClosed")))
@@ -630,29 +770,7 @@ extern "C" int64_t bf6_spatial_export(const char* request_json, size_t len, uint
             if (p.kind == Kind::Ref || p.kind == Kind::RefArray) {
                 if (p.name == "Waypoints" && o.find("path")) continue;   // the owned path fills it below
                 if (!v) continue;
-                std::vector<std::string> refs;
-                if (v->is_arr()) { for (const Value& r : v->arr) if (r.is_str()) for (const std::string& s : split_list(r.str)) refs.push_back(s); }
-                else if (v->is_str()) refs = split_list(v->str);
-                std::vector<std::string> ids;
-                for (const std::string& r : refs) {
-                    const Obj* t = resolve(r);
-                    if (!t) { warnings.push_back(ob.id + " - " + p.name + " names " + r + ", which is not in the export"); continue; }
-                    if (p.kind == Kind::RefArray && !p.ref_type.empty() && t->type != p.ref_type) {
-                        warnings.push_back(ob.id + " - " + p.name + " wants " + p.ref_type + " but " + t->id + " is " + t->type + ": dropped");
-                        continue;
-                    }
-                    ids.push_back(t->id);
-                }
-                if (p.kind == Kind::Ref) {
-                    if (ids.empty()) continue;
-                    e.set(p.name, Out::text(ids[0]));
-                } else {
-                    if (ids.empty()) continue;
-                    Out arr = Out::array();
-                    for (const std::string& id : ids) arr.a.push_back(Out::text(id));
-                    e.set(p.name, std::move(arr));
-                }
-                linked.push_back(p.name);
+                write_link(p.name, *v, p.kind == Kind::RefArray, p.ref_type);
                 continue;
             }
             Out val;
@@ -662,8 +780,39 @@ extern "C" int64_t bf6_spatial_export(const char* request_json, size_t len, uint
                 else e.set("ObjId", std::move(val));
                 continue;
             }
-            if (same(val, default_of(p, ob.type))) continue;
+            if (!scene_values && same(val, default_of(p, ob.type))) continue;
             e.set(p.name, std::move(val));
+        }
+        // What else the scene stores on the object goes out as the SDK's exporter
+        // writes it: links the catalogue does not list, engine fields (visible)
+        // and metadata. The fields a volume or path is rebuilt from stay out.
+        auto category_field = [&](const std::string& n) {
+            return reserved_field(n) || (polygon && (n == "points" || n == "height")) || (obb && n == "size")
+                || (waypoint && (n == "points" || n == "isClosed" || n == "closed" || n == "point_count" || n == "tilts" || n == "curve"));
+        };
+        if (links && links->is_obj())
+            for (const auto& kv : links->obj)
+                if (!at.prop(kv.first) && !category_field(kv.first) && !e.get(kv.first))
+                    write_link(kv.first, kv.second, kv.second.is_arr(), std::string());
+        if (props && props->is_obj())
+            for (const auto& kv : props->obj) {
+                if (at.prop(kv.first) || category_field(kv.first) || e.get(kv.first)) continue;
+                if (links && links->find(kv.first.c_str())) continue;
+                Out val;
+                if (kv.second.is_str() ? scene_value(kv.second.str, val) : (val = copy_value(kv.second), kv.second.type != Value::Null))
+                    e.set(kv.first, std::move(val));
+            }
+        // Links in the order the object gives them, as the scene lists its node paths.
+        {
+            auto order = [&](const std::string& n) -> size_t {
+                size_t i = 0;
+                for (const Value* src : {links, props}) {
+                    if (src && src->is_obj())
+                        for (const auto& kv : src->obj) { if (kv.first == n) return i; ++i; }
+                }
+                return i;
+            };
+            std::stable_sort(linked.begin(), linked.end(), [&](const std::string& a, const std::string& b) { return order(a) < order(b); });
         }
         // The SDK's shim: these six always carry an ObjId, 0 when none was set.
         if (obj_id_shim(ob.type) && !objid_unset && !e.get("ObjId")) e.set("ObjId", Out::number(0));

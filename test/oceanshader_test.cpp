@@ -46,10 +46,11 @@ int main(int argc, char** argv)
     {
         // level dir from any level-owned ebx
         for (const auto& kv : src.ebx()) {
+            // One level-path rule for every reader: levels/[group/]<level>/.
             const std::string& n = kv.first;
-            const size_t p = n.find("/levels/" + level + "/");
-            if (p == std::string::npos) continue;
-            lvl_dir = n.substr(0, p + 8 + level.size());
+            const size_t end = Source::level_dir_end(n, level);
+            if (end == std::string::npos) continue;
+            lvl_dir = n.substr(0, end);
             break;
         }
         std::vector<std::string> cands = { lvl_dir + "/default",

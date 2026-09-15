@@ -18,6 +18,13 @@ int main(int argc, char** argv)
     }
     bf6_water_mask m{};
     const int ok = bf6_level_water_mask(c, argv[3], &m, err, sizeof(err));
+    // An empty err is the ABI's "this terrain carries no CoarseMask raster":
+    // authored absence (ShoreDepth or waterless levels), not a failed read.
+    if (!ok && !err[0]) {
+        std::printf("ABSENT %s carries no CoarseMask raster\n", argv[3]);
+        bf6_close(c);
+        return 0;
+    }
     if (!ok) { std::printf("MASK_FAIL %s\n", err); bf6_close(c); return 1; }
     uint32_t page_cells = 0, inline_cells = 0, bad_page_cells = 0;
     for (uint32_t i = 0; i < m.indirection_side * m.indirection_side; ++i) {

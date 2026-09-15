@@ -169,6 +169,33 @@ int main(int argc, char** argv)
     }
     else std::printf("sim: none\n");
 
+    // Placed water only (Portal Ocean): the prefab's start state and the
+    // cascades as simulated. Printed only when found, so a level that authors
+    // its own water prints exactly what it always did.
+    bf6_water_feature feature{};
+    if (bf6_level_water_feature(ctx, argv[2], &feature)) {
+        std::printf("feature: %s at (%.3f, %.3f, %.3f)\n", feature.prefab,
+            feature.placement[0], feature.placement[1], feature.placement[2]);
+        std::printf("  enabled %d (source %d)  beaufort %.3f (source %d, authored force %.3f, driven %d)\n",
+            feature.enabled, feature.enabled_source, feature.beaufort_scale,
+            feature.beaufort_source, feature.authored_beaufort_force, feature.beaufort_driven);
+        std::printf("  wave amplitude %.3f (source %d, %d cascade(s))  water height %.3f (source %d)\n",
+            feature.wave_amplitude, feature.amplitude_source, feature.amplitude_cascades,
+            feature.water_height, feature.height_source);
+        bf6_ocean_sea_state sea{};
+        const int ec = bf6_level_water_sims_effective(ctx, argv[2], 0, nullptr, 0, nullptr);
+        std::vector<bf6_water_sim_v2> eff(ec > 0 ? ec : 0);
+        if (ec > 0) bf6_level_water_sims_effective(ctx, argv[2], 0, eff.data(), ec, &sea);
+        std::printf("  sea state found %d force %.3f wind %.3f m/s (curve %d of %d)\n",
+            sea.found, sea.force, sea.wind_mps, sea.wind_curve_index, sea.curve_count);
+        for (const bf6_water_sim_v2& r : eff)
+            std::printf("  cascade src %d tile %.3f res %d wind %.3f angle %.3f chop %.3f amp %.3f minwl %.4f lwr %.3f thick %.3f foam %d %.2f/%.2f\n",
+                r.source_index, r.tile_dimension, r.resolution, r.wind_speed,
+                r.wind_angle_degrees, r.choppiness, r.wave_amplitude, r.min_wavelength,
+                r.large_wave_reduction, r.wave_thickness, r.foam_enable,
+                r.foam_threshold, r.foam_max);
+    }
+
     // Sequence control for the Unreal lab: the mask must remain readable from
     // the same mounted context after surface/render/simulation queries.
     bf6_water_mask mask{};

@@ -63,6 +63,12 @@ static const uint32_t kW2_NoiseUvScale  = 0xAD0F5BEF;
 static const uint32_t kW2_ReflLow       = 0x5629D818;
 static const uint32_t kW2_ReflHigh      = 0xAE1243A2;
 static const uint32_t kW2_ReflBias      = 0x02F07FDA;
+/* The two extended-graph sheets, returned as contact_foam and foam_rgb2 (the
+ * legacy bf6_water carries only the five named ones above them). Portal
+ * Ocean's gmpf_water record binds t_black to the contact slot, so contact foam
+ * is authored OFF there (a 4x4 black sheet, not a missing one), and
+ * test/testranges/testrange_cody/.../t_waterfoam_02_rgb to foam_rgb2, the
+ * broad crest sheet. Both resolve through the ordinary depot join. */
 static const uint32_t kW2_ContactFoam   = 0x6AC9C660;
 static const uint32_t kW2_FoamRgb2      = 0xB4B73136;
 /* MP_Isolated's extended ExpressionShader graph. The slot hashes are the
@@ -204,12 +210,18 @@ struct W2_OceanComposite
     float foam_roughness = -1.f;
     float albedo[3] = { -1.f, -1.f, -1.f };
     float albedo_distance = -1.f;
+    bool  found = false;    /* an OceanComponentData was present at all */
 };
 
 static bool W2_FieldPresent(const bf6::EbxValue& d, uint32_t h)
 {
     return d.field(h) != nullptr;
 }
+
+/* The first OceanComponentData in one VisualEnvironment partition, into `o`
+ * (preset and candidates are the caller's). */
+static bool W2_OceanComponentIn(bf6_ctx* c, const std::string& part,
+                                W2_OceanComposite& o);
 
 static bool W2_ReadOceanComposite(bf6_ctx* c, const char* level,
                                   W2_OceanComposite& o)
@@ -221,7 +233,61 @@ static bool W2_ReadOceanComposite(bf6_ctx* c, const char* level,
     o.preset = bf6::ve_active_preset(c->src, *c->types, level,
                                      &o.candidates, err);
     if (o.preset.empty()) return false;
-    std::vector<uint8_t> raw = c->src.get_ebx(o.preset, err);
+    return W2_OceanComponentIn(c, o.preset, o);
+}
+
+/* A placed water prefab's own ocean VisualEnvironment. gmpf_water carries two
+ * VisualEnvironmentReferenceObjectData: ve_fx_underwater_fog (no ocean
+ * component) and ve_portal_ocean (an OceanComponentData equal to MP_Isolated's
+ * active preset). The first referenced VE holding an ocean component is the
+ * join; candidates counts every referenced VE that holds one. */
+static const char* kW2_VeReference = "9c791c39-8fc4-b787-d7a1-3982f139c621";
+
+static bool W2_ReadPrefabOceanComposite(bf6_ctx* c, const std::string& prefab,
+                                        W2_OceanComposite& o)
+{
+    o = W2_OceanComposite();
+    if (!c || !c->types || prefab.empty()) return false;
+    std::string err;
+    std::vector<uint8_t> raw = c->src.get_ebx(prefab, err);
+    if (raw.empty()) return false;
+    bf6::Ebx e(*c->types);
+    e.set_guid_index(&c->src.partition_index());
+    if (!e.parse(std::move(raw), err)) return false;
+
+    const std::vector<uint32_t> want = { 0x6B831B88 };   /* Blueprint */
+    std::vector<std::string> ves;
+    for (size_t i = 0; i < e.instance_count(); ++i) {
+        if (bf6::TypeDb::guid_str(e.instance_type(i)) != kW2_VeReference) continue;
+        const bf6::EbxValue d = e.read_instance(i, &want);
+        const bf6::EbxValue* bp = d.field(0x6B831B88);
+        if (!bp || bp->kind != bf6::EbxValue::Kind::ImportRef) continue;
+        std::string ve = bp->import_path;
+        if (ve.size() > 4 && ve.compare(ve.size() - 4, 4, ".ebx") == 0) ve.resize(ve.size() - 4);
+        if (!ve.empty() && c->src.ebx().count(ve)) ves.push_back(ve);
+    }
+
+    W2_OceanComposite best;
+    int with_component = 0;
+    for (const std::string& ve : ves) {
+        W2_OceanComposite trial;
+        trial.preset = ve;
+        W2_OceanComponentIn(c, ve, trial);
+        if (!trial.found) continue;
+        ++with_component;
+        if (best.preset.empty()) best = trial;
+    }
+    if (best.preset.empty()) return false;
+    o = best;
+    o.candidates = with_component;
+    return o.version != 0;
+}
+
+static bool W2_OceanComponentIn(bf6_ctx* c, const std::string& part,
+                                W2_OceanComposite& o)
+{
+    std::string err;
+    std::vector<uint8_t> raw = c->src.get_ebx(part, err);
     if (raw.empty()) return false;
     bf6::Ebx e(*c->types);
     e.set_guid_index(&c->src.partition_index());
@@ -231,6 +297,7 @@ static bool W2_ReadOceanComposite(bf6_ctx* c, const char* level,
         if (bf6::TypeDb::guid_str(e.instance_type(i)) != kW2_OceanComponent)
             continue;
         const bf6::EbxValue d = e.read_instance(i);
+        o.found = true;
         const bool complete =
             W2_FieldPresent(d, kW2_OCEnable) &&
             W2_FieldPresent(d, kW2_OCIOR) &&
@@ -394,353 +461,369 @@ int bf6_level_water_render(bf6_ctx* c, const char* level,
                     if (BF6_CountsWater(c, n)) { part = n; break; }
         }
     }
-    if (part.empty()) return 0;
+    /* No authored partition: the level may PLACE its water (Portal Ocean's
+     * gmpf_water). Same rule and same sites as bf6_level_water. */
+    struct WaterSource { std::string part; bf6::Mat34 xf; bool placed; };
+    std::vector<WaterSource> sources;
+    if (!part.empty()) sources.push_back({ part, bf6::mat_identity(), false });
+    else
+        for (const bf6_ctx::WaterSite& site : BF6_WaterSites(c, lvl))
+            sources.push_back({ site.part, site.xf, true });
+    if (sources.empty()) return 0;
 
-    std::string err;
-    std::vector<uint8_t> raw = c->src.get_ebx(part, err);
-    if (raw.empty()) return 0;
-    bf6::Ebx e(*c->types);
-    e.set_guid_index(&c->src.partition_index());
-    if (!e.parse(std::move(raw), err)) return 0;
-
-    /* One level-wide VE join, copied onto each surface below. */
+    /* One level-wide VE join, copied onto each surface below. A placed water
+     * prefab brings its OWN ocean VisualEnvironment (gmpf_water references
+     * ve_portal_ocean), which the level root's import list does not name, so
+     * for placed water the prefab's VE is the join. */
     W2_OceanComposite ocean;
-    W2_ReadOceanComposite(c, level, ocean);
+    if (!sources.front().placed || !W2_ReadPrefabOceanComposite(c, sources.front().part, ocean))
+        W2_ReadOceanComposite(c, level, ocean);
 
     int total = 0;
-    for (size_t i = 0; i < e.instance_count(); i++) {
-        if (bf6::TypeDb::guid_str(e.instance_type(i)) != kWaterTypeGuid) continue;
+    for (const WaterSource& source : sources) {
+        std::string err;
+        std::vector<uint8_t> raw = c->src.get_ebx(source.part, err);
+        if (raw.empty()) continue;
+        bf6::Ebx e(*c->types);
+        e.set_guid_index(&c->src.partition_index());
+        if (!e.parse(std::move(raw), err)) continue;
 
-        const int64_t base = e.payload() + (int64_t)e.instance_offset(i);
-        const std::vector<uint8_t>& d = e.raw();
-        if (base < 0 || (size_t)base + 0x60 > d.size()) continue;
-        float sx, sz, tx, ty, tz;
-        std::memcpy(&sx, d.data() + base + 0x20, 4);
-        std::memcpy(&sz, d.data() + base + 0x48, 4);
-        std::memcpy(&tx, d.data() + base + 0x50, 4);
-        std::memcpy(&ty, d.data() + base + 0x54, 4);
-        std::memcpy(&tz, d.data() + base + 0x58, 4);
-        if (std::fabs(sx) < 1.f || std::fabs(sz) < 1.f) continue;
+        for (size_t i = 0; i < e.instance_count(); i++) {
+            if (bf6::TypeDb::guid_str(e.instance_type(i)) != kWaterTypeGuid) continue;
 
-        bf6_water_render w;
-        std::memset(&w, 0, sizeof(w));
-        /* Absent is NOT zero anywhere in this struct: zero is authored. */
-        w.base_colour[0] = w.deep_colour[0] = -1.f;
-        w.surface_colour[0] = -1.f;
-        w.extinction[0] = w.extinction[1] = w.extinction[2] = -1.f;
-        w.absorption_distance_m = -1.f;
-        w.depth_ramp_m = -1.f;
-        w.detail_normal = w.foam_normal = w.foam_rgb = w.noise = w.perlin =
-            w.contact_foam = w.foam_rgb2 = -1;
-        /* Every scalar below is a non-negative quantity when authored, and zero
-         * is a legal authored value for all of them, so "absent" has to be a
-         * NEGATIVE sentinel. This matters: MP_Isolated and MP_Atoll run a
-         * different material graph and carry NONE of the named foam or
-         * reflectance slots, so a consumer that read zero here would silently
-         * turn their foam off instead of falling back. */
-        w.detail_fade_start_m = w.detail_fade_end_m = -1.f;
-        w.foam_threshold = w.shore_foam_suppression = w.foam_contrast_divisor = -1.f;
-        w.smoothness_zero_foam = w.smoothness_full_foam = -1.f;
-        w.smoothness_bias = w.smoothness_near_multiplier = -1.f;
-        w.foam_sheet_normal_strength = w.micro_sheet_normal_strength = -1.f;
-        w.noise_uv_scale = -1.f;
-        w.reflectance_low = w.reflectance_high = w.reflectance_bias = -1.f;
-        w.micro_sheet_uv_scale = w.foam_sheet_uv_scale = -1.f;
-        w.micro_sheet_flow_speed = -1.f;
-        w.foam_composite_low = w.foam_composite_high = -1.f;
-        w.contact_world_divisor_m = w.contact_remap_low = w.contact_gain = -1.f;
-        w.broad_pattern_world_mul = w.broad_pattern_world_scale = -1.f;
-        w.broad_pattern_floor = -1.f;
-        w.extended_graph_version = 0;
-        w.cascade_overlap_version = 0;
-        w.cascade_overlap_enabled = -1;
-        w.cascade_overlap_height_scale = -1.f;
-        w.ocean_component_version = ocean.version;
-        w.ocean_preset_candidates = ocean.candidates;
-        w.ocean_enable = ocean.enable;
-        w.simplified_distortion = ocean.simplified;
-        w.foam_enable = ocean.foam_enable;
-        w.composite_ior = ocean.ior;
-        w.opacity_ramp_m = ocean.opacity_ramp;
-        w.foam_depth_ramp_m = ocean.foam_ramp;
-        w.scatter_phase_g = ocean.phase_g;
-        w.scatter_shadow_influence = ocean.shadow;
-        w.foam_smoothness = ocean.foam_smoothness;
-        w.foam_roughness = ocean.foam_roughness;
-        w.authored_albedo_distance_m = ocean.albedo_distance;
-        std::snprintf(w.ocean_preset, sizeof(w.ocean_preset), "%s",
-                      ocean.preset.c_str());
-        for (int q = 0; q < 3; ++q) {
-            w.transmission_colour[q] = ocean.transmission[q];
-            w.foam_tint[q] = ocean.foam_tint[q];
-            w.authored_ocean_albedo[q] = ocean.albedo[q];
-        }
-        for (int q = 0; q < 4; ++q) {
-            w.cascade_overlap_params[q] = -1.f;
-            w.cascade_overlap_params2[q] = -1.f;
-        }
-        for (int r = 0; r < 22; ++r)
-            for (int q = 0; q < 4; ++q) w.extended_cb1[r][q] = -1.f;
-        for (int k = 0; k < 4; k++) w.cascade_foam_weight[k] = -1.f;
+            const int64_t base = e.payload() + (int64_t)e.instance_offset(i);
+            const std::vector<uint8_t>& d = e.raw();
+            if (base < 0 || (size_t)base + 0x60 > d.size()) continue;
+            float sx, sz, tx, ty, tz;
+            std::memcpy(&sx, d.data() + base + 0x20, 4);
+            std::memcpy(&sz, d.data() + base + 0x48, 4);
+            std::memcpy(&tx, d.data() + base + 0x50, 4);
+            std::memcpy(&ty, d.data() + base + 0x54, 4);
+            std::memcpy(&tz, d.data() + base + 0x58, 4);
+            if (source.placed &&
+                !BF6_WPlacedEntity(e, i, source.xf, sx, sz, tx, ty, tz)) continue;
+            if (std::fabs(sx) < 1.f || std::fabs(sz) < 1.f) continue;
 
-        w.center[0] = tx; w.center[1] = tz;
-        w.size[0]   = std::fabs(sx); w.size[1] = std::fabs(sz);
-        w.height    = ty;
-
-        bf6::EbxValue inst = e.read_instance(i);
-        w.state_key = 0;
-        if (const bf6::EbxValue* f = inst.field(kWaterStateKeyField)) {
-            if (f->kind == bf6::EbxValue::Kind::Uint) w.state_key = f->u;
-            else if (f->kind == bf6::EbxValue::Kind::Int) w.state_key = (uint64_t)f->i;
-        }
-        const bool have_selected_programs = W2_SelectedPass0Guids(
-            c, lvl, w.state_key, w.selected_pass0_vertex_guid,
-            w.selected_pass0_pixel_guid);
-        /* 1f91c608-0eca-e076-aaca-df444ef7bc38 in the .NET byte order used by
-           the permutation record. */
-        static const uint8_t kIsolatedPass0Pixel[16] = {
-            0x08,0xC6,0x91,0x1F, 0xCA,0x0E, 0x76,0xE0,
-            0xAA,0xCA,0xDF,0x44,0x4E,0xF7,0xBC,0x38 };
-        const bool selected_extended_graph = have_selected_programs &&
-            std::memcmp(w.selected_pass0_pixel_guid, kIsolatedPass0Pixel, 16) == 0;
-        /* 330d12d8-9184-8305-e852-70246916e509, .NET record byte order. */
-        static const uint8_t kIsolatedPass0Vertex[16] = {
-            0xD8,0x12,0x0D,0x33, 0x84,0x91, 0x05,0x83,
-            0xE8,0x52,0x70,0x24,0x69,0x16,0xE5,0x09 };
-        const bool selected_overlap_graph = have_selected_programs &&
-            std::memcmp(w.selected_pass0_vertex_guid, kIsolatedPass0Vertex, 16) == 0;
-        w.attenuation_type        = W2_I(inst, kW2_FAttenType, 0);
-        w.shore_enable            = W2_I(inst, kW2_FShoreEnable, 0);
-        w.shore_depth_m           = W2_F(inst, kW2_FShoreDepth, 0.f);
-        w.additional_water_depth_m= W2_F(inst, kW2_FAddDepth, 0.f);
-        w.wave_amplitude_scale    = W2_F(inst, kW2_FWaveAmp, 1.f);
-        w.visible                 = W2_I(inst, kW2_FVisible, 1);
-        w.is_river                = W2_I(inst, kW2_FIsRiver, 0);
-        w.terrain_vt_access       = W2_I(inst, kW2_FTerrainVt, 0);
-        {
-            const bf6::EbxValue* enabled = inst.field(kW2_FOverlapEnable);
-            const bf6::EbxValue* angle = inst.field(kW2_FOverlapAngle);
-            const bf6::EbxValue* size_a = inst.field(kW2_FOverlapSizeA);
-            const bf6::EbxValue* height = inst.field(kW2_FOverlapHeight);
-            const bf6::EbxValue* size_b = inst.field(kW2_FOverlapSizeB);
-            float shear[2] = { 0.f, 0.f };
-            const bool fields_ok = enabled && angle && size_a && height && size_b &&
-                W2_VecRequired(inst, kW2_FOverlapShear, 2, shear);
-            const float a = W2_F(inst, kW2_FOverlapSizeA, -1.f);
-            const float b = W2_F(inst, kW2_FOverlapSizeB, -1.f);
-            if (fields_ok && a > 0.f && b > 0.f) {
-                const float degrees = W2_F(inst, kW2_FOverlapAngle, 0.f);
-                const float radians = degrees * 0.01745329251994329577f;
-                w.cascade_overlap_enabled = W2_I(inst, kW2_FOverlapEnable, 0);
-                w.cascade_overlap_params[0] = std::sin(radians);
-                w.cascade_overlap_params[1] = std::cos(radians);
-                w.cascade_overlap_params[2] = shear[0];
-                w.cascade_overlap_params[3] = shear[1];
-                w.cascade_overlap_params2[0] = 1.f / a;
-                w.cascade_overlap_params2[1] = 1.f / b;
-                w.cascade_overlap_params2[2] = a;
-                w.cascade_overlap_params2[3] = b;
-                w.cascade_overlap_height_scale = W2_F(inst, kW2_FOverlapHeight, 1.f);
-                if (selected_overlap_graph) w.cascade_overlap_version = 1;
+            bf6_water_render w;
+            std::memset(&w, 0, sizeof(w));
+            /* Absent is NOT zero anywhere in this struct: zero is authored. */
+            w.base_colour[0] = w.deep_colour[0] = -1.f;
+            w.surface_colour[0] = -1.f;
+            w.extinction[0] = w.extinction[1] = w.extinction[2] = -1.f;
+            w.absorption_distance_m = -1.f;
+            w.depth_ramp_m = -1.f;
+            w.detail_normal = w.foam_normal = w.foam_rgb = w.noise = w.perlin =
+                w.contact_foam = w.foam_rgb2 = -1;
+            /* Every scalar below is a non-negative quantity when authored, and zero
+             * is a legal authored value for all of them, so "absent" has to be a
+             * NEGATIVE sentinel. This matters: MP_Isolated and MP_Atoll run a
+             * different material graph and carry NONE of the named foam or
+             * reflectance slots, so a consumer that read zero here would silently
+             * turn their foam off instead of falling back. */
+            w.detail_fade_start_m = w.detail_fade_end_m = -1.f;
+            w.foam_threshold = w.shore_foam_suppression = w.foam_contrast_divisor = -1.f;
+            w.smoothness_zero_foam = w.smoothness_full_foam = -1.f;
+            w.smoothness_bias = w.smoothness_near_multiplier = -1.f;
+            w.foam_sheet_normal_strength = w.micro_sheet_normal_strength = -1.f;
+            w.noise_uv_scale = -1.f;
+            w.reflectance_low = w.reflectance_high = w.reflectance_bias = -1.f;
+            w.micro_sheet_uv_scale = w.foam_sheet_uv_scale = -1.f;
+            w.micro_sheet_flow_speed = -1.f;
+            w.foam_composite_low = w.foam_composite_high = -1.f;
+            w.contact_world_divisor_m = w.contact_remap_low = w.contact_gain = -1.f;
+            w.broad_pattern_world_mul = w.broad_pattern_world_scale = -1.f;
+            w.broad_pattern_floor = -1.f;
+            w.extended_graph_version = 0;
+            w.cascade_overlap_version = 0;
+            w.cascade_overlap_enabled = -1;
+            w.cascade_overlap_height_scale = -1.f;
+            w.ocean_component_version = ocean.version;
+            w.ocean_preset_candidates = ocean.candidates;
+            w.ocean_enable = ocean.enable;
+            w.simplified_distortion = ocean.simplified;
+            w.foam_enable = ocean.foam_enable;
+            w.composite_ior = ocean.ior;
+            w.opacity_ramp_m = ocean.opacity_ramp;
+            w.foam_depth_ramp_m = ocean.foam_ramp;
+            w.scatter_phase_g = ocean.phase_g;
+            w.scatter_shadow_influence = ocean.shadow;
+            w.foam_smoothness = ocean.foam_smoothness;
+            w.foam_roughness = ocean.foam_roughness;
+            w.authored_albedo_distance_m = ocean.albedo_distance;
+            std::snprintf(w.ocean_preset, sizeof(w.ocean_preset), "%s",
+                          ocean.preset.c_str());
+            for (int q = 0; q < 3; ++q) {
+                w.transmission_colour[q] = ocean.transmission[q];
+                w.foam_tint[q] = ocean.foam_tint[q];
+                w.authored_ocean_albedo[q] = ocean.albedo[q];
             }
-        }
-        w.shore_blend[0] = w.shore_blend[1] = w.shore_blend[3] = 0.f;
-        w.shore_blend[2] = 1.f;                       /* engine default f(t)=t */
-        W2_Vec(inst, kW2_FShoreBlend, 4, w.shore_blend);
-        {
-            float qb[3] = { 0.f, 0.f, 0.f };
-            W2_Vec(inst, kW2_FQueryHalf, 3, qb);
-            w.query_box_half_extent[0] = qb[0];
-            w.query_box_half_extent[1] = qb[2];
-        }
-        /* The shore fade only exists under attenuation type 1. Under 2 and 3
-         * the shipped depth and cubic are dead fields, so say so rather than
-         * handing a consumer a negative distance to divide by. */
-        w.shore_fade_valid = (w.attenuation_type == 1) ? 1 : 0;
+            for (int q = 0; q < 4; ++q) {
+                w.cascade_overlap_params[q] = -1.f;
+                w.cascade_overlap_params2[q] = -1.f;
+            }
+            for (int r = 0; r < 22; ++r)
+                for (int q = 0; q < 4; ++q) w.extended_cb1[r][q] = -1.f;
+            for (int k = 0; k < 4; k++) w.cascade_foam_weight[k] = -1.f;
 
-        if (w.state_key) {
-            for (const auto& kv : c->src.res()) {
-                const std::string& rn = kv.first;
-                if (rn.find("shaderblockdepot") == std::string::npos) continue;
-                if (!lvl.empty() && rn.find(lvl) == std::string::npos) continue;
-                const std::vector<uint8_t>* dbytes = nullptr;
-                bf6::Depot* dep = c->depot_named(rn, &dbytes);
-                if (!dep || !dbytes || !dep->has_key(w.state_key)) continue;
-                bf6::MaterialBinding mb = dep->textures_for(w.state_key, *dbytes);
-                if (!mb.valid) continue;
+            w.center[0] = tx; w.center[1] = tz;
+            w.size[0]   = std::fabs(sx); w.size[1] = std::fabs(sz);
+            w.height    = ty;
 
-                /* THREE families, not two. The Granite Portal sub-levels bind a
-                 * third material that shares no slot with either of the others:
-                 * seven float3 colours, each paired with a float, and the floats
-                 * are world coordinates (-1024, 1024, -2048, 512) rather than
-                 * distances - a region-banded water. Returning 0 for it would
-                 * hand a consumer the foam family's semantics and the wrong
-                 * colour, so it gets its own value and its colour fields stay
-                 * absent until the family is decoded. */
-                w.variant = mb.constants.count(kW2_OceanColour) ? 1
-                          : (mb.constants.count(kW2_Shallow) ||
-                             mb.constants.count(kW2_Deep))     ? 0
-                          : 2;
-
-                const auto& gi = c->src.partition_index();
-                auto grab = [&](uint32_t slot) -> int32_t {
-                    auto sit = mb.textures.find(slot);
-                    if (sit == mb.textures.end()) return -1;
-                    auto ait = gi.find(sit->second);
-                    if (ait == gi.end()) return -1;
-                    std::string t = ait->second;
-                    if (t.size() > 4 && t.compare(t.size() - 4, 4, ".ebx") == 0) t.resize(t.size() - 4);
-                    return c->texture_id(t);
-                };
-                w.detail_normal = grab(kWSlotDetailNsh);
-                w.foam_normal   = grab(kWSlotFoamNsh);
-                w.foam_rgb      = grab(kWSlotFoamRgb);
-                w.noise         = grab(kWSlotNoise);
-                w.perlin        = grab(kWSlotPerlin);
-                w.contact_foam  = grab(kW2_ContactFoam);
-                w.foam_rgb2     = grab(kW2_FoamRgb2);
-
-                if (w.variant == 1) {
-                    W2_Const(mb, kW2_OceanColour, 3, w.base_colour);
-                    float dist = -1.f;
-                    W2_Const(mb, kW2_AbsorbDist, 1, &dist);
-                    w.absorption_distance_m = dist;
-                    static const uint32_t ov[4] = { kW2_Overlay0, kW2_Overlay1,
-                                                    kW2_Overlay2, kW2_Overlay3 };
-                    for (int k = 0; k < 4; k++) {
-                        float t3[3];
-                        if (!W2_Const(mb, ov[k], 3, t3)) continue;
-                        std::memcpy(w.overlay_colour[w.overlay_count], t3, 12);
-                        w.overlay_count++;
-                    }
-                } else if (w.variant == 0) {
-                    W2_Const(mb, kW2_Shallow, 3, w.base_colour);
-                    W2_Const(mb, kW2_Deep, 3, w.deep_colour);
-                    float ramp = -1.f;
-                    W2_Const(mb, kW2_DepthRamp, 1, &ramp);
-                    w.depth_ramp_m = ramp;
+            bf6::EbxValue inst = e.read_instance(i);
+            w.state_key = 0;
+            if (const bf6::EbxValue* f = inst.field(kWaterStateKeyField)) {
+                if (f->kind == bf6::EbxValue::Kind::Uint) w.state_key = f->u;
+                else if (f->kind == bf6::EbxValue::Kind::Int) w.state_key = (uint64_t)f->i;
+            }
+            const bool have_selected_programs = W2_SelectedPass0Guids(
+                c, lvl, w.state_key, w.selected_pass0_vertex_guid,
+                w.selected_pass0_pixel_guid);
+            /* 1f91c608-0eca-e076-aaca-df444ef7bc38 in the .NET byte order used by
+               the permutation record. */
+            static const uint8_t kIsolatedPass0Pixel[16] = {
+                0x08,0xC6,0x91,0x1F, 0xCA,0x0E, 0x76,0xE0,
+                0xAA,0xCA,0xDF,0x44,0x4E,0xF7,0xBC,0x38 };
+            const bool selected_extended_graph = have_selected_programs &&
+                std::memcmp(w.selected_pass0_pixel_guid, kIsolatedPass0Pixel, 16) == 0;
+            /* 330d12d8-9184-8305-e852-70246916e509, .NET record byte order. */
+            static const uint8_t kIsolatedPass0Vertex[16] = {
+                0xD8,0x12,0x0D,0x33, 0x84,0x91, 0x05,0x83,
+                0xE8,0x52,0x70,0x24,0x69,0x16,0xE5,0x09 };
+            const bool selected_overlap_graph = have_selected_programs &&
+                std::memcmp(w.selected_pass0_vertex_guid, kIsolatedPass0Vertex, 16) == 0;
+            w.attenuation_type        = W2_I(inst, kW2_FAttenType, 0);
+            w.shore_enable            = W2_I(inst, kW2_FShoreEnable, 0);
+            w.shore_depth_m           = W2_F(inst, kW2_FShoreDepth, 0.f);
+            w.additional_water_depth_m= W2_F(inst, kW2_FAddDepth, 0.f);
+            w.wave_amplitude_scale    = W2_F(inst, kW2_FWaveAmp, 1.f);
+            w.visible                 = W2_I(inst, kW2_FVisible, 1);
+            w.is_river                = W2_I(inst, kW2_FIsRiver, 0);
+            w.terrain_vt_access       = W2_I(inst, kW2_FTerrainVt, 0);
+            {
+                const bf6::EbxValue* enabled = inst.field(kW2_FOverlapEnable);
+                const bf6::EbxValue* angle = inst.field(kW2_FOverlapAngle);
+                const bf6::EbxValue* size_a = inst.field(kW2_FOverlapSizeA);
+                const bf6::EbxValue* height = inst.field(kW2_FOverlapHeight);
+                const bf6::EbxValue* size_b = inst.field(kW2_FOverlapSizeB);
+                float shear[2] = { 0.f, 0.f };
+                const bool fields_ok = enabled && angle && size_a && height && size_b &&
+                    W2_VecRequired(inst, kW2_FOverlapShear, 2, shear);
+                const float a = W2_F(inst, kW2_FOverlapSizeA, -1.f);
+                const float b = W2_F(inst, kW2_FOverlapSizeB, -1.f);
+                if (fields_ok && a > 0.f && b > 0.f) {
+                    const float degrees = W2_F(inst, kW2_FOverlapAngle, 0.f);
+                    const float radians = degrees * 0.01745329251994329577f;
+                    w.cascade_overlap_enabled = W2_I(inst, kW2_FOverlapEnable, 0);
+                    w.cascade_overlap_params[0] = std::sin(radians);
+                    w.cascade_overlap_params[1] = std::cos(radians);
+                    w.cascade_overlap_params[2] = shear[0];
+                    w.cascade_overlap_params[3] = shear[1];
+                    w.cascade_overlap_params2[0] = 1.f / a;
+                    w.cascade_overlap_params2[1] = 1.f / b;
+                    w.cascade_overlap_params2[2] = a;
+                    w.cascade_overlap_params2[3] = b;
+                    w.cascade_overlap_height_scale = W2_F(inst, kW2_FOverlapHeight, 1.f);
+                    if (selected_overlap_graph) w.cascade_overlap_version = 1;
                 }
+            }
+            w.shore_blend[0] = w.shore_blend[1] = w.shore_blend[3] = 0.f;
+            w.shore_blend[2] = 1.f;                       /* engine default f(t)=t */
+            W2_Vec(inst, kW2_FShoreBlend, 4, w.shore_blend);
+            {
+                float qb[3] = { 0.f, 0.f, 0.f };
+                W2_Vec(inst, kW2_FQueryHalf, 3, qb);
+                w.query_box_half_extent[0] = qb[0];
+                w.query_box_half_extent[1] = qb[2];
+            }
+            /* The shore fade only exists under attenuation type 1. Under 2 and 3
+             * the shipped depth and cubic are dead fields, so say so rather than
+             * handing a consumer a negative distance to divide by. */
+            w.shore_fade_valid = (w.attenuation_type == 1) ? 1 : 0;
 
-                float fade[2] = { 0.f, 0.f };
-                if (W2_Const(mb, kW2_DetailFade, 2, fade))
-                    { w.detail_fade_start_m = fade[0]; w.detail_fade_end_m = fade[1]; }
-                W2_Const(mb, kW2_FoamThreshold, 1, &w.foam_threshold);
-                W2_Const(mb, kW2_ShoreFoamSupp, 1, &w.shore_foam_suppression);
-                W2_Const(mb, kW2_FoamContrast,  1, &w.foam_contrast_divisor);
-                W2_Const(mb, kW2_FoamW0, 1, &w.cascade_foam_weight[0]);
-                W2_Const(mb, kW2_FoamW1, 1, &w.cascade_foam_weight[1]);
-                W2_Const(mb, kW2_FoamW2, 1, &w.cascade_foam_weight[2]);
-                W2_Const(mb, kW2_FoamW3, 1, &w.cascade_foam_weight[3]);
-                W2_Const(mb, kW2_SmoothZero,   1, &w.smoothness_zero_foam);
-                W2_Const(mb, kW2_SmoothFull,   1, &w.smoothness_full_foam);
-                W2_Const(mb, kW2_SmoothBias,   1, &w.smoothness_bias);
-                W2_Const(mb, kW2_SmoothNear,   1, &w.smoothness_near_multiplier);
-                W2_Const(mb, kW2_FoamSheetN,   1, &w.foam_sheet_normal_strength);
-                W2_Const(mb, kW2_MicroSheetN,  1, &w.micro_sheet_normal_strength);
-                W2_Const(mb, kW2_NoiseUvScale, 1, &w.noise_uv_scale);
-                W2_Const(mb, kW2_ReflLow,  1, &w.reflectance_low);
-                W2_Const(mb, kW2_ReflHigh, 1, &w.reflectance_high);
-                W2_Const(mb, kW2_ReflBias, 1, &w.reflectance_bias);
-                W2_Const(mb, kW2_MicroUvScale,  1, &w.micro_sheet_uv_scale);
-                W2_Const(mb, kW2_FoamUvScale,   1, &w.foam_sheet_uv_scale);
-                W2_Const(mb, kW2_MicroFlow,     1, &w.micro_sheet_flow_speed);
-                W2_Const(mb, kW2_CompositeLow,  1, &w.foam_composite_low);
-                W2_Const(mb, kW2_CompositeHigh, 1, &w.foam_composite_high);
-                W2_Const(mb, kW2_ContactDiv,    1, &w.contact_world_divisor_m);
-                W2_Const(mb, kW2_ContactLow,    1, &w.contact_remap_low);
-                W2_Const(mb, kW2_ContactGain,   1, &w.contact_gain);
-                W2_Const(mb, kW2_BroadWorldMul,   1, &w.broad_pattern_world_mul);
-                W2_Const(mb, kW2_BroadWorldScale, 1, &w.broad_pattern_world_scale);
-                W2_Const(mb, kW2_BroadFloor,      1, &w.broad_pattern_floor);
+            if (w.state_key) {
+                for (const auto& kv : c->src.res()) {
+                    const std::string& rn = kv.first;
+                    if (rn.find("shaderblockdepot") == std::string::npos) continue;
+                    if (!lvl.empty() && rn.find(lvl) == std::string::npos) continue;
+                    const std::vector<uint8_t>* dbytes = nullptr;
+                    bf6::Depot* dep = c->depot_named(rn, &dbytes);
+                    if (!dep || !dbytes || !dep->has_key(w.state_key)) continue;
+                    bf6::MaterialBinding mb = dep->textures_for(w.state_key, *dbytes);
+                    if (!mb.valid) continue;
 
-                /* The current MP_Isolated ExpressionShader's common
-                 * BindingSet, reconstructed by Name32 rather than copied from
-                 * a dump.  This table is intentionally adjacent to the read:
-                 * when the selected shader changes, the runtime closure must
-                 * reject version 1 until its BindingSet is decoded again. */
-                if (w.foam_rgb2 >= 0 && w.detail_normal >= 0 &&
-                    w.foam_normal >= 0 && w.noise >= 0 && w.contact_foam >= 0) {
-                    auto one = [&](int r, int q, uint32_t h) {
-                        return W2_Const(mb, h, 1, &w.extended_cb1[r][q]);
+                    /* THREE families, not two. The Granite Portal sub-levels bind a
+                     * third material that shares no slot with either of the others:
+                     * seven float3 colours, each paired with a float, and the floats
+                     * are world coordinates (-1024, 1024, -2048, 512) rather than
+                     * distances - a region-banded water. Returning 0 for it would
+                     * hand a consumer the foam family's semantics and the wrong
+                     * colour, so it gets its own value and its colour fields stay
+                     * absent until the family is decoded. */
+                    w.variant = mb.constants.count(kW2_OceanColour) ? 1
+                              : (mb.constants.count(kW2_Shallow) ||
+                                 mb.constants.count(kW2_Deep))     ? 0
+                              : 2;
+
+                    const auto& gi = c->src.partition_index();
+                    auto grab = [&](uint32_t slot) -> int32_t {
+                        auto sit = mb.textures.find(slot);
+                        if (sit == mb.textures.end()) return -1;
+                        auto ait = gi.find(sit->second);
+                        if (ait == gi.end()) return -1;
+                        std::string t = ait->second;
+                        if (t.size() > 4 && t.compare(t.size() - 4, 4, ".ebx") == 0) t.resize(t.size() - 4);
+                        return c->texture_id(t);
                     };
-                    bool ok = true;
-                    ok &= W2_Const(mb, 0x86FF4BB6, 4, w.extended_cb1[0]);
-                    ok &= W2_Const(mb, 0x6FE3C6FD, 4, w.extended_cb1[1]);
-                    ok &= W2_Const(mb, 0xEC10E3B5, 3, w.extended_cb1[2]);
-                    ok &= one(2,3,0x2D8E51DC);
-                    ok &= W2_Const(mb, 0xEACA953A, 3, w.extended_cb1[3]);
-                    ok &= one(3,3,0x762ACD8A);
-                    ok &= W2_Const(mb, 0xD5C71AFD, 3, w.extended_cb1[4]);
-                    ok &= one(4,3,0xA93365F5);
-                    ok &= W2_Const(mb, 0x0795990F, 2, w.extended_cb1[5]);
-                    const uint32_t scalar[17][4] = {
-                        {0xA970CEB0,0xBE1E6645,0,0},
-                        {0x727228C2,0xE3D706BC,0x528303A9,0xF6D64FC7},
-                        {0x677F3864,0xA85CF17C,0x35870FDC,0xBD9F2E32},
-                        {0xC4119C14,0xAB684B74,0x4EA00F26,0x1F9EBEF8},
-                        {0xCA6E9E77,0x5F82A97A,0xA23006D7,0x0309A262},
-                        {0x179766CF,0x9C172692,0xB737D9B5,0xA90CCEB2},
-                        {0x428DBA1B,0xB3A4850E,0xBC49D160,0x166D6730},
-                        {0x166D662E,0x9D6D7926,0x401DBC4F,0x0DC163B0},
-                        {0x54E5C060,0x45576615,0x0786871D,0x8F14B8ED},
-                        {0x9D975A80,0x2442CDFB,0x6C178CDD,0xE0B7D29A},
-                        {0x9702B2FC,0x16B4965A,0xD5DB189C,0xD6F33B4B},
-                        {0x7696FBA1,0x9A4F54F5,0x67FF3FB3,0x6CD08F39},
-                        {0x195E4836,0x232FF100,0xC5625D31,0x1AFFA140},
-                        {0xF62181E8,0x83903BBB,0x1E626FB8,0xAD0F5BEF},
-                        {0x5629D818,0xAE1243A2,0x02F07FDA,0xC76D5B4E},
-                        {0xC57449FF,0x9A44CFD5,0x2522B14D,0x2522B253},
-                        {0x1CA1D2FA,0,0,0}
-                    };
-                    ok &= one(5,2,scalar[0][0]); ok &= one(5,3,scalar[0][1]);
-                    for (int r = 6; r <= 21; ++r) {
-                        const int si = r - 5;
-                        for (int q = 0; q < 4; ++q) {
-                            if (!scalar[si][q]) { w.extended_cb1[r][q] = 0.f; continue; }
-                            ok &= one(r,q,scalar[si][q]);
+                    w.detail_normal = grab(kWSlotDetailNsh);
+                    w.foam_normal   = grab(kWSlotFoamNsh);
+                    w.foam_rgb      = grab(kWSlotFoamRgb);
+                    w.noise         = grab(kWSlotNoise);
+                    w.perlin        = grab(kWSlotPerlin);
+                    w.contact_foam  = grab(kW2_ContactFoam);
+                    w.foam_rgb2     = grab(kW2_FoamRgb2);
+
+                    if (w.variant == 1) {
+                        W2_Const(mb, kW2_OceanColour, 3, w.base_colour);
+                        float dist = -1.f;
+                        W2_Const(mb, kW2_AbsorbDist, 1, &dist);
+                        w.absorption_distance_m = dist;
+                        static const uint32_t ov[4] = { kW2_Overlay0, kW2_Overlay1,
+                                                        kW2_Overlay2, kW2_Overlay3 };
+                        for (int k = 0; k < 4; k++) {
+                            float t3[3];
+                            if (!W2_Const(mb, ov[k], 3, t3)) continue;
+                            std::memcpy(w.overlay_colour[w.overlay_count], t3, 12);
+                            w.overlay_count++;
                         }
+                    } else if (w.variant == 0) {
+                        W2_Const(mb, kW2_Shallow, 3, w.base_colour);
+                        W2_Const(mb, kW2_Deep, 3, w.deep_colour);
+                        float ramp = -1.f;
+                        W2_Const(mb, kW2_DepthRamp, 1, &ramp);
+                        w.depth_ramp_m = ramp;
                     }
-                    if (ok && selected_extended_graph) w.extended_graph_version = 1;
-                }
-                break;
-            }
-        }
 
-        /* THE CONVERSION, done here so no consumer has to know it exists.
-         *
-         *   the ocean family's authored colour is what the water REACHES after
-         *   `absorption_distance_m` metres. The draw shader turns it into a
-         *   per-unit transmission with saturate(1 + ln(c)/d) and hands that to
-         *   the deferred pass as an albedo. extinction is the same quantity in
-         *   the form a Beer-Lambert renderer wants: transmission over L metres
-         *   is exp(-extinction * L).
-         *
-         *   d <= 0.01 is the shader's own bypass: the colour is used raw.
-         */
-        if (w.variant == 1 && w.base_colour[0] >= 0.f) {
-            const float dst = w.absorption_distance_m;
-            for (int k = 0; k < 3; k++) {
-                const float col = w.base_colour[k] > 1e-6f ? w.base_colour[k] : 1e-6f;
-                if (dst > 0.01f) {
-                    float s = 1.f + std::log(col) / dst;
-                    w.surface_colour[k] = s < 0.f ? 0.f : (s > 1.f ? 1.f : s);
-                    w.extinction[k] = -std::log(col) / dst;
-                } else {
-                    const float s = w.base_colour[k];
-                    w.surface_colour[k] = s < 0.f ? 0.f : (s > 1.f ? 1.f : s);
-                    /* Raw colour bypass supplies no volumetric extinction.
-                     * Keep the absent sentinel, including when distance was
-                     * not decoded. Zero would falsely mean lossless water. */
+                    float fade[2] = { 0.f, 0.f };
+                    if (W2_Const(mb, kW2_DetailFade, 2, fade))
+                        { w.detail_fade_start_m = fade[0]; w.detail_fade_end_m = fade[1]; }
+                    W2_Const(mb, kW2_FoamThreshold, 1, &w.foam_threshold);
+                    W2_Const(mb, kW2_ShoreFoamSupp, 1, &w.shore_foam_suppression);
+                    W2_Const(mb, kW2_FoamContrast,  1, &w.foam_contrast_divisor);
+                    W2_Const(mb, kW2_FoamW0, 1, &w.cascade_foam_weight[0]);
+                    W2_Const(mb, kW2_FoamW1, 1, &w.cascade_foam_weight[1]);
+                    W2_Const(mb, kW2_FoamW2, 1, &w.cascade_foam_weight[2]);
+                    W2_Const(mb, kW2_FoamW3, 1, &w.cascade_foam_weight[3]);
+                    W2_Const(mb, kW2_SmoothZero,   1, &w.smoothness_zero_foam);
+                    W2_Const(mb, kW2_SmoothFull,   1, &w.smoothness_full_foam);
+                    W2_Const(mb, kW2_SmoothBias,   1, &w.smoothness_bias);
+                    W2_Const(mb, kW2_SmoothNear,   1, &w.smoothness_near_multiplier);
+                    W2_Const(mb, kW2_FoamSheetN,   1, &w.foam_sheet_normal_strength);
+                    W2_Const(mb, kW2_MicroSheetN,  1, &w.micro_sheet_normal_strength);
+                    W2_Const(mb, kW2_NoiseUvScale, 1, &w.noise_uv_scale);
+                    W2_Const(mb, kW2_ReflLow,  1, &w.reflectance_low);
+                    W2_Const(mb, kW2_ReflHigh, 1, &w.reflectance_high);
+                    W2_Const(mb, kW2_ReflBias, 1, &w.reflectance_bias);
+                    W2_Const(mb, kW2_MicroUvScale,  1, &w.micro_sheet_uv_scale);
+                    W2_Const(mb, kW2_FoamUvScale,   1, &w.foam_sheet_uv_scale);
+                    W2_Const(mb, kW2_MicroFlow,     1, &w.micro_sheet_flow_speed);
+                    W2_Const(mb, kW2_CompositeLow,  1, &w.foam_composite_low);
+                    W2_Const(mb, kW2_CompositeHigh, 1, &w.foam_composite_high);
+                    W2_Const(mb, kW2_ContactDiv,    1, &w.contact_world_divisor_m);
+                    W2_Const(mb, kW2_ContactLow,    1, &w.contact_remap_low);
+                    W2_Const(mb, kW2_ContactGain,   1, &w.contact_gain);
+                    W2_Const(mb, kW2_BroadWorldMul,   1, &w.broad_pattern_world_mul);
+                    W2_Const(mb, kW2_BroadWorldScale, 1, &w.broad_pattern_world_scale);
+                    W2_Const(mb, kW2_BroadFloor,      1, &w.broad_pattern_floor);
+
+                    /* The current MP_Isolated ExpressionShader's common
+                     * BindingSet, reconstructed by Name32 rather than copied from
+                     * a dump.  This table is intentionally adjacent to the read:
+                     * when the selected shader changes, the runtime closure must
+                     * reject version 1 until its BindingSet is decoded again. */
+                    if (w.foam_rgb2 >= 0 && w.detail_normal >= 0 &&
+                        w.foam_normal >= 0 && w.noise >= 0 && w.contact_foam >= 0) {
+                        auto one = [&](int r, int q, uint32_t h) {
+                            return W2_Const(mb, h, 1, &w.extended_cb1[r][q]);
+                        };
+                        bool ok = true;
+                        ok &= W2_Const(mb, 0x86FF4BB6, 4, w.extended_cb1[0]);
+                        ok &= W2_Const(mb, 0x6FE3C6FD, 4, w.extended_cb1[1]);
+                        ok &= W2_Const(mb, 0xEC10E3B5, 3, w.extended_cb1[2]);
+                        ok &= one(2,3,0x2D8E51DC);
+                        ok &= W2_Const(mb, 0xEACA953A, 3, w.extended_cb1[3]);
+                        ok &= one(3,3,0x762ACD8A);
+                        ok &= W2_Const(mb, 0xD5C71AFD, 3, w.extended_cb1[4]);
+                        ok &= one(4,3,0xA93365F5);
+                        ok &= W2_Const(mb, 0x0795990F, 2, w.extended_cb1[5]);
+                        const uint32_t scalar[17][4] = {
+                            {0xA970CEB0,0xBE1E6645,0,0},
+                            {0x727228C2,0xE3D706BC,0x528303A9,0xF6D64FC7},
+                            {0x677F3864,0xA85CF17C,0x35870FDC,0xBD9F2E32},
+                            {0xC4119C14,0xAB684B74,0x4EA00F26,0x1F9EBEF8},
+                            {0xCA6E9E77,0x5F82A97A,0xA23006D7,0x0309A262},
+                            {0x179766CF,0x9C172692,0xB737D9B5,0xA90CCEB2},
+                            {0x428DBA1B,0xB3A4850E,0xBC49D160,0x166D6730},
+                            {0x166D662E,0x9D6D7926,0x401DBC4F,0x0DC163B0},
+                            {0x54E5C060,0x45576615,0x0786871D,0x8F14B8ED},
+                            {0x9D975A80,0x2442CDFB,0x6C178CDD,0xE0B7D29A},
+                            {0x9702B2FC,0x16B4965A,0xD5DB189C,0xD6F33B4B},
+                            {0x7696FBA1,0x9A4F54F5,0x67FF3FB3,0x6CD08F39},
+                            {0x195E4836,0x232FF100,0xC5625D31,0x1AFFA140},
+                            {0xF62181E8,0x83903BBB,0x1E626FB8,0xAD0F5BEF},
+                            {0x5629D818,0xAE1243A2,0x02F07FDA,0xC76D5B4E},
+                            {0xC57449FF,0x9A44CFD5,0x2522B14D,0x2522B253},
+                            {0x1CA1D2FA,0,0,0}
+                        };
+                        ok &= one(5,2,scalar[0][0]); ok &= one(5,3,scalar[0][1]);
+                        for (int r = 6; r <= 21; ++r) {
+                            const int si = r - 5;
+                            for (int q = 0; q < 4; ++q) {
+                                if (!scalar[si][q]) { w.extended_cb1[r][q] = 0.f; continue; }
+                                ok &= one(r,q,scalar[si][q]);
+                            }
+                        }
+                        if (ok && selected_extended_graph) w.extended_graph_version = 1;
+                    }
+                    break;
                 }
             }
-        } else if (w.variant == 0 && w.base_colour[0] >= 0.f) {
-            /* the foam family has no logarithm: the shallow colour IS the
-             * surface colour at zero depth. */
-            std::memcpy(w.surface_colour, w.base_colour, 12);
-        }
 
-        if (out && total < out_max) out[total] = w;
-        total++;
+            /* THE CONVERSION, done here so no consumer has to know it exists.
+             *
+             *   the ocean family's authored colour is what the water REACHES after
+             *   `absorption_distance_m` metres. The draw shader turns it into a
+             *   per-unit transmission with saturate(1 + ln(c)/d) and hands that to
+             *   the deferred pass as an albedo. extinction is the same quantity in
+             *   the form a Beer-Lambert renderer wants: transmission over L metres
+             *   is exp(-extinction * L).
+             *
+             *   d <= 0.01 is the shader's own bypass: the colour is used raw.
+             */
+            if (w.variant == 1 && w.base_colour[0] >= 0.f) {
+                const float dst = w.absorption_distance_m;
+                for (int k = 0; k < 3; k++) {
+                    const float col = w.base_colour[k] > 1e-6f ? w.base_colour[k] : 1e-6f;
+                    if (dst > 0.01f) {
+                        float s = 1.f + std::log(col) / dst;
+                        w.surface_colour[k] = s < 0.f ? 0.f : (s > 1.f ? 1.f : s);
+                        w.extinction[k] = -std::log(col) / dst;
+                    } else {
+                        const float s = w.base_colour[k];
+                        w.surface_colour[k] = s < 0.f ? 0.f : (s > 1.f ? 1.f : s);
+                        /* Raw colour bypass supplies no volumetric extinction.
+                         * Keep the absent sentinel, including when distance was
+                         * not decoded. Zero would falsely mean lossless water. */
+                    }
+                }
+            } else if (w.variant == 0 && w.base_colour[0] >= 0.f) {
+                /* the foam family has no logarithm: the shallow colour IS the
+                 * surface colour at zero depth. */
+                std::memcpy(w.surface_colour, w.base_colour, 12);
+            }
+
+            if (out && total < out_max) out[total] = w;
+            total++;
+        }
     }
     return total;
 }
@@ -903,8 +986,23 @@ int bf6_level_water_mask(bf6_ctx* c, const char* level,
     if (tree.empty())
         return W2_MaskFail(err, err_cap, "level has no terrain streaming tree");
     std::vector<uint8_t> resource = c->src.get_res(tree, why), block;
-    if (resource.empty() || !bf6::Splat::find_block(resource, 10, block, why))
+    if (resource.empty())
         return W2_MaskFail(err, err_cap, "water CoarseMask block 10: " + why);
+    if (!bf6::Splat::find_block(resource, 10, block, why)) {
+        /* ABSENT IS NOT BROKEN. find_block reports "no block" only after it
+         * walked every block to the terminator, so the terrain parsed and
+         * simply carries no CoarseMask raster. That is authored: every level
+         * without one (mp_portal_ocean, mp_tungsten, mp_granite_marina_portal,
+         * mp_abbasid) either has no water or runs ShoreDepth attenuation
+         * (type 1), and every CoarseMask level (mp_isolated, mp_atoll) ships
+         * the block. Return 0 with an EMPTY err so a caller can tell "this
+         * level has no mask" from a read that failed. */
+        if (why.compare(0, 9, "no block ") == 0) {
+            if (err && err_cap > 0) err[0] = 0;
+            return 0;
+        }
+        return W2_MaskFail(err, err_cap, "water CoarseMask block 10: " + why);
+    }
     if (block.size() < 44)
         return W2_MaskFail(err, err_cap, "water CoarseMask header is truncated");
 
@@ -975,6 +1073,287 @@ int bf6_level_water_mask(bf6_ctx* c, const char* level,
     out->atlas_r8 = c->water_mask_atlas.empty() ? nullptr : c->water_mask_atlas.data();
     out->indirection_u32 = c->water_mask_indirection.empty() ? nullptr :
                            c->water_mask_indirection.data();
+    return 1;
+}
+
+/* ---- the Portal water feature ---------------------------------------------
+ * gmpf_water exposes the model interface mi_portal_waterfeature: Enabled,
+ * BeaufortScale, WaveAmplitude, WaterHeight (TypeInfoField NameHashes below).
+ * Their start values are DefaultValues rows {Value, FieldName}; the created gem
+ * the prefab instantiates (gem_water) carries Enabled true, BeaufortScale 2,
+ * WaveAmplitude 0.25 and no WaterHeight row. Inside the prefab, PropertyConnections
+ * route them: BeaufortScale into the WaterOceanBeaufortMappingEntityData, which
+ * writes WindSpeed into all three cascades and Choppiness into the 192 m one;
+ * WaveAmplitude into the 192 m cascade's WaveAmplitude only; WaterHeight through
+ * a splitter/builder chain into the surface transform; Enabled through an AND
+ * into the surface. The mutator multipliers on those routes carry default 1 in
+ * the same partition and are taken as identity. */
+static const uint32_t kW2_PropEnabled   = 0x666021F3;
+static const uint32_t kW2_PropBeaufort  = 0x37A5DEA3;
+static const uint32_t kW2_PropAmplitude = 0xC44A1FAF;
+static const uint32_t kW2_PropHeight    = 0xED79777A;
+static const char*    kW2_DefaultValues = "37d5e036-d039-f154-2647-69d474ae8f23";
+static const uint32_t kW2_DVRows        = 0x10CF85CD;  /* DefaultValues          */
+static const uint32_t kW2_DVValue       = 0x8CF424E7;  /* Value (boxed)          */
+static const uint32_t kW2_DVFieldName   = 0x93BF7D99;  /* FieldName (NameHash)   */
+static const uint32_t kW2_PerInstanceOverrides = 0xC064A367;
+static const char*    kW2_BeaufortMapping = "e7aa420c-d309-afce-9ffa-3755368b47c3";
+static const uint32_t kW2_BeaufortScalar  = 0x68521A40;
+static const uint32_t kW2_PropertyConnections = 0xC78408A3;
+static const uint32_t kW2_ConnTarget      = 0x645B319C;
+static const uint32_t kW2_ConnTargetField = 0x2D7314C9;
+/* Pin ids are djb2 of the pin name, unlike the reflected field hashes:
+ * djb2("WaveAmplitude"). */
+static const uint32_t kW2_PinWaveAmplitude = 0x3F300279;
+
+struct W2_WaterFeature
+{
+    bool  found = false;
+    std::string prefab;
+    float placement[3] = { 0.f, 0.f, 0.f };
+    float values[4] = { -1.f, -1.f, -1.f, -1.f };   /* enabled, beaufort, amplitude, height */
+    int   sources[4] = { 0, 0, 0, 0 };              /* 0 absent 1 default 2 override 3 placement */
+    float authored_force = -1.f;
+    int   beaufort_driven = 0;
+    std::vector<int> amplitude_targets;             /* sim instance indices */
+};
+
+static int W2_PropSlot(uint32_t name)
+{
+    switch (name) {
+    case kW2_PropEnabled:   return 0;
+    case kW2_PropBeaufort:  return 1;
+    case kW2_PropAmplitude: return 2;
+    case kW2_PropHeight:    return 3;
+    default:                return -1;
+    }
+}
+
+static bool W2_Scalar(const bf6::EbxValue* v, float& out)
+{
+    if (!v) return false;
+    switch (v->kind) {
+    case bf6::EbxValue::Kind::Bool: out = v->b ? 1.f : 0.f; return true;
+    case bf6::EbxValue::Kind::Real: out = (float)v->f; return true;
+    case bf6::EbxValue::Kind::Int:  out = (float)v->i; return true;
+    case bf6::EbxValue::Kind::Uint: out = (float)v->u; return true;
+    default: return false;
+    }
+}
+
+/* {Value, FieldName} rows naming the water properties, anywhere under v. */
+static int W2_CollectPropertyRows(const bf6::EbxValue& v, float vals[4], bool have[4], int depth)
+{
+    if (depth > 6) return 0;
+    int hits = 0;
+    if (v.kind == bf6::EbxValue::Kind::Struct) {
+        const bf6::EbxValue* name = v.field(kW2_DVFieldName);
+        const bf6::EbxValue* value = v.field(kW2_DVValue);
+        float fv = 0.f;
+        if (name && value && (name->kind == bf6::EbxValue::Kind::Uint ||
+                              name->kind == bf6::EbxValue::Kind::Int)) {
+            const uint32_t h = name->kind == bf6::EbxValue::Kind::Uint
+                ? (uint32_t)name->u : (uint32_t)name->i;
+            const int slot = W2_PropSlot(h);
+            if (slot >= 0 && W2_Scalar(value, fv)) { vals[slot] = fv; have[slot] = true; ++hits; }
+        }
+        for (const auto& kv : v.fields) hits += W2_CollectPropertyRows(kv.second, vals, have, depth + 1);
+    } else if (v.kind == bf6::EbxValue::Kind::Array) {
+        for (const bf6::EbxValue& item : v.items) hits += W2_CollectPropertyRows(item, vals, have, depth + 1);
+    }
+    return hits;
+}
+
+/* The DefaultValues container in one partition naming the most water
+ * properties; `hits` is how many it names. */
+static int W2_BestDefaults(bf6::Ebx& e, float vals[4], bool have[4])
+{
+    int best = 0;
+    for (size_t i = 0; i < e.instance_count(); ++i) {
+        if (bf6::TypeDb::guid_str(e.instance_type(i)) != kW2_DefaultValues) continue;
+        const bf6::EbxValue d = e.read_instance(i);
+        const bf6::EbxValue* rows = d.field(kW2_DVRows);
+        if (!rows) continue;
+        float v[4] = { -1.f, -1.f, -1.f, -1.f };
+        bool h[4] = { false, false, false, false };
+        const int n = W2_CollectPropertyRows(*rows, v, h, 0);
+        if (n > best) {
+            best = n;
+            for (int k = 0; k < 4; ++k) { vals[k] = v[k]; have[k] = h[k]; }
+        }
+    }
+    return best;
+}
+
+static bool W2_ReadWaterFeature(bf6_ctx* c, const std::string& lvl, W2_WaterFeature& f)
+{
+    f = W2_WaterFeature();
+    if (!c || !c->types || lvl.empty()) return false;
+    const std::vector<bf6_ctx::WaterSite>& sites = BF6_WaterSites(c, lvl);
+    if (sites.empty()) return false;
+    const bf6_ctx::WaterSite& site = sites.front();
+    f.found = true;
+    f.prefab = site.part;
+    f.placement[0] = site.xf.m[3].x;
+    f.placement[1] = site.xf.m[3].y;
+    f.placement[2] = site.xf.m[3].z;
+
+    std::string err;
+    std::vector<uint8_t> raw = c->src.get_ebx(site.part, err);
+    if (raw.empty()) return true;
+    bf6::Ebx e(*c->types);
+    e.set_guid_index(&c->src.partition_index());
+    if (!e.parse(std::move(raw), err)) return true;
+
+    /* Structure first: surface height, mapping scalar, simulation instances. */
+    bool have_surface = false;
+    float surface_y = 0.f;
+    int mapping = -1;
+    std::vector<int> sims;
+    for (size_t i = 0; i < e.instance_count(); ++i) {
+        const std::string t = bf6::TypeDb::guid_str(e.instance_type(i));
+        if (t == kWaterTypeGuid && !have_surface) {
+            float sx, sz, tx, ty, tz;
+            if (BF6_WPlacedEntity(e, i, site.xf, sx, sz, tx, ty, tz))
+                { have_surface = true; surface_y = ty; }
+        } else if (t == kW2_BeaufortMapping && mapping < 0) {
+            const std::vector<uint32_t> want = { kW2_BeaufortScalar };
+            const bf6::EbxValue d = e.read_instance(i, &want);
+            float force = 0.f;
+            const bf6::EbxValue* s = d.field(kW2_BeaufortScalar);
+            if (s && s->kind == bf6::EbxValue::Kind::Real && W2_Scalar(s, force))
+                { mapping = (int)i; f.authored_force = force; }
+        } else if (t == kSimTypeGuid) {
+            sims.push_back((int)i);
+        }
+    }
+
+    /* The routes. */
+    {
+        const std::vector<uint32_t> want = { kW2_PropertyConnections };
+        for (size_t i = 0; i < e.instance_count(); ++i) {
+            const bf6::EbxValue d = e.read_instance(i, &want);
+            const bf6::EbxValue* conns = d.field(kW2_PropertyConnections);
+            if (!conns || conns->kind != bf6::EbxValue::Kind::Array) continue;
+            for (const bf6::EbxValue& conn : conns->items) {
+                const bf6::EbxValue* target = conn.field(kW2_ConnTarget);
+                const bf6::EbxValue* pin = conn.field(kW2_ConnTargetField);
+                if (!target || target->kind != bf6::EbxValue::Kind::InstanceRef) continue;
+                if (target->instance == mapping && mapping >= 0) f.beaufort_driven = 1;
+                if (!pin) continue;
+                const uint32_t p = pin->kind == bf6::EbxValue::Kind::Uint ? (uint32_t)pin->u
+                                 : pin->kind == bf6::EbxValue::Kind::Int  ? (uint32_t)pin->i : 0u;
+                if (p == kW2_PinWaveAmplitude &&
+                    std::find(sims.begin(), sims.end(), target->instance) != sims.end() &&
+                    std::find(f.amplitude_targets.begin(), f.amplitude_targets.end(),
+                              target->instance) == f.amplitude_targets.end())
+                    f.amplitude_targets.push_back(target->instance);
+            }
+        }
+    }
+
+    /* Defaults: the created gem the prefab imports wins a tie with the
+     * prefab's own containers (the prefab also carries per-route containers,
+     * e.g. BeaufortScale 1 for the mutator multiplier). */
+    float vals[4] = { -1.f, -1.f, -1.f, -1.f };
+    bool have[4] = { false, false, false, false };
+    int best = 0;
+    {
+        std::vector<std::string> imported;
+        const auto& gi = c->src.partition_index();
+        for (size_t k = 0; k < e.import_count(); ++k) {
+            auto it = gi.find(e.import_at(k).partition);
+            if (it == gi.end()) continue;
+            std::string n = it->second;
+            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".ebx") == 0) n.resize(n.size() - 4);
+            if (n != site.part && c->src.ebx().count(n)) imported.push_back(n);
+        }
+        std::sort(imported.begin(), imported.end());
+        imported.erase(std::unique(imported.begin(), imported.end()), imported.end());
+        for (const std::string& n : imported) {
+            std::vector<uint8_t> r2 = c->src.get_ebx(n, err);
+            if (r2.empty()) continue;
+            bf6::Ebx e2(*c->types);
+            if (!e2.parse(std::move(r2), err)) continue;
+            float v[4]; bool h[4];
+            const int hits = W2_BestDefaults(e2, v, h);
+            if (hits > best) { best = hits; for (int q = 0; q < 4; ++q) { vals[q] = v[q]; have[q] = h[q]; } }
+        }
+        float v[4]; bool h[4];
+        const int own = W2_BestDefaults(e, v, h);
+        if (own > best) { best = own; for (int q = 0; q < 4; ++q) { vals[q] = v[q]; have[q] = h[q]; } }
+    }
+    for (int q = 0; q < 4; ++q)
+        if (have[q]) { f.values[q] = vals[q]; f.sources[q] = 1; }
+
+    /* The level's own instance overrides, when it carries any. No shipped level
+     * does (mp_portal_ocean's reference has PerInstanceOverrides [0]), so this
+     * reads the same {Value, FieldName} row shape the defaults use. */
+    {
+        std::vector<uint8_t> r3 = c->src.get_ebx(site.placed_in, err);
+        if (!r3.empty() && site.ref_index >= 0) {
+            bf6::Ebx e3(*c->types);
+            if (e3.parse(std::move(r3), err) && (size_t)site.ref_index < e3.instance_count()) {
+                const std::vector<uint32_t> want = { kW2_PerInstanceOverrides };
+                const bf6::EbxValue d = e3.read_instance((size_t)site.ref_index, &want);
+                if (const bf6::EbxValue* ov = d.field(kW2_PerInstanceOverrides)) {
+                    float v[4] = { -1.f, -1.f, -1.f, -1.f };
+                    bool h[4] = { false, false, false, false };
+                    W2_CollectPropertyRows(*ov, v, h, 0);
+                    for (int q = 0; q < 4; ++q)
+                        if (h[q]) { f.values[q] = v[q]; f.sources[q] = 2; }
+                }
+            }
+        }
+    }
+
+    /* WaterHeight has no authored start value; the model interface's height
+     * view reads the surface transform's Y, so the start height IS the placed
+     * surface's height. */
+    if (f.sources[3] == 0 && have_surface) { f.values[3] = surface_y; f.sources[3] = 3; }
+    return true;
+}
+
+static std::string W2_LevelDir(bf6_ctx* c, const char* level, bool isolated)
+{
+    std::string lvl;
+    if (!c || !level || !*level) return lvl;
+    if (!isolated && c->types && c->walk && c->walked_level == level) {
+        lvl = c->walk->root;
+        if (lvl.size() > 4 && lvl.compare(lvl.size() - 4, 4, ".ebx") == 0) lvl.resize(lvl.size() - 4);
+        const size_t slash = lvl.find_last_of('/');
+        return slash == std::string::npos ? std::string() : lvl.substr(0, slash);
+    }
+    std::string mount_err;
+    if (!ensure_mounted(c, level, mount_err) || !ensure_types(c, mount_err)) return lvl;
+    return BF6_IsolatedLevelDir(c, level);
+}
+
+int bf6_level_water_feature(bf6_ctx* c, const char* level, bf6_water_feature* out)
+{
+    if (!out) return 0;
+    std::memset(out, 0, sizeof(*out));
+    out->enabled = -1;
+    out->beaufort_scale = out->wave_amplitude = -1.f;
+    out->authored_beaufort_force = -1.f;
+    if (!c || !level || !*level) return 0;
+    const std::string lvl = W2_LevelDir(c, level, false);
+    W2_WaterFeature f;
+    if (!W2_ReadWaterFeature(c, lvl, f)) return 0;
+    out->found = 1;
+    std::snprintf(out->prefab, sizeof(out->prefab), "%s", f.prefab.c_str());
+    for (int q = 0; q < 3; ++q) out->placement[q] = f.placement[q];
+    out->enabled = f.sources[0] ? (f.values[0] != 0.f ? 1 : 0) : -1;
+    out->beaufort_scale = f.values[1];
+    out->wave_amplitude = f.values[2];
+    out->water_height = f.values[3];
+    out->enabled_source = f.sources[0];
+    out->beaufort_source = f.sources[1];
+    out->amplitude_source = f.sources[2];
+    out->height_source = f.sources[3];
+    out->authored_beaufort_force = f.authored_force;
+    out->beaufort_driven = f.beaufort_driven;
+    out->amplitude_cascades = (int32_t)f.amplitude_targets.size();
     return 1;
 }
 

@@ -122,9 +122,10 @@ int main(int argc, char** argv)
         // The level directory prefix, off any partition path that contains it.
         std::string lvl_dir;
         for (const auto& kv : src.ebx()) {
-            const size_t p = kv.first.find("/levels/" + level + "/");
-            if (p == std::string::npos) continue;
-            lvl_dir = kv.first.substr(0, p + 8 + level.size());
+            // One level-path rule for every reader: levels/[group/]<level>/.
+            const size_t end = Source::level_dir_end(kv.first, level);
+            if (end == std::string::npos) continue;
+            lvl_dir = kv.first.substr(0, end);
             break;
         }
         if (lvl_dir.empty()) { std::printf("SKIP %s (no level dir)\n", level.c_str()); continue; }

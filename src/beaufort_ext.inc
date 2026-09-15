@@ -204,7 +204,20 @@ static int BF6_SeaStateInDir(bf6_ctx* c, const std::string& lvl, bf6_ocean_sea_s
     out->wind_curve_index = -1;
     if (!c || !c->types || lvl.empty()) return 0;
     float force = 0.f;
-    if (!BF6_ReadBeaufortForce(c, lvl, force)) return 0;
+    if (!BF6_ReadBeaufortForce(c, lvl, force)) {
+        /* PLACED WATER. A level whose water is a Portal water prefab carries the
+         * mapping entity inside the prefab, not in its schematics. gmpf_water's
+         * mapping authors 6.5, but a PropertyConnection writes the prefab's
+         * BeaufortScale property into it, so the force played at start is that
+         * property (gem default 2). The authored scalar is only the answer when
+         * nothing drives the entity. Inferred from the routing, not measured in
+         * game. */
+        W2_WaterFeature feature;
+        if (!W2_ReadWaterFeature(c, lvl, feature)) return 0;
+        if (feature.beaufort_driven && feature.sources[1] != 0) force = feature.values[1];
+        else if (feature.authored_force >= 0.f) force = feature.authored_force;
+        else return 0;
+    }
     out->found = 1;
     out->force = force;
 
@@ -326,6 +339,40 @@ extern "C" int bf6_level_water_sims_effective(bf6_ctx* c, const char* level, int
     if (count <= 0) return count < 0 ? 0 : count;
     rows.resize((size_t)count);
     const bool wind = sea.found && sea.wind_curve_index >= 0 && sea.wind_mps > 0.f;
+
+    /* PLACED WATER (Portal Ocean). When the cascades came from a water prefab
+     * rather than the level's schematics, the prefab's own routing says where
+     * amplitude goes: its WaveAmplitude property is connected to the 192 m
+     * cascade's WaveAmplitude only, and the other cascades keep their authored
+     * value. The sea-curve slot 7 rule is an inference made for levels that
+     * author no such route, so it is not applied over an authored one. Wind
+     * still follows the Beaufort curve for every cascade, which is also what
+     * the prefab routes (the mapping entity writes WindSpeed into all three). */
+    {
+        const std::string lvl = W2_LevelDir(c, level, isolated != 0);
+        bool placed = false;
+        if (!lvl.empty() && !BF6_WaterSites(c, lvl).empty()) {
+            std::vector<bf6_water_sim_v2> own;
+            BF6_CollectWaterSimsInDir(c, lvl, own);
+            placed = own.empty();
+        }
+        W2_WaterFeature feature;
+        if (placed && W2_ReadWaterFeature(c, lvl, feature)) {
+            for (bf6_water_sim_v2& r : rows) {
+                if (wind) r.wind_speed = sea.wind_mps;
+                if (feature.sources[2] != 0 &&
+                    std::find(feature.amplitude_targets.begin(), feature.amplitude_targets.end(),
+                              r.source_index) != feature.amplitude_targets.end())
+                    r.wave_amplitude = feature.values[2];
+            }
+            if (out && out_max > 0) {
+                const int n = std::min<int>(count, out_max);
+                for (int i = 0; i < n; ++i) out[i] = rows[(size_t)i];
+            }
+            return count;
+        }
+    }
+
     /* Unreal only adopted the curves once a wind was identified; kept. */
     const bool amp = wind && sea.curve_count > kSeaAmplitudeCurveSlot &&
                      sea.curve_value[kSeaAmplitudeCurveSlot] > 0.f;

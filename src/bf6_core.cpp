@@ -219,6 +219,20 @@ struct bf6_ctx {
     std::vector<uint8_t>              water_mask_atlas;
     std::vector<uint32_t>             water_mask_indirection;
 
+    // Water that a level PLACES rather than authors: a prefab reference in one
+    // of the level's partitions whose blueprint holds the water entity (Portal
+    // Ocean's gmpf_water). Keyed by level directory and mount size, because the
+    // search parses every level partition on a level with no water at all and
+    // a caller asks for a count before it asks for the rows.
+    struct WaterSite {
+        std::string part;        // blueprint partition holding the water entity
+        std::string placed_in;   // level partition holding the reference
+        int32_t     ref_index = -1;
+        bf6::Mat34  xf;          // the reference's BlueprintTransform
+    };
+    std::string                       water_sites_key;
+    std::vector<WaterSite>            water_sites;
+
     // bf6_variation_live answers, keyed res|bundle|variation. The question is
     // asked once per distinct triple while a level's groups are being formed,
     // and each answer costs a meshset parse.
@@ -2160,6 +2174,175 @@ static bool BF6_CountsWater(bf6_ctx* c, const std::string& name)
     return false;
 }
 
+// ---- water a level PLACES: the Portal water prefab ---------------------------
+//
+// mp_portal_ocean (1.4.3.0) authors no WaterSurfaceEntityData in any partition
+// of its own. Its _layers_content/water layer places a
+// SpatialPrefabReferenceObjectData at (0, 70, 0) whose blueprint is
+// game/glacierportal/portalprefabs/water/gmpf_water, and THAT partition holds
+// the 8192 m surface, three simulation cascades, the ocean VisualEnvironment
+// and the four Portal water properties. A reader that looks only under the
+// level directory returns zero surfaces, which is what every water reader here
+// did (research: tidal-strike-water-portal-ocean-water-is-a-portal-prefab).
+//
+// THE RULE, and why it cannot move an existing level's answer: sites are
+// looked for ONLY when the level directory authors no water entity itself.
+// Then the prefab references placed in the level's partitions are followed
+// into their blueprint partitions - names saying water first, then the rest,
+// stopping at the first partition that places water, the same order-not-scope
+// idiom as the authored search - and the reference's BlueprintTransform is
+// kept so the surface lands where the level put it.
+//
+// ONE REFERENCE DEEP. A reference is followed into its blueprint, not through
+// the references inside that blueprint. Every shipped water prefab is placed
+// directly, and recursing would make every level without water pay for a
+// second object walk on each call.
+extern "C++" {
+static const char* kSpatialPrefabRefGuid = "6e747c11-2b0f-f724-9084-6b609eb8dd3e";
+static const uint32_t kWRefBlueprint = 0x6B831B88;   // Blueprint (import)
+static const uint32_t kWRefTransform = 0x7B554EF5;   // BlueprintTransform
+static const uint32_t kWRefExcluded  = 0x4CD269A8;   // Excluded
+static const uint32_t kWLtMembers[4] = { 0xC478CC3B, 0xBF151EF9, 0x695D12A4, 0xBC4B07B4 };
+static const uint32_t kWVecMembers[3] = { 0x3901DB14, 0x42FC0F5E, 0x32A99B9C };
+
+static float BF6_WNum(const bf6::EbxValue* f)
+{
+    if (!f) return 0.f;
+    if (f->kind == bf6::EbxValue::Kind::Real) return (float)f->f;
+    if (f->kind == bf6::EbxValue::Kind::Int)  return (float)f->i;
+    if (f->kind == bf6::EbxValue::Kind::Uint) return (float)f->u;
+    return 0.f;
+}
+
+/* A decoded LinearTransform, or false when any member is missing: an
+ * incomplete transform is not silently identity here, because a surface put at
+ * the origin looks like data. */
+static bool BF6_WLinearTransform(const bf6::EbxValue* t, bf6::Mat34& out)
+{
+    if (!t || t->kind != bf6::EbxValue::Kind::Struct) return false;
+    for (int r = 0; r < 4; ++r) {
+        const bf6::EbxValue* v = t->field(kWLtMembers[r]);
+        if (!v || v->kind != bf6::EbxValue::Kind::Struct) return false;
+        out.m[r].x = BF6_WNum(v->field(kWVecMembers[0]));
+        out.m[r].y = BF6_WNum(v->field(kWVecMembers[1]));
+        out.m[r].z = BF6_WNum(v->field(kWVecMembers[2]));
+    }
+    return true;
+}
+
+static bool BF6_WLower(const std::string& s, const char* needle)
+{
+    std::string low = s;
+    for (char& ch : low) ch = (char)std::tolower((unsigned char)ch);
+    return low.find(needle) != std::string::npos;
+}
+
+/* Does the level directory author a water entity of its own? The same
+ * candidates and order bf6_level_water uses. */
+static bool BF6_LevelAuthorsWater(bf6_ctx* c, const std::string& lvl)
+{
+    const std::string cands[] = { lvl + "/default", lvl + "/_layers_content/water" };
+    for (const std::string& cand : cands)
+        if (c->src.ebx().count(cand) && BF6_CountsWater(c, cand)) return true;
+    // The authored search's own prefix test (no trailing slash), so "authors
+    // water" here means exactly "bf6_level_water found a partition".
+    std::vector<std::string> named, rest;
+    for (const auto& kv : c->src.ebx()) {
+        if (kv.first.compare(0, lvl.size(), lvl) != 0) continue;
+        (BF6_WLower(kv.first, "water") ? named : rest).push_back(kv.first);
+    }
+    for (const std::string& n : named) if (BF6_CountsWater(c, n)) return true;
+    for (const std::string& n : rest)  if (BF6_CountsWater(c, n)) return true;
+    return false;
+}
+
+/* The placed water prefabs of a level that authors no water itself. Empty for
+ * every level whose own directory carries a water entity. */
+static const std::vector<bf6_ctx::WaterSite>& BF6_WaterSites(bf6_ctx* c, const std::string& lvl)
+{
+    static const std::vector<bf6_ctx::WaterSite> kNone;
+    if (!c || !c->types || lvl.empty()) return kNone;
+    const std::string key = lvl + "|" + std::to_string(c->src.ebx().size());
+    if (c->water_sites_key == key) return c->water_sites;
+    c->water_sites.clear();
+    c->water_sites_key = key;
+    if (BF6_LevelAuthorsWater(c, lvl)) return c->water_sites;
+
+    const std::string prefix = lvl + "/";
+    std::vector<std::string> named, rest;
+    for (const auto& kv : c->src.ebx()) {
+        if (kv.first.compare(0, prefix.size(), prefix) != 0) continue;
+        (BF6_WLower(kv.first, "water") ? named : rest).push_back(kv.first);
+    }
+    std::sort(named.begin(), named.end());
+    std::sort(rest.begin(), rest.end());
+    named.insert(named.end(), rest.begin(), rest.end());
+
+    std::map<std::string, bool> counted;
+    const std::vector<uint32_t> want = { kWRefBlueprint, kWRefTransform, kWRefExcluded };
+    for (const std::string& part : named) {
+        std::string err;
+        std::vector<uint8_t> raw = c->src.get_ebx(part, err);
+        if (raw.empty()) continue;
+        bf6::Ebx e(*c->types);
+        e.set_guid_index(&c->src.partition_index());
+        if (!e.parse(std::move(raw), err)) continue;
+        for (size_t i = 0; i < e.instance_count(); ++i) {
+            if (bf6::TypeDb::guid_str(e.instance_type(i)) != kSpatialPrefabRefGuid) continue;
+            const bf6::EbxValue d = e.read_instance(i, &want);
+            if (const bf6::EbxValue* ex = d.field(kWRefExcluded))
+                if ((ex->kind == bf6::EbxValue::Kind::Bool && ex->b) ||
+                    (ex->kind == bf6::EbxValue::Kind::Uint && ex->u) ||
+                    (ex->kind == bf6::EbxValue::Kind::Int && ex->i)) continue;
+            const bf6::EbxValue* bp = d.field(kWRefBlueprint);
+            if (!bp || bp->kind != bf6::EbxValue::Kind::ImportRef) continue;
+            std::string target = bp->import_path;
+            if (target.size() > 4 && target.compare(target.size() - 4, 4, ".ebx") == 0)
+                target.resize(target.size() - 4);
+            if (target.empty() || !c->src.ebx().count(target)) continue;
+            auto hit = counted.find(target);
+            if (hit == counted.end())
+                hit = counted.emplace(target, BF6_CountsWater(c, target)).first;
+            if (!hit->second) continue;
+            bf6_ctx::WaterSite site;
+            site.part = target;
+            site.placed_in = part;
+            site.ref_index = (int32_t)i;
+            if (!BF6_WLinearTransform(d.field(kWRefTransform), site.xf))
+                site.xf = bf6::mat_identity();
+            c->water_sites.push_back(site);
+        }
+        if (!c->water_sites.empty()) break;
+    }
+    return c->water_sites;
+}
+
+/* The water entity's local transform, read at the same FIXED offsets the
+ * authored path reads (basis rows at +0x20/+0x30/+0x40, translation +0x50),
+ * composed with the placing reference. */
+static bool BF6_WPlacedEntity(const bf6::Ebx& e, size_t i, const bf6::Mat34& parent,
+                              float& sx, float& sz, float& tx, float& ty, float& tz)
+{
+    const int64_t base = e.payload() + (int64_t)e.instance_offset(i);
+    const std::vector<uint8_t>& d = e.raw();
+    if (base < 0 || (size_t)base + 0x60 > d.size()) return false;
+    bf6::Mat34 local;
+    for (int r = 0; r < 4; ++r) {
+        float v[3];
+        std::memcpy(v, d.data() + base + 0x20 + 0x10 * r, 12);
+        local.m[r].x = v[0]; local.m[r].y = v[1]; local.m[r].z = v[2];
+    }
+    const bf6::Mat34 w = bf6::mat_mul(parent, local);
+    auto len = [](const bf6::Vec3& v) {
+        return (float)std::sqrt((double)v.x * v.x + (double)v.y * v.y + (double)v.z * v.z);
+    };
+    sx = len(w.m[0]);
+    sz = len(w.m[2]);
+    tx = w.m[3].x; ty = w.m[3].y; tz = w.m[3].z;
+    return true;
+}
+} // extern "C++"
+
 int bf6_variation_live(bf6_ctx* c, const char* res_name,
                        const char* placing_bundle, const char* variation)
 {
@@ -2777,6 +2960,36 @@ static void BF6_CollectWaterSimsInDir(bf6_ctx* c, const std::string& lvl,
     if (rows.size() > 4) rows.resize(4);
 }
 
+/* The cascades a PLACED water prefab carries (Portal Ocean's gmpf_water links
+ * three from its surface), used only when the level's own schematics author
+ * none and the level's water is placed. source_index is the instance index in
+ * the prefab partition. Same enabled filter, order and four-cascade cap. */
+static void BF6_CollectWaterSimsFromSites(bf6_ctx* c, const std::string& lvl,
+                                          std::vector<bf6_water_sim_v2>& rows)
+{
+    rows.clear();
+    for (const bf6_ctx::WaterSite& site : BF6_WaterSites(c, lvl)) {
+        std::string err;
+        std::vector<uint8_t> raw = c->src.get_ebx(site.part, err);
+        if (raw.empty()) continue;
+        bf6::Ebx e(*c->types);
+        if (!e.parse(std::move(raw), err)) continue;
+        for (size_t i = 0; i < e.instance_count(); i++) {
+            if (bf6::TypeDb::guid_str(e.instance_type(i)) != kSimTypeGuid) continue;
+            bf6::EbxValue d = e.read_instance(i);
+            bf6_water_sim_v2 row;
+            BF6_SimRowV2(d, (int)i, row);
+            if (row.enabled) rows.push_back(row);
+        }
+        if (!rows.empty()) break;
+    }
+    std::stable_sort(rows.begin(), rows.end(),
+        [](const bf6_water_sim_v2& a, const bf6_water_sim_v2& b) {
+            return a.tile_dimension > b.tile_dimension;
+        });
+    if (rows.size() > 4) rows.resize(4);
+}
+
 static void BF6_CollectWaterSims(bf6_ctx* c, const char* level,
                                  std::vector<bf6_water_sim_v2>& rows)
 {
@@ -2789,6 +3002,7 @@ static void BF6_CollectWaterSims(bf6_ctx* c, const char* level,
     const size_t slash = lvl.find_last_of('/');
     lvl = slash == std::string::npos ? std::string() : lvl.substr(0, slash);
     BF6_CollectWaterSimsInDir(c, lvl, rows);
+    if (rows.empty()) BF6_CollectWaterSimsFromSites(c, lvl, rows);
 }
 
 extern "C++" {
@@ -2857,6 +3071,7 @@ int bf6_level_water_sims_isolated(bf6_ctx* c, const char* level,
 
     std::vector<bf6_water_sim_v2> rows;
     BF6_CollectWaterSimsInDir(c, lvl, rows);
+    if (rows.empty()) BF6_CollectWaterSimsFromSites(c, lvl, rows);
     if (out && out_max > 0) {
         const int count = std::min<int>((int)rows.size(), out_max);
         for (int i = 0; i < count; ++i) out[i] = rows[(size_t)i];
@@ -3060,129 +3275,143 @@ int bf6_level_water(bf6_ctx* c, const char* level, bf6_water* out, int out_max)
                     if (BF6_CountsWater(c, n)) { part = n; break; }
         }
     }
-    if (part.empty()) return 0;
-
-    std::string err;
-    std::vector<uint8_t> raw = c->src.get_ebx(part, err);
-    if (raw.empty()) return 0;
-    bf6::Ebx e(*c->types);
-    e.set_guid_index(&c->src.partition_index());
-    if (!e.parse(std::move(raw), err)) return 0;
+    // No authored partition: the level may PLACE its water (Portal Ocean).
+    // Each site is the blueprint partition plus the reference's transform.
+    struct WaterSource { std::string part; bf6::Mat34 xf; bool placed; };
+    std::vector<WaterSource> sources;
+    if (!part.empty()) sources.push_back({ part, bf6::mat_identity(), false });
+    else
+        for (const bf6_ctx::WaterSite& site : BF6_WaterSites(c, lvl))
+            sources.push_back({ site.part, site.xf, true });
+    if (sources.empty()) return 0;
 
     int total = 0;
-    for (size_t i = 0; i < e.instance_count(); i++) {
-        if (bf6::TypeDb::guid_str(e.instance_type(i)) != kWaterTypeGuid) continue;
+    for (const WaterSource& source : sources) {
+        std::string err;
+        std::vector<uint8_t> raw = c->src.get_ebx(source.part, err);
+        if (raw.empty()) continue;
+        bf6::Ebx e(*c->types);
+        e.set_guid_index(&c->src.partition_index());
+        if (!e.parse(std::move(raw), err)) continue;
 
-        // The transform, at FIXED offsets - see the accessor note in ebx.h.
-        const int64_t base = e.payload() + (int64_t)e.instance_offset(i);
-        const std::vector<uint8_t>& d = e.raw();
-        if (base < 0 || (size_t)base + 0x60 > d.size()) continue;
-        float sx, sz, tx, ty, tz;
-        std::memcpy(&sx, d.data() + base + 0x20, 4);
-        std::memcpy(&sz, d.data() + base + 0x48, 4);
-        std::memcpy(&tx, d.data() + base + 0x50, 4);
-        std::memcpy(&ty, d.data() + base + 0x54, 4);
-        std::memcpy(&tz, d.data() + base + 0x58, 4);
-        if (std::fabs(sx) < 1.f || std::fabs(sz) < 1.f) continue;
+        for (size_t i = 0; i < e.instance_count(); i++) {
+            if (bf6::TypeDb::guid_str(e.instance_type(i)) != kWaterTypeGuid) continue;
 
-        bf6_water w{};
-        w.detail_normal = w.foam_normal = w.foam_rgb = w.noise = w.perlin = -1;
-        w.center[0] = tx; w.center[1] = tz;
-        w.size[0] = std::fabs(sx); w.size[1] = std::fabs(sz);
-        w.height = ty;
-        w.shallow[0] = w.deep[0] = -1.f;
-        w.is_ocean = 0;
+            // The transform, at FIXED offsets - see the accessor note in ebx.h.
+            const int64_t base = e.payload() + (int64_t)e.instance_offset(i);
+            const std::vector<uint8_t>& d = e.raw();
+            if (base < 0 || (size_t)base + 0x60 > d.size()) continue;
+            float sx, sz, tx, ty, tz;
+            std::memcpy(&sx, d.data() + base + 0x20, 4);
+            std::memcpy(&sz, d.data() + base + 0x48, 4);
+            std::memcpy(&tx, d.data() + base + 0x50, 4);
+            std::memcpy(&ty, d.data() + base + 0x54, 4);
+            std::memcpy(&tz, d.data() + base + 0x58, 4);
+            // A placed prefab's surface is in the prefab's space: compose it with
+            // the reference. The authored path keeps its own arithmetic untouched.
+            if (source.placed &&
+                !BF6_WPlacedEntity(e, i, source.xf, sx, sz, tx, ty, tz)) continue;
+            if (std::fabs(sx) < 1.f || std::fabs(sz) < 1.f) continue;
 
-        // The look: the state key, resolved in a depot scoped to THIS level.
-        // A StateKey is only unique within a scope, so a global search can
-        // bind a colliding key from a parallel level - confidently wrong.
-        uint64_t key = 0;
-        {
-            const std::vector<uint32_t> want = { kWaterStateKeyField };
-            bf6::EbxValue inst = e.read_instance(i, &want);
-            if (const bf6::EbxValue* f = inst.field(kWaterStateKeyField)) {
-                if (f->kind == bf6::EbxValue::Kind::Uint) key = f->u;
-                else if (f->kind == bf6::EbxValue::Kind::Int) key = (uint64_t)f->i;
+            bf6_water w{};
+            w.detail_normal = w.foam_normal = w.foam_rgb = w.noise = w.perlin = -1;
+            w.center[0] = tx; w.center[1] = tz;
+            w.size[0] = std::fabs(sx); w.size[1] = std::fabs(sz);
+            w.height = ty;
+            w.shallow[0] = w.deep[0] = -1.f;
+            w.is_ocean = 0;
+
+            // The look: the state key, resolved in a depot scoped to THIS level.
+            // A StateKey is only unique within a scope, so a global search can
+            // bind a colliding key from a parallel level - confidently wrong.
+            uint64_t key = 0;
+            {
+                const std::vector<uint32_t> want = { kWaterStateKeyField };
+                bf6::EbxValue inst = e.read_instance(i, &want);
+                if (const bf6::EbxValue* f = inst.field(kWaterStateKeyField)) {
+                    if (f->kind == bf6::EbxValue::Kind::Uint) key = f->u;
+                    else if (f->kind == bf6::EbxValue::Kind::Int) key = (uint64_t)f->i;
+                }
             }
-        }
-        if (key != 0) {
-            for (const auto& kv : c->src.res()) {
-                const std::string& rn = kv.first;
-                if (rn.find("shaderblockdepot") == std::string::npos) continue;
-                if (!lvl.empty() && rn.find(lvl) == std::string::npos) continue;
-                const std::vector<uint8_t>* dbytes = nullptr;
-                bf6::Depot* dep = c->depot_named(rn, &dbytes);
-                if (!dep || !dbytes || !dep->has_key(key)) continue;
-                bf6::MaterialBinding mb = dep->textures_for(key, *dbytes);
-                if (!mb.valid) continue;
-                w.is_ocean = (mb.textures.count(kWSlotDetailNsh) ||
-                              mb.textures.count(kWSlotFoamNsh)) ? 1 : 0;
+            if (key != 0) {
+                for (const auto& kv : c->src.res()) {
+                    const std::string& rn = kv.first;
+                    if (rn.find("shaderblockdepot") == std::string::npos) continue;
+                    if (!lvl.empty() && rn.find(lvl) == std::string::npos) continue;
+                    const std::vector<uint8_t>* dbytes = nullptr;
+                    bf6::Depot* dep = c->depot_named(rn, &dbytes);
+                    if (!dep || !dbytes || !dep->has_key(key)) continue;
+                    bf6::MaterialBinding mb = dep->textures_for(key, *dbytes);
+                    if (!mb.valid) continue;
+                    w.is_ocean = (mb.textures.count(kWSlotDetailNsh) ||
+                                  mb.textures.count(kWSlotFoamNsh)) ? 1 : 0;
 
-                // THE SHEETS. Same resolution the mesh path uses: the slot
-                // holds a FILE guid, the partition index turns that into an
-                // asset name, and the name without .ebx is the resource.
-                {
-                    const auto& gi = c->src.partition_index();
-                    auto grab = [&](uint32_t slot) -> int32_t {
-                        auto sit = mb.textures.find(slot);
-                        if (sit == mb.textures.end()) return -1;
-                        auto ait = gi.find(sit->second);
-                        if (ait == gi.end()) return -1;
-                        std::string tres = ait->second;
-                        if (tres.size() > 4 && tres.compare(tres.size() - 4, 4, ".ebx") == 0)
-                            tres.resize(tres.size() - 4);
-                        return c->texture_id(tres);
-                    };
-                    w.detail_normal = grab(kWSlotDetailNsh);
-                    w.foam_normal   = grab(kWSlotFoamNsh);
-                    w.foam_rgb      = grab(kWSlotFoamRgb);
-                    w.noise         = grab(kWSlotNoise);
-                    w.perlin        = grab(kWSlotPerlin);
+                    // THE SHEETS. Same resolution the mesh path uses: the slot
+                    // holds a FILE guid, the partition index turns that into an
+                    // asset name, and the name without .ebx is the resource.
+                    {
+                        const auto& gi = c->src.partition_index();
+                        auto grab = [&](uint32_t slot) -> int32_t {
+                            auto sit = mb.textures.find(slot);
+                            if (sit == mb.textures.end()) return -1;
+                            auto ait = gi.find(sit->second);
+                            if (ait == gi.end()) return -1;
+                            std::string tres = ait->second;
+                            if (tres.size() > 4 && tres.compare(tres.size() - 4, 4, ".ebx") == 0)
+                                tres.resize(tres.size() - 4);
+                            return c->texture_id(tres);
+                        };
+                        w.detail_normal = grab(kWSlotDetailNsh);
+                        w.foam_normal   = grab(kWSlotFoamNsh);
+                        w.foam_rgb      = grab(kWSlotFoamRgb);
+                        w.noise         = grab(kWSlotNoise);
+                        w.perlin        = grab(kWSlotPerlin);
 
-                    // EVERY slot this record binds, named or not. The five
-                    // named ones came from one variant; a level on another
-                    // variant binds its detail elsewhere, and a reader that
-                    // only looks for the names it knows reports "no textures"
-                    // for a surface that is covered in them.
-                    bool dump_water_slots = false;
+                        // EVERY slot this record binds, named or not. The five
+                        // named ones came from one variant; a level on another
+                        // variant binds its detail elsewhere, and a reader that
+                        // only looks for the names it knows reports "no textures"
+                        // for a surface that is covered in them.
+                        bool dump_water_slots = false;
 #if defined(_MSC_VER)
-                    char* water_slots_env = nullptr;
-                    size_t water_slots_len = 0;
-                    if (_dupenv_s(&water_slots_env, &water_slots_len,
-                                  "BF6_WATER_SLOTS") == 0)
-                        dump_water_slots = water_slots_env && *water_slots_env;
-                    std::free(water_slots_env);
+                        char* water_slots_env = nullptr;
+                        size_t water_slots_len = 0;
+                        if (_dupenv_s(&water_slots_env, &water_slots_len,
+                                      "BF6_WATER_SLOTS") == 0)
+                            dump_water_slots = water_slots_env && *water_slots_env;
+                        std::free(water_slots_env);
 #else
-                    const char* water_slots_env = std::getenv("BF6_WATER_SLOTS");
-                    dump_water_slots = water_slots_env && *water_slots_env;
+                        const char* water_slots_env = std::getenv("BF6_WATER_SLOTS");
+                        dump_water_slots = water_slots_env && *water_slots_env;
 #endif
-                    if (dump_water_slots) {
-                        for (const auto& kv2 : mb.textures) {
-                            auto a2 = gi.find(kv2.second);
-                            std::fprintf(stderr, "    water slot %08x -> %s\n",
-                                kv2.first, a2 == gi.end() ? "?" : a2->second.c_str());
+                        if (dump_water_slots) {
+                            for (const auto& kv2 : mb.textures) {
+                                auto a2 = gi.find(kv2.second);
+                                std::fprintf(stderr, "    water slot %08x -> %s\n",
+                                    kv2.first, a2 == gi.end() ? "?" : a2->second.c_str());
+                            }
                         }
                     }
+                    float c3[3];
+                    if (w.is_ocean) {
+                        // ONE colour; deep stays absent on purpose - the consumer
+                        // darkens, and duplicating it would flatten the gradient
+                        // while still looking like mined data.
+                        if (const_c3(mb, kWSlotOceanColor, 0, c3))
+                            { w.shallow[0]=c3[0]; w.shallow[1]=c3[1]; w.shallow[2]=c3[2]; }
+                    } else {
+                        if (const_c3(mb, kWSlotWaterA, 0, c3))
+                            { w.shallow[0]=c3[0]; w.shallow[1]=c3[1]; w.shallow[2]=c3[2]; }
+                        if (const_c3(mb, kWSlotWaterB, 0, c3))
+                            { w.deep[0]=c3[0]; w.deep[1]=c3[1]; w.deep[2]=c3[2]; }
+                    }
+                    break;
                 }
-                float c3[3];
-                if (w.is_ocean) {
-                    // ONE colour; deep stays absent on purpose - the consumer
-                    // darkens, and duplicating it would flatten the gradient
-                    // while still looking like mined data.
-                    if (const_c3(mb, kWSlotOceanColor, 0, c3))
-                        { w.shallow[0]=c3[0]; w.shallow[1]=c3[1]; w.shallow[2]=c3[2]; }
-                } else {
-                    if (const_c3(mb, kWSlotWaterA, 0, c3))
-                        { w.shallow[0]=c3[0]; w.shallow[1]=c3[1]; w.shallow[2]=c3[2]; }
-                    if (const_c3(mb, kWSlotWaterB, 0, c3))
-                        { w.deep[0]=c3[0]; w.deep[1]=c3[1]; w.deep[2]=c3[2]; }
-                }
-                break;
             }
-        }
 
-        if (out && total < out_max) out[total] = w;
-        total++;
+            if (out && total < out_max) out[total] = w;
+            total++;
+        }
     }
     return total;
 }

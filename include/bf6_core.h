@@ -1234,7 +1234,17 @@ typedef struct {
 
 /* Requires bf6_open_level for this level first (the scan needs the mounted
  * archives, the type schema and the walk's root). Same convention as
- * bf6_level_instances: returns the count, fills out[] to out_max. */
+ * bf6_level_instances: returns the count, fills out[] to out_max.
+ *
+ * PLACED WATER. A level may place its water instead of authoring it: Portal
+ * Ocean (mp_portal_ocean) has no water entity under its own directory and puts
+ * the Portal water prefab gmpf_water at (0, 70, 0) instead. Only when the level
+ * directory authors no water entity, the prefab references placed in the
+ * level's partitions are followed one reference deep into their blueprints and
+ * the reference transform is composed with the entity's. Every level that
+ * authors its own water answers exactly as before. The same rule feeds
+ * bf6_level_water_render and the simulation calls below, and
+ * bf6_level_water_feature reports the prefab's properties. */
 BF6_API int bf6_level_water(bf6_ctx*, const char* level, bf6_water* out, int out_max);
 
 /* The ocean simulation's INPUTS - the authored sea state. The wave field
@@ -2034,9 +2044,67 @@ typedef struct bf6_water_mask {
     const uint32_t* indirection_u32;  /* indirection_side squared packed cells */
 } bf6_water_mask;
 
-/* Requires the level to be mounted. Returns 1 and fills out on success. */
+/* Requires the level to be mounted. Returns 1 and fills out on success.
+ *
+ * ABSENT IS NOT AN ERROR. Returns 0 with err set to the EMPTY string when the
+ * terrain parses but carries no CoarseMask raster (no block 10). That is
+ * authored, not broken: the levels without one either have no water or run
+ * ShoreDepth attenuation (attenuation_type 1, e.g. mp_portal_ocean, mp_tungsten),
+ * and the CoarseMask levels (mp_isolated, mp_atoll) ship it. A non-empty err is
+ * a real failure. */
 BF6_API int bf6_level_water_mask(bf6_ctx*, const char* level,
                                  bf6_water_mask* out, char* err, int err_cap);
+
+/* ----------------------------------------------------- Portal water feature
+ *
+ * THE SCRIPTABLE WATER'S START STATE. Portal's water prefab (gmpf_water, placed
+ * by mp_portal_ocean) exposes four properties a script can change at runtime:
+ * Enabled, BeaufortScale, WaveAmplitude and WaterHeight (SetWaterLevel,
+ * SetWaterBeaufortScale, SetWaterWaveAmplitude, EnableWater). This reports the
+ * values the level STARTS with, so an editor can show the sandbox's default sea
+ * state. Scripts can change every one of them; nothing on disk says they will.
+ *
+ * found      1 when the level's water comes from a placed prefab (see
+ *            bf6_level_water); 0 for every level that authors its own water.
+ * prefab     the blueprint partition, e.g.
+ *            game/glacierportal/portalprefabs/water/gmpf_water.
+ * placement  the reference's world translation (X, Y, Z).
+ * enabled    0/1, -1 absent. beaufort_scale, wave_amplitude: < 0 absent.
+ * water_height  world Y at start. No shipped default names WaterHeight; the
+ *            prefab's height view reads the surface transform, so the start
+ *            height is the placed surface's height (height_source 3).
+ * *_source   0 absent, 1 the prefab's default (the created gem it instantiates:
+ *            gem_water carries true / 2 / 0.25), 2 the level instance's
+ *            override, 3 derived from the placed surface.
+ * authored_beaufort_force  the mapping entity's own scalar inside the prefab
+ *            (6.5 on gmpf_water), < 0 absent.
+ * beaufort_driven  1 when a PropertyConnection writes that entity, which makes
+ *            beaufort_scale, not the authored scalar, the force at start. The
+ *            sea-state calls follow the same rule.
+ * amplitude_cascades  how many cascades the WaveAmplitude property is routed to
+ *            (1 on gmpf_water: the 192 m one). bf6_level_water_sims_effective
+ *            writes wave_amplitude into exactly those rows for placed water.
+ */
+typedef struct {
+    int32_t found;
+    char    prefab[160];
+    float   placement[3];
+    int32_t enabled;
+    float   beaufort_scale;
+    float   wave_amplitude;
+    float   water_height;
+    int32_t enabled_source;
+    int32_t beaufort_source;
+    int32_t amplitude_source;
+    int32_t height_source;
+    float   authored_beaufort_force;
+    int32_t beaufort_driven;
+    int32_t amplitude_cascades;
+} bf6_water_feature;
+
+/* Walked level (bf6_open_level) or mounted-only, like bf6_level_water_render.
+ * Returns 1 and fills out when found, else 0 with found = 0. */
+BF6_API int bf6_level_water_feature(bf6_ctx*, const char* level, bf6_water_feature* out);
 
 
 /* --------------------------------------------------------------- lighting */

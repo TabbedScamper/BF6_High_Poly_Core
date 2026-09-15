@@ -50,6 +50,10 @@ int main(int argc, char** argv)
     bf6_ocean_sea_state full_sea{};
     const auto full_raw = rows(full, argv[2], 0, 0, nullptr);
     const auto full_eff = rows(full, argv[2], 0, 1, &full_sea);
+    // Placed water (Portal Ocean) routes amplitude through the prefab's
+    // WaveAmplitude property instead of sea curve slot 7.
+    bf6_water_feature feature{};
+    const bool placed = bf6_level_water_feature(full, argv[2], &feature) != 0;
     bf6_close(full);
 
     std::printf("%s: %zu cascades, sea found %d force %.3f wind %.3f (curve %d of %d)\n",
@@ -60,7 +64,22 @@ int main(int argc, char** argv)
     check(iso_sea.found == full_sea.found && iso_sea.force == full_sea.force &&
           iso_sea.wind_mps == full_sea.wind_mps, "both routes read the same sea state");
     const bool wind = iso_sea.found && iso_sea.wind_curve_index >= 0 && iso_sea.wind_mps > 0.f;
-    const bool amp = wind && iso_sea.curve_count > 7 && iso_sea.curve_value[7] > 0.f;
+    const bool amp = !placed && wind && iso_sea.curve_count > 7 && iso_sea.curve_value[7] > 0.f;
+    if (placed) {
+        std::printf("  placed water %s: beaufort %.3f (driven %d), wave amplitude %.3f routed to %d cascade(s)\n",
+                    feature.prefab, feature.beaufort_scale, feature.beaufort_driven,
+                    feature.wave_amplitude, feature.amplitude_cascades);
+        check(!feature.beaufort_driven || iso_sea.force == feature.beaufort_scale,
+              "a driven mapping plays the BeaufortScale property");
+        int routed = 0;
+        for (size_t i = 0; i < iso_eff.size(); ++i) {
+            if (iso_eff[i].wave_amplitude == iso_raw[i].wave_amplitude) continue;
+            ++routed;
+            check(iso_eff[i].wave_amplitude == feature.wave_amplitude,
+                  "a routed cascade carries the WaveAmplitude property");
+        }
+        check(routed <= feature.amplitude_cascades, "only the routed cascades change amplitude");
+    }
     for (size_t i = 0; i < iso_eff.size(); ++i) {
         const auto& r = iso_raw[i];
         const auto& e = iso_eff[i];
@@ -68,7 +87,8 @@ int main(int argc, char** argv)
                     i, e.tile_dimension, r.wind_speed, e.wind_speed, r.wave_amplitude,
                     e.wave_amplitude, e.min_wavelength);
         check(e.wind_speed == (wind ? iso_sea.wind_mps : r.wind_speed), "wind as Unreal applied it");
-        check(e.wave_amplitude == (amp ? iso_sea.curve_value[7] : r.wave_amplitude), "amplitude as Unreal applied it");
+        if (!placed)
+            check(e.wave_amplitude == (amp ? iso_sea.curve_value[7] : r.wave_amplitude), "amplitude as Unreal applied it");
         check(e.min_wavelength == r.min_wavelength, "min wavelength authored");
         if (i < full_eff.size())
             check(e.wind_speed == full_eff[i].wind_speed && e.wave_amplitude == full_eff[i].wave_amplitude &&

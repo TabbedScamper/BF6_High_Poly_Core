@@ -202,12 +202,12 @@ std::string strip_ebx(std::string n)
 // differs per game package (glaciermp, kingstonlegacy, ...).
 std::string find_level_root(Source& src, const std::string& level)
 {
-    const std::string want = lower(level + "/" + level);
+    // Also under the 1.4.3.0 group folder (levels/gr/<level>/<level>).
+    const std::string want = lower(level);
     for (const auto& kv : src.ebx()) {
         const std::string& n = kv.first;
-        const size_t p = n.find("/levels/");
-        if (p == std::string::npos) continue;
-        if (lower(n.substr(p + 8)) == want) return n;
+        if (n.find("/levels/") == std::string::npos) continue;
+        if (Source::level_root_tail(lower(n), want)) return n;
     }
     return std::string();
 }

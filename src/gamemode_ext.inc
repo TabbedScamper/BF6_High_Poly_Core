@@ -606,11 +606,12 @@ void GmWalk::walk_ref(const std::string& ref, const Mat34& parent, std::set<std:
  * /levels/<level>/, and every root under its _layers_gameplay/. */
 static std::string level_dir_of(bf6::Source& src, const std::string& level)
 {
-    const std::string want = "/levels/" + lower(level) + "/";
+    // Also under the 1.4.3.0 group folder (levels/gr/<level>/).
+    const std::string want = lower(level);
     for (const auto& kv : src.ebx()) {
         const std::string s = lower(kv.first);
-        const size_t at = s.find(want);
-        if (at != std::string::npos) return kv.first.substr(0, at + want.size() - 1);
+        const size_t end = bf6::Source::level_dir_end(s, want);
+        if (end != std::string::npos && end < s.size() && s[end] == '/') return kv.first.substr(0, end);
     }
     return {};
 }

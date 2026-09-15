@@ -198,6 +198,15 @@ public:
     static bool        is_level_toc(const std::string& path);
     static std::string mount_key(const std::string& path);
 
+    // LEVEL PATHS, one rule for every reader. A level lives at
+    // ".../levels/<level>/" and, since the 1.4.3.0 game update, also under one
+    // group folder: ".../levels/gr/mp_portal_sand/", ".../levels/mp/
+    // mp_aftermath_portal/". Both take a LOWERCASE, forward-slash name.
+    //   level_root_tail: name ends with "/levels/[group/]<leaf>/<leaf>".
+    //   level_dir_end:   index just past "/levels/[group/]<level>" in name, or npos.
+    static bool   level_root_tail(const std::string& name, const std::string& leaf);
+    static size_t level_dir_end(const std::string& name, const std::string& level);
+
     std::vector<uint8_t> get_res(const std::string& name, std::string& err);
     std::vector<uint8_t> get_ebx(const std::string& name, std::string& err);
     // Loose chunk or bundle chunk, by guid hex (either spelling - see get_chunk).

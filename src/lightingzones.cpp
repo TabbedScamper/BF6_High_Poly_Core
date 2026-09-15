@@ -327,10 +327,11 @@ bool ZoneWalk::run(const std::string& level_rel,std::string& err) {
     const std::string leaf=leaf_of(rel); std::string start=resolve_name(rel+"/"+leaf);
     if(start.empty()) start=resolve_name(rel); if(start.empty()) start=resolve_name(leaf);
     if(start.empty()&&rel.find('/')==std::string::npos) {
-        std::vector<std::string> tails{"/levels/"+leaf+"/"+leaf};
-        if(leaf.rfind("mp_",0)!=0) tails.push_back("/levels/mp_"+leaf+"/mp_"+leaf);
+        // level_root_tail also accepts the 1.4.3.0 group folder (levels/gr/<leaf>/<leaf>).
+        std::vector<std::string> tails{leaf};
+        if(leaf.rfind("mp_",0)!=0) tails.push_back("mp_"+leaf);
         for(const std::string& tail:tails) {
-            std::vector<std::string> hits; for(const auto& kv:by_name) if(ends_with(kv.first,tail)) hits.push_back(kv.first);
+            std::vector<std::string> hits; for(const auto& kv:by_name) if(Source::level_root_tail(kv.first,tail)) hits.push_back(kv.first);
             if(hits.empty()) continue; std::sort(hits.begin(),hits.end()); start=by_name[hits[0]]; break;
         }
     }

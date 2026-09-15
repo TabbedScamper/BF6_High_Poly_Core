@@ -816,11 +816,24 @@ std::vector<std::string> level_dirs(const std::string& level)
     return out;
 }
 
+// The 1.4.3.0 (Tidal Strike) game update files levels under a group folder as
+// well: glacierportal/levels/gr/mp_portal_sand/ and levels/mp/mp_aftermath_portal/
+// sit beside the older levels/mp_abbasid/. One folder between /levels/ and the
+// level's own folder is therefore allowed, and only one: a deeper match would
+// let a level's name inside another level's tree claim it.
 bool in_level_dir(const std::string& path, const std::vector<std::string>& dirs)
 {
     const std::string p = lower_slash(path);
     for (const std::string& d : dirs)
+    {
         if (p.find(d) != std::string::npos) return true;
+        const std::string name = d.substr(8);                 // "<level>/" after "/levels/"
+        for (size_t at = p.find("/levels/"); at != std::string::npos; at = p.find("/levels/", at + 1))
+        {
+            const size_t group = at + 8, slash = p.find('/', group);
+            if (slash != std::string::npos && slash > group && p.compare(slash + 1, name.size(), name) == 0) return true;
+        }
+    }
     return false;
 }
 
@@ -829,6 +842,28 @@ bool in_level_dir(const std::string& path, const std::vector<std::string>& dirs)
 bool Source::is_level_toc(const std::string& path)
 {
     return lower_slash(path).find("/levels/") != std::string::npos;
+}
+
+size_t Source::level_dir_end(const std::string& name, const std::string& level)
+{
+    const std::string want = level + "/";
+    for (size_t at = name.find("/levels/"); at != std::string::npos; at = name.find("/levels/", at + 1))
+    {
+        const size_t first = at + 8;
+        if (name.compare(first, want.size(), want) == 0) return first + level.size();
+        const size_t slash = name.find('/', first);
+        if (slash != std::string::npos && slash > first && name.compare(slash + 1, want.size(), want) == 0)
+            return slash + 1 + level.size();
+    }
+    return std::string::npos;
+}
+
+bool Source::level_root_tail(const std::string& name, const std::string& leaf)
+{
+    const std::string tail = "/" + leaf + "/" + leaf;
+    if (leaf.empty() || name.size() < tail.size() || name.compare(name.size() - tail.size(), tail.size(), tail) != 0) return false;
+    const size_t end = level_dir_end(name, leaf);
+    return end != std::string::npos && end + 1 + leaf.size() == name.size();
 }
 
 std::string Source::mount_key(const std::string& path)
@@ -852,7 +887,27 @@ std::vector<std::string> Source::available_levels() const
         {
             std::error_code e2;
             for (const auto& sub : fs::directory_iterator(it->path(), e2))
-                if (sub.is_directory(e2)) out.push_back(lower_slash(sub.path().filename().string()));
+            {
+                if (!sub.is_directory(e2)) continue;
+                const std::string name = lower_slash(sub.path().filename().string());
+                // A GROUP folder (levels/gr/, levels/mp/ since the 1.4.3.0 game
+                // update) holds no archive of its own, only level folders that do.
+                // Its children are the levels; the group is not one.
+                bool own_toc = false;
+                std::vector<std::string> children;
+                std::error_code e3;
+                for (const auto& inner : fs::directory_iterator(sub.path(), e3))
+                {
+                    if (inner.is_regular_file(e3) && lower_slash(inner.path().extension().string()) == ".toc") own_toc = true;
+                    else if (inner.is_directory(e3))
+                    {
+                        const std::string child = lower_slash(inner.path().filename().string());
+                        if (fs::exists(inner.path() / (child + ".toc"), e3)) children.push_back(child);
+                    }
+                }
+                if (!own_toc && !children.empty()) out.insert(out.end(), children.begin(), children.end());
+                else out.push_back(name);
+            }
             it.disable_recursion_pending();   // the level dirs need no descent
         }
     }

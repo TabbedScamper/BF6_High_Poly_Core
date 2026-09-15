@@ -652,13 +652,15 @@ bool LightWalk::run(const std::string& level_rel, std::string& err)
         // A BARE LEVEL NAME. Anchored on '/levels/<leaf>/<leaf>' rather than a
         // substring: a loose match happily picks a neighbouring level whose
         // name merely CONTAINS this one.
-        std::vector<std::string> tails{ "/levels/" + leaf + "/" + leaf };
+        // Source::level_root_tail also accepts the group folder the 1.4.3.0
+        // game update added (levels/gr/<leaf>/<leaf>).
+        std::vector<std::string> tails{ leaf };
         if (leaf.rfind("mp_", 0) != 0)
-            tails.push_back("/levels/mp_" + leaf + "/mp_" + leaf);
+            tails.push_back("mp_" + leaf);
         for (const std::string& tail : tails) {
             std::vector<std::string> hits;
             for (const auto& kv : *names_)
-                if (ends_with(kv.first, tail)) hits.push_back(kv.first);
+                if (Source::level_root_tail(kv.first, tail)) hits.push_back(kv.first);
             if (hits.empty()) continue;
             std::sort(hits.begin(), hits.end());
             start = names_->at(hits[0]);

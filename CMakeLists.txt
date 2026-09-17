@@ -173,6 +173,103 @@ if(BF6_BUILD_CORE_TESTS)
     if(WIN32)
         target_link_libraries(walk_mode_test PRIVATE xaudio2 ole32)
     endif()
+    # The walker's numbers come from the game, and using them changes the walk.
+    add_executable(walk_tuning_test test/walk_tuning_test.cpp)
+    target_link_libraries(walk_tuning_test PRIVATE bf6_core_static)
+    target_include_directories(walk_tuning_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(walk_tuning_test PRIVATE xaudio2 ole32)
+    endif()
+    # The first-person soldier: arms and weapon, anchored on the eye.
+    add_executable(soldier_1p_view_test test/soldier_1p_view_test.cpp)
+    target_link_libraries(soldier_1p_view_test PRIVATE bf6_core_static)
+    target_include_directories(soldier_1p_view_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(soldier_1p_view_test PRIVATE xaudio2 ole32)
+    endif()
+    # The DiceExpression corpus check, under the core-tests guard so it can be
+    # run without BF6_BUILD_TOOLS (which collides with other targets). Same
+    # source as the tools-side expression_test; a tiling change must be measured
+    # against the whole shipped corpus before it is trusted.
+    add_executable(expr_corpus_test test/expression_test.cpp)
+    target_link_libraries(expr_corpus_test PRIVATE bf6_core_static)
+    target_include_directories(expr_corpus_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(expr_corpus_test PRIVATE xaudio2 ole32)
+    endif()
+    # A DiceExpression graph, disassembled with its operators named.
+    add_executable(expr_disasm test/expr_disasm.cpp)
+    target_link_libraries(expr_disasm PRIVATE bf6_core_static)
+    target_include_directories(expr_disasm PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(expr_disasm PRIVATE xaudio2 ole32)
+    endif()
+    # Why the executable cannot name most operator keys: candidate shapes and
+    # hash functions, each measured against a random-key control.
+    add_executable(expr_name_probe test/expr_name_probe.cpp)
+    target_link_libraries(expr_name_probe PRIVATE bf6_core_static)
+    target_include_directories(expr_name_probe PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(expr_name_probe PRIVATE xaudio2 ole32)
+    endif()
+    # Can the reflected registry name its own operators by pointer, checked
+    # against the names the hash route already proved?
+    add_executable(expr_registry_probe test/expr_registry_probe.cpp)
+    target_link_libraries(expr_registry_probe PRIVATE bf6_core_static)
+    target_include_directories(expr_registry_probe PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(expr_registry_probe PRIVATE xaudio2 ole32)
+    endif()
+    # How fast the game's own locomotion cycles actually travel.
+    add_executable(loco_speed_probe test/loco_speed_probe.cpp)
+    target_link_libraries(loco_speed_probe PRIVATE bf6_core_static)
+    target_include_directories(loco_speed_probe PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(loco_speed_probe PRIVATE xaudio2 ole32)
+    endif()
+    # Which joint is actually the soldier's eye.
+    add_executable(eye_joint_probe test/eye_joint_probe.cpp)
+    target_link_libraries(eye_joint_probe PRIVATE bf6_core_static)
+    target_include_directories(eye_joint_probe PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(eye_joint_probe PRIVATE xaudio2 ole32)
+    endif()
+    # The first-person chain: skeleton, arms mesh, rig, clips.
+    add_executable(soldier_1p_probe test/soldier_1p_probe.cpp)
+    target_link_libraries(soldier_1p_probe PRIVATE bf6_core_static)
+    target_include_directories(soldier_1p_probe PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(soldier_1p_probe PRIVATE xaudio2 ole32)
+    endif()
+    # Where the soldier's authored movement values live.
+    add_executable(soldier_movement_probe test/soldier_movement_probe.cpp)
+    target_link_libraries(soldier_movement_probe PRIVATE bf6_core_static)
+    target_include_directories(soldier_movement_probe PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(soldier_movement_probe PRIVATE xaudio2 ole32)
+    endif()
+    # Every role stands in its own pose, and all four come from the _01 take.
+    add_executable(role_pose_test test/role_pose_test.cpp)
+    target_link_libraries(role_pose_test PRIVATE bf6_core_static)
+    target_include_directories(role_pose_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(role_pose_test PRIVATE xaudio2 ole32)
+    endif()
+    # Which front-end idle each role resolves to, front-end mount vs full.
+    add_executable(idle_clip_probe test/idle_clip_probe.cpp)
+    target_link_libraries(idle_clip_probe PRIVATE bf6_core_static)
+    target_include_directories(idle_clip_probe PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(idle_clip_probe PRIVATE xaudio2 ole32)
+    endif()
+    # The skinned soldier record: bind identity, and the posed skin reproducing
+    # the static soldier it replaces.
+    add_executable(soldier_skin_test test/soldier_skin_test.cpp)
+    target_link_libraries(soldier_skin_test PRIVATE bf6_core_static)
+    target_include_directories(soldier_skin_test PRIVATE src include)
+    if(WIN32)
+        target_link_libraries(soldier_skin_test PRIVATE xaudio2 ole32)
+    endif()
     add_executable(level_paths_test test/level_paths_test.cpp)
     target_link_libraries(level_paths_test PRIVATE bf6_core_static)
     target_include_directories(level_paths_test PRIVATE src include)
@@ -1414,6 +1511,92 @@ add_executable(telemetry_test test/telemetry_test.cpp)
 target_link_libraries(telemetry_test PRIVATE bf6_core_static)
 target_include_directories(telemetry_test PRIVATE src include)
 
+add_executable(reflection_probes_test test/reflection_probes_test.cpp)
+target_link_libraries(reflection_probes_test PRIVATE bf6_core_static)
+target_include_directories(reflection_probes_test PRIVATE src include)
+
+add_executable(fx_budget_test test/fx_budget_test.cpp)
+target_link_libraries(fx_budget_test PRIVATE bf6_core_static)
+target_include_directories(fx_budget_test PRIVATE src include)
+
+add_executable(fx_param_dump test/fx_param_dump.cpp)
+target_link_libraries(fx_param_dump PRIVATE bf6_core_static)
+target_include_directories(fx_param_dump PRIVATE src include)
+
+add_executable(water_cascades_probe test/water_cascades_probe.cpp)
+target_link_libraries(water_cascades_probe PRIVATE bf6_core_static)
+target_include_directories(water_cascades_probe PRIVATE src include)
+
+add_executable(pose_owner_probe test/pose_owner_probe.cpp)
+target_link_libraries(pose_owner_probe PRIVATE bf6_core_static)
+target_include_directories(pose_owner_probe PRIVATE src include)
+
+# Also defined in the BF6_BUILD_CORE_TESTS block above. With both options on,
+# a second add_executable is a hard CMake error that blocks RECONFIGURING the
+# whole build directory - which is how out-tools came to be silently stale
+# against the levels/gr/ path change rather than merely out of date.
+if(NOT TARGET soldier_skin_test)
+    add_executable(soldier_skin_test test/soldier_skin_test.cpp)
+    target_link_libraries(soldier_skin_test PRIVATE bf6_core_static)
+    target_include_directories(soldier_skin_test PRIVATE src include)
+endif()
+
+add_executable(pose_clip_probe test/pose_clip_probe.cpp)
+target_link_libraries(pose_clip_probe PRIVATE bf6_core_static)
+target_include_directories(pose_clip_probe PRIVATE src include)
+
+add_executable(fx_join_probe test/fx_join_probe.cpp)
+target_link_libraries(fx_join_probe PRIVATE bf6_core_static)
+target_include_directories(fx_join_probe PRIVATE src include)
+
+add_executable(fx_look_test test/fx_look_test.cpp)
+target_link_libraries(fx_look_test PRIVATE bf6_core_static)
+target_include_directories(fx_look_test PRIVATE src include)
+
+add_executable(anim_1p_probe test/anim_1p_probe.cpp)
+target_link_libraries(anim_1p_probe PRIVATE bf6_core_static)
+target_include_directories(anim_1p_probe PRIVATE src include)
+
+add_executable(asset_count_probe test/asset_count_probe.cpp)
+target_link_libraries(asset_count_probe PRIVATE bf6_core_static)
+target_include_directories(asset_count_probe PRIVATE src include)
+
+add_executable(sound_emitter_test test/sound_emitter_test.cpp)
+target_link_libraries(sound_emitter_test PRIVATE bf6_core_static)
+target_include_directories(sound_emitter_test PRIVATE src include)
+
+add_executable(sound_emitter_probe test/sound_emitter_probe.cpp)
+target_link_libraries(sound_emitter_probe PRIVATE bf6_core_static)
+target_include_directories(sound_emitter_probe PRIVATE src include)
+
+add_executable(water_override_test test/water_override_test.cpp)
+target_link_libraries(water_override_test PRIVATE bf6_core_static)
+target_include_directories(water_override_test PRIVATE src include)
+
+add_executable(portal_carrier_test test/portal_carrier_test.cpp)
+target_link_libraries(portal_carrier_test PRIVATE bf6_core_static)
+target_include_directories(portal_carrier_test PRIVATE src include)
+
+add_executable(carrier_placement_test test/carrier_placement_test.cpp)
+target_link_libraries(carrier_placement_test PRIVATE bf6_core_static)
+target_include_directories(carrier_placement_test PRIVATE src include)
+
+add_executable(enlighten_key_test test/enlighten_key_test.cpp)
+target_link_libraries(enlighten_key_test PRIVATE bf6_core_static)
+target_include_directories(enlighten_key_test PRIVATE src include)
+
+add_executable(reflection_scan_test test/reflection_scan_test.cpp)
+target_link_libraries(reflection_scan_test PRIVATE bf6_core_static)
+target_include_directories(reflection_scan_test PRIVATE src include)
+
+add_executable(matgrid_test test/matgrid_test.cpp)
+target_link_libraries(matgrid_test PRIVATE bf6_core_static)
+target_include_directories(matgrid_test PRIVATE src include)
+
+add_executable(material_pair_test test/material_pair_test.cpp)
+target_link_libraries(material_pair_test PRIVATE bf6_core_static)
+target_include_directories(material_pair_test PRIVATE src include)
+
 add_executable(spawn_test test/spawn_test.cpp)
 target_link_libraries(spawn_test PRIVATE bf6_core_static)
 target_include_directories(spawn_test PRIVATE src include)
@@ -1503,6 +1686,9 @@ target_include_directories(mbprobe_test PRIVATE src include)
 add_executable(physics_test test/physics_test.cpp)
 target_link_libraries(physics_test PRIVATE bf6_core_static)
 target_include_directories(physics_test PRIVATE src include)
+add_executable(material_link_test test/material_link_test.cpp)
+target_link_libraries(material_link_test PRIVATE bf6_core_static)
+target_include_directories(material_link_test PRIVATE src include)
 add_executable(placereach_test test/placereach_test.cpp)
 target_link_libraries(placereach_test PRIVATE bf6_core_static)
 target_include_directories(placereach_test PRIVATE src include)
@@ -1667,3 +1853,13 @@ target_include_directories(anim_rig_span_probe PRIVATE src include)
 add_executable(dbd_type_census test/dbd_type_census.cpp)
 target_link_libraries(dbd_type_census PRIVATE bf6_core_static)
 target_include_directories(dbd_type_census PRIVATE src include)
+
+# Does a level have a water surface block (streaming-tree block 2) at all?
+add_executable(waterblock_probe test/waterblock_probe.cpp)
+target_link_libraries(waterblock_probe PRIVATE bf6_core_static)
+target_include_directories(waterblock_probe PRIVATE src include)
+
+# Where are the 869 operator keys registered that neither known route explains?
+add_executable(expr_dark_probe test/expr_dark_probe.cpp)
+target_link_libraries(expr_dark_probe PRIVATE bf6_core_static)
+target_include_directories(expr_dark_probe PRIVATE src include)

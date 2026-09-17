@@ -43,6 +43,22 @@ static uint64_t rd64(const std::vector<uint8_t>& d, size_t off)
     uint64_t v = 0; std::memcpy(&v, d.data() + off, sizeof(v)); return v;
 }
 
+/* A NUL-terminated printable C string at a file offset, or empty. The gate
+ * matters: a pointer field that happens to land on arbitrary bytes must come
+ * back empty rather than as a "name" made of whatever was there. */
+static std::string reflected_c_string(const std::vector<uint8_t>& d, int64_t at)
+{
+    if (at < 0 || (size_t)at >= d.size()) return std::string();
+    size_t i = (size_t)at;
+    std::string s;
+    while (i < d.size() && d[i] >= 0x20 && d[i] <= 0x7e && s.size() <= 191) {
+        s.push_back((char)d[i]);
+        ++i;
+    }
+    if (i >= d.size() || d[i] != 0 || s.size() < 2) return std::string();
+    return s;
+}
+
 static bool executable_va(uint64_t va, uint64_t image_base,
                           const std::vector<Section>& sections)
 {
@@ -322,6 +338,40 @@ bool read_reflected_operators(const std::string& exe_path,
         row.signature = signature;
         row.descriptor_va = image_base + typeinfo->va + (guid_at - begin);
         row.parameters_va = parameters_va;
+
+        /* The namespace record begins with a pointer to its own name. */
+        {
+            const int64_t ns = va_to_file(namespace_va, image_base, sections, data.size());
+            if (ns >= 0 && fits(data, (size_t)ns, 8))
+                row.name_space = reflected_c_string(
+                    data, va_to_file(rd64(data, (size_t)ns), image_base, sections,
+                                     data.size()));
+        }
+        /* Parameters are a packed array of 32-byte records, each beginning with
+         * a pointer to its name. The stride is MEASURED, not assumed: at 32,
+         * 2983 of 3029 descriptors yield exactly parameter_count readable names,
+         * against 676 at every other stride tried - and 676 is just the count of
+         * single-parameter descriptors, where the stride cannot matter. A wrong
+         * stride drifts out of step and the agreement collapses, so that spread
+         * is the proof.
+         *
+         * Names are taken only when the WHOLE array reads cleanly. A partial
+         * array means the layout did not hold for this descriptor, and half a
+         * signature invites more confident misreading than no signature. */
+        if (parameter_count > 0 && parameters_va != 0) {
+            const int64_t pa = va_to_file(parameters_va, image_base, sections, data.size());
+            std::vector<std::string> names;
+            for (uint16_t p = 0; pa >= 0 && p < parameter_count; ++p) {
+                const size_t at = (size_t)pa + (size_t)p * 32u;
+                if (!fits(data, at, 8)) break;
+                std::string nm = reflected_c_string(
+                    data, va_to_file(rd64(data, at), image_base, sections, data.size()));
+                if (nm.empty()) break;
+                names.push_back(nm);
+            }
+            if (names.size() == (size_t)parameter_count)
+                row.parameter_names.swap(names);
+        }
         out.push_back(row);
     }
     std::sort(out.begin(), out.end(), [](const ReflectedOperator& a,
@@ -334,6 +384,96 @@ bool read_reflected_operators(const std::string& exe_path,
         return a.key == b.key;
     }), out.end());
     if (out.empty()) { error = "no reflected Function descriptors found"; return false; }
+    return true;
+}
+
+bool read_key_first_operators(const std::string& exe_path,
+                              std::vector<KeyFirstOperator>& out,
+                              std::string& error)
+{
+    out.clear(); error.clear();
+    FILE* f = fopen_binary_read(exe_path.c_str());
+    if (!f) { error = "cannot open " + exe_path; return false; }
+    std::fseek(f, 0, SEEK_END);
+    const long file_size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (file_size < 0x100) {
+        std::fclose(f); error = "executable is too small to be a PE"; return false;
+    }
+    std::vector<uint8_t> data((size_t)file_size);
+    const size_t got = std::fread(data.data(), 1, data.size(), f);
+    std::fclose(f);
+    if (got != data.size()) { error = "short executable read"; return false; }
+    if (rd16(data, 0) != 0x5a4d) { error = "missing MZ header"; return false; }
+    const uint32_t pe = rd32(data, 0x3c);
+    if (!fits(data, pe, 24) || rd32(data, pe) != 0x00004550u) {
+        error = "missing PE header"; return false;
+    }
+    const uint16_t section_count = rd16(data, pe + 6);
+    const uint16_t optional_size = rd16(data, pe + 20);
+    const size_t optional = (size_t)pe + 24;
+    if (!fits(data, optional, optional_size) || optional_size < 32 ||
+        rd16(data, optional) != 0x20b) {
+        error = "unsupported PE optional header"; return false;
+    }
+    const uint64_t image_base = rd64(data, optional + 24);
+    const size_t section_table = optional + optional_size;
+    std::vector<Section> sections;
+    for (uint16_t i = 0; i < section_count; ++i) {
+        const size_t at = section_table + (size_t)i * 40;
+        if (!fits(data, at, 40)) { error = "truncated PE section table"; return false; }
+        Section s;
+        char name[9] = {};
+        std::memcpy(name, data.data() + at, 8);
+        s.name = name;
+        s.virtual_size = rd32(data, at + 8);
+        s.va = rd32(data, at + 12);
+        s.raw_size = rd32(data, at + 16);
+        s.raw_offset = rd32(data, at + 20);
+        s.characteristics = rd32(data, at + 36);
+        sections.push_back(s);
+    }
+
+    for (const Section& s : sections) {
+        // Registry records are writable data, like the other registries here.
+        // Scanning executable sections would turn every instruction immediate
+        // that happens to equal a key into a candidate.
+        if (!(s.characteristics & 0x80000000u) ||
+            (s.characteristics & 0x20000000u)) continue;
+        if (!fits(data, s.raw_offset, s.raw_size)) continue;
+        const size_t begin = s.raw_offset;
+        const size_t end = begin + s.raw_size;
+        // 8-byte stepping: the qword fields must be aligned for the record to
+        // be what it claims, and it drops the candidate count fourfold.
+        for (size_t at = begin; at + 32 <= end; at += 8) {
+            if (rd32(data, at + 4) != 1u) continue;
+            if (rd64(data, at + 16) != 0u) continue;
+            const uint64_t slot = rd64(data, at + 8);
+            const uint64_t impl = rd64(data, at + 24);
+            // THE CHECK THAT MAKES THIS A REGISTRY AND NOT A COINCIDENCE: the
+            // implementation must land in executable memory. Without it the
+            // shape is loose enough to match ordinary data.
+            if (!executable_va(impl, image_base, sections)) continue;
+            if (va_to_file(slot, image_base, sections, data.size()) < 0) continue;
+            KeyFirstOperator row;
+            row.key = rd32(data, at);
+            row.flags = 1;
+            row.slot_va = slot;
+            row.implementation_va = impl;
+            row.record_va = image_base + s.va + (at - begin);
+            out.push_back(row);
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const KeyFirstOperator& a,
+                                         const KeyFirstOperator& b) {
+        if (a.key != b.key) return a.key < b.key;
+        return a.record_va < b.record_va;
+    });
+    out.erase(std::unique(out.begin(), out.end(), [](const KeyFirstOperator& a,
+                                                     const KeyFirstOperator& b) {
+        return a.key == b.key;
+    }), out.end());
+    if (out.empty()) { error = "no key-first registry records found"; return false; }
     return true;
 }
 

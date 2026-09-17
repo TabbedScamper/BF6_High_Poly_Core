@@ -42,6 +42,41 @@ bool read_method_operators(const std::string& exe_path,
                            std::vector<MethodOperator>& out,
                            std::string& error);
 
+/* A registry record that stores the KEY FIRST and the implementation LAST.
+ *
+ *     +0   key    u32
+ *     +4   flags  u32    (1 on every record observed)
+ *     +8   slot   qword -> data
+ *     +16  zero   qword
+ *     +24  impl   qword -> executable code
+ *
+ * This is the mirror of DescriptorOperator's layout, which is exactly why it
+ * went unread: a scanner looking for `impl qword; key u32` walks straight past
+ * a record whose first four bytes are the key. It accounts for 185 of the 869
+ * operator keys that neither the crc32 name route nor the reflected typeinfo
+ * descriptor could explain, with ZERO control keys matching the same shape.
+ *
+ * NO NAME IS RECOVERED, and none is invented. What comes back is the address
+ * of the function the key dispatches to - which answers the question a reader
+ * of a program actually has, because two keys sharing an implementation ARE
+ * the same operator whatever either is called. */
+struct KeyFirstOperator {
+    uint32_t key = 0;
+    uint32_t flags = 0;
+    uint64_t slot_va = 0;
+    uint64_t implementation_va = 0;
+    uint64_t record_va = 0;
+};
+
+/* Scan for the key-first registry records described above. The load-bearing
+ * check is that the implementation resolves into an EXECUTABLE PE section:
+ * without it the shape matches unrelated data that merely begins with a
+ * plausible value. Reads only the executable the caller is already using.
+ */
+bool read_key_first_operators(const std::string& exe_path,
+                              std::vector<KeyFirstOperator>& out,
+                              std::string& error);
+
 struct NamedOperator {
     uint32_t key = 0;
     uint32_t match_count = 0;
@@ -54,6 +89,20 @@ struct ReflectedOperator {
     uint32_t signature = 0;
     uint64_t descriptor_va = 0;
     uint64_t parameters_va = 0;
+
+    /* The reflected operators carry NO name of their own: no route from the
+     * descriptor round-trips the key under any tested hash, and they are a
+     * disjoint set from the crc32-nameable operators (measured: zero of 2270
+     * corpus keys are in both). What they do carry is a namespace and a named
+     * parameter list, which is what makes a call readable:
+     *
+     *     MotionMachine (Inertia)
+     *     DiceAI (Player, TargetIndex, IsTargetHuman, IsTargetVisible)
+     *
+     * Both are empty when the executable does not supply them. Neither is ever
+     * synthesised: an operator with no reflected parameter names keeps none. */
+    std::string name_space;
+    std::vector<std::string> parameter_names;
 };
 
 bool read_reflected_operators(const std::string& exe_path,

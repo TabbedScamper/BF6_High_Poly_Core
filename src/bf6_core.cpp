@@ -4915,6 +4915,7 @@ void bf6_free(bf6_ctx* c, void* handle) {
 #include "anim_ext.inc"
 #include "anim_binding_ext.inc"
 #include "ant_cdb_ext.inc"
+#include "ant_graph_ext.inc"
 #include "scatter_ext.inc"
 #include "swarm_ext.inc"
 #include "telemetry_ext.inc"

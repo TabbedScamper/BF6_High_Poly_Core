@@ -271,6 +271,41 @@ void probe(bf6_ctx* c, const std::string& name)
                                 (double)g.count / (double)best_s,
                                 g.count % best_s == 0 ? "  EXACT" : "");
                 }
+
+                /* THE TEST THAT DOES NOT GUESS.
+                 *
+                 * A quaternion is unit length and a vector is not. If the
+                 * stride is right, slot j is the SAME CHANNEL in every frame,
+                 * so that column is unit in all frames or in none. If the
+                 * stride is wrong the frames shear, each column mixes
+                 * quaternions with vectors, and its unit-ness becomes mixed.
+                 *
+                 * So score a candidate by column PURITY: the fraction of slots
+                 * that are consistently one kind. A correct stride scores at or
+                 * near 1.0; a wrong one cannot, because there is no way to
+                 * slice a sheared grid and have every column come out pure.
+                 * This reads only the data's own internal structure - no
+                 * reference pose, no channel map, nothing to guess at. */
+                auto purity = [&](uint32_t stride) {
+                    if (!stride || stride > g.count) return 0.0;
+                    const uint32_t frames = g.count / stride;
+                    if (frames < 3) return 0.0;
+                    uint32_t pure = 0;
+                    for (uint32_t slot = 0; slot < stride; slot++) {
+                        uint32_t u = 0;
+                        for (uint32_t f = 0; f < frames; f++) {
+                            const uint32_t k = f * stride + slot;
+                            double m = 0.0;
+                            for (int l = 0; l < 4; l++) { const double v = rec(k, l); m += v * v; }
+                            m = std::sqrt(m);
+                            if (m > 0.97 && m < 1.03) ++u;
+                        }
+                        if (u == 0 || u == frames) ++pure;
+                    }
+                    return (double)pure / (double)stride;
+                };
+                std::printf("      purity: run %u -> %.3f   run-1 %u -> %.3f   best %u -> %.3f\n",
+                            A, purity(A), A - 1, purity(A - 1), best_s, purity(best_s));
             }
         }
 
@@ -309,6 +344,34 @@ void probe(bf6_ctx* c, const std::string& name)
  */
 void census(bf6_ctx* c, const std::vector<std::string>& names)
 {
+    /* COVERAGE FIRST, because it is the number this work exists to move and it
+     * is cheap. The per-clip table below scans strides and scores purity for
+     * every payload, which is slow enough to be worth not blocking this. */
+    {
+        int opens = 0, refused = 0, raw_pose = 0, raw_anim = 0, raw_no = 0;
+        for (const std::string& n : names) {
+            bf6_anim_reloc* rr = bf6_anim_reloc_read(c, n.c_str());
+            bool is_raw = false, empty_data = false;
+            if (rr) {
+                is_raw = rr->framing == BF6_ANIM_RAW;
+                empty_data = is_raw && rr->region_count >= 5 && rr->regions[3].count == 0;
+                bf6_free(c, rr);
+            }
+            bf6_anim_clip* cl = bf6_anim_clip_open(c, n.c_str());
+            if (cl) {
+                ++opens;
+                if (is_raw) { if (empty_data) ++raw_pose; else ++raw_anim; }
+                bf6_free(c, cl);
+            } else {
+                ++refused;
+                if (is_raw) ++raw_no;
+            }
+        }
+        std::printf("\nCOVERAGE over %zu resource(s): %d open, %d refused\n"
+                    "   RAW poses open %d, animated RAW open %d, RAW still refused %d\n",
+                    names.size(), opens, refused, raw_pose, raw_anim, raw_no);
+    }
+
     std::printf("\n%-62s %5s %5s %6s %8s %7s\n",
                 "clip", "chan", "const", "anim", "data", "data/anim");
     int fits = 0, total = 0;
@@ -399,7 +462,14 @@ int main(int argc, char** argv)
     if (names.empty())
         for (const char* d : kDefaults) names.push_back(d);
 
-    for (const std::string& n : names) probe(c, n);
+    /* --coverage skips the per-clip dumps. They scan strides and score purity
+     * over every record, which is the point when investigating one clip and
+     * pure cost when all that is wanted is the count. */
+    bool coverage_only = false;
+    for (int i = 1; i < argc; i++)
+        if (std::strcmp(argv[i], "--coverage") == 0) coverage_only = true;
+    if (!coverage_only)
+        for (const std::string& n : names) probe(c, n);
 
     /* A POPULATION, not the four hand-picked ones above. Every animation
      * resource under the 1P tree, so the model is tested against what ships

@@ -152,6 +152,10 @@ struct AnimClipHandle {
     /* RAW single-frame pose: every channel constant, one float4 each, taken
      * straight from the ConstData region. No bitstream, no blocks, no decode. */
     bool                        is_raw_pose = false;
+    /* An animated RAW clip: frames * raw_stride float4 records, frame-major,
+     * with the stride VERIFIED by column purity rather than derived. */
+    bool                        is_raw_anim = false;
+    uint32_t                    raw_stride  = 0;
     std::vector<float>          raw_values;       /* channel_count * 4 */
     AnimVbrMetadata             vbr{};
     std::vector<float>          vbr_palette;
@@ -460,6 +464,65 @@ static bf6_anim_clip* bf6__anim_vbr_open(bf6_ctx* c, const char* res_name,
  * rather than a grid. Returning null for them leaves them exactly as they were
  * instead of inventing a layout that would decode into plausible nonsense.
  */
+/* HOW MANY RECORDS ONE FRAME OCCUPIES, decided by a test the data answers.
+ *
+ * r1 is slot -> channel with the animated channels first, so the length of its
+ * leading ascending run is the obvious candidate. It is also WRONG on most
+ * clips: measured, the stride is that run on one clip and run - 1 on three
+ * others, and no amount of staring at the counts explains which. A rule right
+ * three times in four is worse than no rule.
+ *
+ * So the stride is not derived, it is VERIFIED. A quaternion is unit length
+ * and a vector is not, so with the correct stride slot j is the same channel
+ * in every frame and that column is unit in all frames or in none. A wrong
+ * stride shears the grid, every column mixes the two kinds, and purity
+ * collapses. Measured over the candidates:
+ *
+ *   p_..._stand_idle_phaseaim_yaw_01   run 21 -> 0.952   run-1 20 -> 0.000
+ *   tadtv_..._crouchtostand_01         run 42 -> 0.000   run-1 41 -> 1.000
+ *   tadtv_..._pronetocrouch_01         run 90 -> 0.000   run-1 89 -> 0.978
+ *   c_..._prone_crawl_left_01          run 48 -> 0.000   run-1 47 -> 1.000
+ *
+ * The wrong candidate scores exactly zero every time, because there is no way
+ * to slice a sheared grid and have every column come out pure. That is a
+ * decision the data makes, not one the reader makes for it - and a clip where
+ * no candidate is pure is REFUSED rather than decoded into plausible nonsense.
+ */
+static double bf6__raw_column_purity(const float* recs, uint32_t count, uint32_t stride)
+{
+    if (!stride || stride > count) return 0.0;
+    const uint32_t frames = count / stride;
+    if (frames < 3) return 0.0;
+    uint32_t pure = 0;
+    for (uint32_t slot = 0; slot < stride; slot++) {
+        uint32_t unit = 0;
+        for (uint32_t f = 0; f < frames; f++) {
+            const float* v = &recs[((size_t)f * stride + slot) * 4u];
+            const double m = std::sqrt((double)v[0]*v[0] + (double)v[1]*v[1]
+                                     + (double)v[2]*v[2] + (double)v[3]*v[3]);
+            if (m > 0.97 && m < 1.03) ++unit;
+        }
+        if (unit == 0u || unit == frames) ++pure;
+    }
+    return (double)pure / (double)stride;
+}
+
+/* The leading ascending run of the slot -> channel permutation. */
+static uint32_t bf6__raw_animated_run(const bf6_anim_reloc* r)
+{
+    const bf6_anim_region& idx = r->regions[1];
+    if (idx.count < 2 ||
+        (size_t)idx.offset + (size_t)idx.count * 2u > (size_t)r->size) return 0;
+    uint16_t prev = 0; std::memcpy(&prev, r->data + idx.offset, 2);
+    uint32_t run = 1;
+    for (uint32_t k = 1; k < idx.count; k++) {
+        uint16_t v; std::memcpy(&v, r->data + idx.offset + (size_t)k * 2u, 2);
+        if (v < prev) break;
+        prev = v; ++run;
+    }
+    return run;
+}
+
 bf6_anim_clip* bf6__anim_raw_pose_open(bf6_ctx* c, bf6_anim_reloc* r)
 {
     if (r->region_count < 5) return nullptr;
@@ -584,6 +647,85 @@ bf6_anim_clip* bf6__anim_pose_blob_open(bf6_ctx* c, const char* res_name)
     return &h->c;
 }
 
+/* AN ANIMATED RAW CLIP: frames * stride float4 records, frame-major.
+ *
+ * The ordering was established by scanning for the record spacing at which
+ * neighbours are nearly identical - the spacing that follows ONE bone through
+ * time. It wins by 100x to 400x over spacing 1 on every clip measured, which
+ * is not a margin a coincidence produces.
+ *
+ * The stride itself is chosen by bf6__raw_column_purity above: the candidates
+ * are the permutation's animated run and one less than it, the right one
+ * scores at or near 1.0, and the wrong one scores exactly 0.0. A clip where
+ * neither is pure is refused.
+ *
+ * WHAT IS STILL OPEN, and why it does not stop this being correct: when the
+ * stride is run - 1, ONE channel in the permutation's animated run has no
+ * column in Data, and which one is not yet established. Callers get the frame
+ * count, the stride and the records; mapping slots back to channel indices
+ * through r1 is exact only for the clips where stride == run. The rest expose
+ * their data without a channel map rather than with a guessed one.
+ */
+bf6_anim_clip* bf6__anim_raw_anim_open(bf6_ctx* c, bf6_anim_reloc* r)
+{
+    if (r->region_count < 5) return nullptr;
+    const bf6_anim_region& data  = r->regions[3];
+    const bf6_anim_region& konst = r->regions[4];
+    if (data.count < 8u) return nullptr;
+    if ((size_t)data.offset + (size_t)data.count * 16u > (size_t)r->size) return nullptr;
+
+    const float* recs = (const float*)(const void*)(r->data + data.offset);
+    const uint32_t run = bf6__raw_animated_run(r);
+    if (run < 2u) return nullptr;
+
+    uint32_t stride = 0; double best = 0.0;
+    for (uint32_t cand : { run, run - 1u }) {
+        if (!cand || data.count % cand) continue;
+        const double p = bf6__raw_column_purity(recs, data.count, cand);
+        if (p > best) { best = p; stride = cand; }
+    }
+    /* Not "the better of two" - good ENOUGH, or nothing. A sheared grid cannot
+     * score here, so a low best means the layout is not what this believes. */
+    if (!stride || best < 0.90) return nullptr;
+
+    AnimClipHandle* h = new AnimClipHandle();
+    h->is_raw_pose = false;
+    h->is_raw_anim = true;
+    h->raw_stride  = stride;
+    h->raw_values.resize((size_t)data.count * 4u);
+    std::memcpy(h->raw_values.data(), recs, (size_t)data.count * 16u);
+
+    h->c.framing        = BF6_ANIM_RAW;
+    h->c.key_time_count = (int32_t)(data.count / stride);
+    h->c.channel_count  = (int32_t)stride;
+    h->c.block_count    = (int32_t)(data.count / stride);
+    /* Derived per frame 0 the same way the pose reader does, with the same
+     * control: the trailing values must NOT be unit or the split is not
+     * reported at all. */
+    uint32_t nq = 0;
+    auto unit0 = [&](uint32_t i) {
+        const float* v = &h->raw_values[(size_t)i * 4u];
+        const double m = (double)v[0]*v[0] + (double)v[1]*v[1]
+                       + (double)v[2]*v[2] + (double)v[3]*v[3];
+        return m > 0.9801 && m < 1.0201;
+    };
+    while (nq < stride && unit0(nq)) ++nq;
+    uint32_t tail_unit = 0;
+    for (uint32_t i = nq; i < stride; i++) if (unit0(i)) ++tail_unit;
+    const bool trusted = nq > 0 && nq < stride && tail_unit == 0;
+    h->c.quat_count  = trusted ? (int32_t)nq : 0;
+    h->c.vec3_count  = trusted ? (int32_t)(stride - nq) : 0;
+    h->c.group_count = 0;
+    h->c.const_quat_count = h->c.const_vec3_count = h->c.const_scalar_count = 0;
+    h->c.sparse_times      = nullptr;
+    h->c.sparse_time_count = 0;
+    h->c.predicted_stream_bytes = (int64_t)data.count * 16;
+    h->c.actual_stream_bytes    = (int64_t)data.count * 16;
+    (void)konst;
+    c->handles[&h->c] = bf6_ctx::HK_ANIMCLIP;
+    return &h->c;
+}
+
 bf6_anim_clip* bf6_anim_clip_open(bf6_ctx* c, const char* res_name)
 {
     bf6_anim_reloc* r = bf6_anim_reloc_read(c, res_name);
@@ -592,6 +734,7 @@ bf6_anim_clip* bf6_anim_clip_open(bf6_ctx* c, const char* res_name)
     if (!r) return bf6__anim_pose_blob_open(c, res_name);
     if (r->framing == BF6_ANIM_RAW) {
         bf6_anim_clip* clip = bf6__anim_raw_pose_open(c, r);
+        if (!clip) clip = bf6__anim_raw_anim_open(c, r);
         bf6_free(c, r);
         return clip;
     }
@@ -915,6 +1058,21 @@ int bf6_anim_clip_sample(bf6_ctx* c, bf6_anim_clip* clip, int ordinal, float* ou
      * past ordinal 0 would be technically right and practically wrong: a caller
      * stepping a clip it believes is animated should stand still on the pose,
      * not stop dead partway through. */
+    /* An animated RAW clip indexes straight in: frame-major, stride records
+     * per frame, no bitstream and no block decode. Out of range is a refusal
+     * rather than a clamp - a caller stepping past the end should be told. */
+    if (h->is_raw_anim) {
+        const uint32_t stride = h->raw_stride;
+        if (!stride) return 0;
+        const size_t frames = h->raw_values.size() / ((size_t)stride * 4u);
+        if ((size_t)ordinal >= frames) return 0;
+        const float* src = &h->raw_values[(size_t)ordinal * stride * 4u];
+        std::memcpy(out, src, (size_t)stride * 4u * sizeof(float));
+        if (out_quat_magnitude)
+            *out_quat_magnitude = (float)std::sqrt((double)src[0]*src[0] + (double)src[1]*src[1]
+                                                 + (double)src[2]*src[2] + (double)src[3]*src[3]);
+        return 1;
+    }
     if (h->is_raw_pose) {
         const size_t n = h->raw_values.size();
         if (!n) return 0;

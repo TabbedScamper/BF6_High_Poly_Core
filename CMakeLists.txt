@@ -1916,3 +1916,7 @@ target_include_directories(expr_dark_probe PRIVATE src include)
 add_executable(ptm_probe test/ptm_probe.cpp)
 target_link_libraries(ptm_probe PRIVATE bf6_core_static)
 target_include_directories(ptm_probe PRIVATE src include)
+
+add_executable(anim_clip_drives_probe test/anim_clip_drives_probe.cpp)
+target_link_libraries(anim_clip_drives_probe PRIVATE bf6_core_static)
+target_include_directories(anim_clip_drives_probe PRIVATE src include)

@@ -335,11 +335,17 @@ void pose_blend(Pose& dst, const Pose& src, float w, const Mask* mask)
     }
 }
 
+/* AN ADDITIVE LAYER ADDS TO SOMETHING. Where the pose underneath never wrote
+ * a slot, there is nothing to add to: the engine's base always fills the joint
+ * block from a clip over the whole rig, so its kernel never meets the case,
+ * and adding to the BIND value here would invent a pose for a bone the graph
+ * never drove - which is what put an unposed arm in its bind stance. The slot
+ * is left invalid instead, and the caller keeps whatever it already had. */
 void pose_add(Pose& dst, const Pose& add, float w, const Mask* mask)
 {
     static const float I[4] = {0, 0, 0, 1};
     for (size_t i = 0; i < dst.q.size() && i < add.q.size(); ++i) {
-        if (add.vq[i]) {
+        if (add.vq[i] && dst.vq[i]) {
             float a[4] = { add.q[i][0], add.q[i][1], add.q[i][2], add.q[i][3] };
             float k;
             if (mask) k = w * (i < mask->rot.size() ? mask->rot[i] : 1.f);
@@ -353,10 +359,9 @@ void pose_add(Pose& dst, const Pose& add, float w, const Mask* mask)
                 dst.vq[i] = 1;
             }
         }
-        if (add.vt[i]) {
+        if (add.vt[i] && dst.vt[i]) {
             const float k = w * (mask && i < mask->tr.size() ? mask->tr[i] : 1.f);
             for (int c = 0; c < 3; ++c) dst.t[i][(size_t)c] += add.t[i][(size_t)c] * k;
-            dst.vt[i] = 1;
         }
     }
 }

@@ -1731,6 +1731,18 @@ int bf6_ant_runtime_pose(const bf6_ant_runtime* r, float* out, int bone_max)
     return n;
 }
 
+int bf6_ant_runtime_pose_valid(const bf6_ant_runtime* r, uint8_t* rot, uint8_t* tr, int bone_max)
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    if (!h) return 0;
+    const int n = (int)h->pose.q.size();
+    for (int i = 0; i < n && i < bone_max; ++i) {
+        if (rot) rot[i] = i < (int)h->pose.vq.size() ? h->pose.vq[(size_t)i] : 0;
+        if (tr) tr[i] = i < (int)h->pose.vt.size() ? h->pose.vt[(size_t)i] : 0;
+    }
+    return n;
+}
+
 int bf6_ant_runtime_notes(const bf6_ant_runtime* r, char* out, int out_len)
 {
     const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);

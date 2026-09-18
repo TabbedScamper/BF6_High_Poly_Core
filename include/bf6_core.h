@@ -5157,6 +5157,15 @@ BF6_API int  bf6_ant_runtime_update(bf6_ant_runtime*, float seconds);
 /* The current pose: 12 floats per bone into out (bone_max bones). Returns the
  * bone count. */
 BF6_API int  bf6_ant_runtime_pose(const bf6_ant_runtime*, float* out, int bone_max);
+/* WHICH SLOTS THE GRAPH ACTUALLY WROTE. A controller writes only the DOFs its
+ * clips and masks cover; the engine fills the rest from the layers underneath,
+ * and this runtime leaves them at the bind pose. A caller posing a skeleton
+ * that already stands in an authored hold wants to write only the valid slots
+ * and leave the others alone - applying the bind rotation of an undriven arm
+ * is what "crossed and stretched" looks like. One byte per bone into each of
+ * `rot` and `tr` (either may be NULL). Returns the bone count. */
+BF6_API int  bf6_ant_runtime_pose_valid(const bf6_ant_runtime*, uint8_t* rot,
+                                        uint8_t* tr, int bone_max);
 /* Newline-separated notes (unimplemented or unevaluable pieces met so far),
  * then a line "state: <current state node>" when the root is a state
  * machine. Returns the length needed. */

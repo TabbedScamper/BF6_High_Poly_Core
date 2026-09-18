@@ -103,7 +103,9 @@ void rows_from_quat(const float* q, float* m9);
 void pose_blend(Pose& dst, const Pose& src, float w, const Mask* mask);
 /* Blend_Mode 1 (Additive), 4 (Subtractive = w negated): local space,
  * q = dst (x) nlerp(I, add', |w|) with add' = conj(add) when w < 0; v += w*add.
- * Masked: w_slot = w*mask, q = dst (x) nlerp(I, add, w_slot), no conjugate. */
+ * Masked: w_slot = w*mask, q = dst (x) nlerp(I, add, w_slot), no conjugate.
+ * A slot the destination never wrote stays invalid: there is nothing to add
+ * to, and the bind value is not a pose the graph chose. */
 void pose_add(Pose& dst, const Pose& add, float w, const Mask* mask);
 
 /* A clip bound to one rig/skeleton pair, sampled at a time in FRAMES into a

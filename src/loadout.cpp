@@ -871,13 +871,31 @@ const char* const kSkeleton1p = "common/characters/_soldier/ske_soldier_1p";
 
 /* The neutral standing hold a first-person view rests in.
  *
- * NOT p_1p_rifle_stand_idle_01, which is the obvious candidate and is a
- * one-frame clip authored at 60 fps - exactly the right shape - but which
- * bf6_anim_bindings reports unavailable, so its payload is not readable the way
- * ordinary clips are. This is a turn-in-place transition, and its FIRST FRAME
- * is the idle it turns out of: the same rest pose, reachable. */
+ * THIS IS A POSE PLUS AN ADDITIVE, not a cycle, because that is how the game
+ * authored it. There is no c_1p_rifle_stand_idle_01 to loop. Asking the install
+ * what it carries under 1p_rifle_stand_idle returns seven names, and only these
+ * two are the resting hold:
+ *
+ *   p_1p_rifle_stand_idle_01      1 frame,   128 keys - the rest POSE
+ *   ladtv_1p_rifle_stand_idle_01  799 frames, 128 keys - the looping additive
+ *                                 breathing sway, deltas about the pose
+ *
+ * The other five are turn-in-place transitions and a phase-aim yaw.
+ *
+ * It used to be t_1p_rifle_stand_idle_turn_inplace_left_01, sampled for its
+ * first frame, because the pose would not bind and the additive would not bind.
+ * Both bind now that the RAW channel permutation is read, so the stand-in is
+ * gone - and with it the bug where the "idle" was 41 frames of the arms turning
+ * left forever.
+ *
+ * The additive is recognisably additive in its values rather than only in its
+ * name: its channel 0 at frame 0 is exactly (0,0,0,1), the identity rotation,
+ * and its largest excursion over all 799 frames is 0.034 - about two degrees.
+ * A cycle holds absolute poses and would do neither. */
 const char* const k1pStandClip =
-    "animations/glacier/assets/1p/common/rifle/loco/t_1p_rifle_stand_idle_turn_inplace_left_01";
+    "animations/glacier/assets/1p/common/rifle/loco/p_1p_rifle_stand_idle_01";
+const char* const k1pStandAdditive =
+    "animations/glacier/assets/1p/common/rifle/loco/ladtv_1p_rifle_stand_idle_01";
 
 struct Pose {
     std::vector<bf6_anim_binding> bindings;
@@ -1633,7 +1651,7 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
     const char* const ske_ebx = first_person ? kSkeleton1p : kSkeleton;
 
     std::string error, clip_path;
-    std::vector<bf6_anim_binding> bindings;
+    std::vector<bf6_anim_binding> bindings, add_bindings;
     bf6_anim_binding_stats stats{};
     std::vector<float> body;
     std::string tracks_json;
@@ -1641,6 +1659,7 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
 
     bf6_skeleton* s = nullptr;
     bf6_anim_clip* clip = nullptr;
+    bf6_anim_clip* add_clip = nullptr;
     do {
         if (first_person) {
             /* The first-person resting hold. Now that the RAW and flat pose
@@ -1659,6 +1678,24 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
                                   bindings.data(), n, &stats) != n) {
                 error = "The first-person hold has no readable animation binding.";
                 break;
+            }
+            /* THE SWAY. Bound SEPARATELY and composed per bone rather than per
+             * channel: two clips that both resolve 128 keys need not resolve
+             * them in the same order, and nothing guarantees a shared channel
+             * map - the mismatch diagnostics name a different
+             * toolchanneltodofassetdata per clip. Bone plus component is the
+             * common ground both agree on.
+             *
+             * Absent or unbindable, the hold is simply still. A missing fidget
+             * layer is not a reason to refuse the arms. */
+            bf6_anim_binding_stats ast{};
+            const int an = bf6_anim_bindings(c, k1pStandAdditive, rig_ebx, ske_ebx,
+                                             nullptr, 0, &ast);
+            if (an > 0 && an <= 4096) {
+                add_bindings.assign((size_t)an, bf6_anim_binding{});
+                if (bf6_anim_bindings(c, k1pStandAdditive, rig_ebx, ske_ebx,
+                                      add_bindings.data(), an, &ast) != an)
+                    add_bindings.clear();
             }
         } else {
             clip_path = resolve_idle_clip(c, role, bindings, stats, error);
@@ -1691,12 +1728,32 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
         }
         frames = clip->key_time_count;
 
+        /* The additive supplies the frames. The base is a single rest pose, so
+         * without a layer on top the export is one frame - correct, and still.
+         * Dropped rather than refused if its own layout check fails, on the
+         * same principle as the binding above. */
+        if (!add_bindings.empty()) {
+            add_clip = bf6_anim_clip_open(c, k1pStandAdditive);
+            if (!add_clip || add_clip->channel_count < 1 ||
+                add_clip->channel_count > (int)add_bindings.size() ||
+                add_clip->key_time_count < 1) {
+                if (add_clip) { bf6_free(c, add_clip); add_clip = nullptr; }
+                add_bindings.clear();
+            } else {
+                frames = add_clip->key_time_count;
+            }
+        }
+
         /* Which bones the clip actually drives. Everything else stays at its
          * rest transform, so shipping a flat track for it would be bytes that
          * say "unchanged" several hundred times a frame. */
         std::vector<int> track_of((size_t)s->bone_count, -1);
         std::vector<int> bone_of;
-        for (const bf6_anim_binding& b : bindings) {
+        /* Both layers, because a bone the additive sways is a bone that moves
+         * even if the base pose leaves it at its bind transform - and it would
+         * get no track at all if only the base were consulted. */
+        for (const std::vector<bf6_anim_binding>* set : { &bindings, &add_bindings })
+        for (const bf6_anim_binding& b : *set) {
             if (b.bone < 0 || b.bone >= s->bone_count) continue;
             if (b.component != BF6_ANIM_DOF_QUATERNION && b.component != BF6_ANIM_DOF_VECTOR3) continue;
             if (track_of[(size_t)b.bone] < 0) {
@@ -1712,9 +1769,17 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
         body.assign((size_t)bones_out * (size_t)frames * 12, 0.f);
         std::vector<float> channels((size_t)clip->channel_count * 4, 0.f);
         std::vector<M43> local((size_t)s->bone_count);
+        std::vector<float> add_channels;
+        if (add_clip) add_channels.assign((size_t)add_clip->channel_count * 4, 0.f);
+
         bool ok = true;
         for (int f = 0; f < frames && ok; ++f) {
-            if (!bf6_anim_clip_sample(c, clip, f, channels.data(), nullptr)) { ok = false; break; }
+            /* The base is one pose; it is sampled at its own frame, not at f.
+             * Asking a one-frame clip for frame 700 is a refusal, which would
+             * have made the whole export fail the moment a layer lengthened
+             * it. */
+            const int base_f = f < clip->key_time_count ? f : clip->key_time_count - 1;
+            if (!bf6_anim_clip_sample(c, clip, base_f, channels.data(), nullptr)) { ok = false; break; }
             /* Start from the BIND local every frame. A bone the clip rotates
              * but does not translate then keeps its authored offset, instead of
              * collapsing onto its parent. */
@@ -1727,6 +1792,39 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
                     quat_rows(v[0], v[1], v[2], v[3], local[(size_t)b.bone].m);
                 else if (b.component == BF6_ANIM_DOF_VECTOR3)
                     for (int k = 0; k < 3; ++k) local[(size_t)b.bone].m[9 + k] = v[k];
+            }
+            /* THE ADDITIVE LAYER, applied on top of the posed local. A delta
+             * rotation composes, a delta translation adds - that is what makes
+             * it additive rather than a second pose overwriting the first.
+             *
+             * Composition is on the RIGHT (posed * delta), which applies the
+             * sway in the bone's own local frame. That side is not established
+             * from the data: at this clip's magnitudes - largest excursion
+             * 0.034, about two degrees - the two orders differ by far less than
+             * a degree, so the values cannot distinguish them. It is the one
+             * thing here taken from convention rather than measured, and the
+             * way to settle it is the runtime's own blend routine, not more
+             * staring at clip values. */
+            if (add_clip && ok) {
+                if (!bf6_anim_clip_sample(c, add_clip, f, add_channels.data(), nullptr)) { ok = false; break; }
+                for (const bf6_anim_binding& b : add_bindings) {
+                    if (b.bone < 0 || b.bone >= s->bone_count) continue;
+                    if (b.channel < 0 || (size_t)b.channel * 4 + 3 >= add_channels.size()) { ok = false; break; }
+                    const float* v = add_channels.data() + (size_t)b.channel * 4;
+                    float* m = local[(size_t)b.bone].m;
+                    if (b.component == BF6_ANIM_DOF_QUATERNION) {
+                        float d[12] = {0};
+                        quat_rows(v[0], v[1], v[2], v[3], d);
+                        float r[9];
+                        for (int i = 0; i < 3; ++i)
+                            for (int j = 0; j < 3; ++j)
+                                r[i*3+j] = m[i*3+0]*d[0*3+j] + m[i*3+1]*d[1*3+j] + m[i*3+2]*d[2*3+j];
+                        for (int k = 0; k < 9; ++k) m[k] = r[k];
+                    } else if (b.component == BF6_ANIM_DOF_VECTOR3) {
+                        for (int k = 0; k < 3; ++k) m[9 + k] += v[k];
+                    }
+                }
+                if (!ok) break;
             }
             for (int t = 0; t < bones_out; ++t) {
                 const float* m = local[(size_t)bone_of[(size_t)t]].m;
@@ -1743,6 +1841,7 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
             tracks_json += buf;
         }
     } while (false);
+    if (add_clip) bf6_free(c, add_clip);
     if (clip) bf6_free(c, clip);
     if (s) bf6_free(c, s);
     if (!error.empty()) { body.clear(); tracks_json.clear(); frames = 0; bones_out = 0; }

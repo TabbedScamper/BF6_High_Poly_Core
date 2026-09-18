@@ -149,6 +149,10 @@ struct AnimClipHandle {
     uint8_t                     sub_quant_tenths = 0;
     uint8_t                     coef_bit_width = 0;
     bool                        is_vbr = false;
+    /* RAW single-frame pose: every channel constant, one float4 each, taken
+     * straight from the ConstData region. No bitstream, no blocks, no decode. */
+    bool                        is_raw_pose = false;
+    std::vector<float>          raw_values;       /* channel_count * 4 */
     AnimVbrMetadata             vbr{};
     std::vector<float>          vbr_palette;
     std::vector<uint16_t>       vbr_block_sizes;
@@ -421,10 +425,176 @@ static bf6_anim_clip* bf6__anim_vbr_open(bf6_ctx* c, const char* res_name,
     return &h->c;
 }
 
+/* ------------------------------------------------- the RAW single frame ---
+ *
+ * WHAT THIS UNLOCKS. 1,020 of the 2,801 animation resources under the 1P tree
+ * are RAW-framed and bf6_anim_clip_open refused every one, so each
+ * `p_1p_<weapon>_stand_idle_01` - the authored rest pose for every gun in the
+ * game - was unreadable. The 1P view worked around it by sampling frame 0 of a
+ * turn-in-place transition, which is the same pose but not the asset the game
+ * plays.
+ *
+ * THE FRAMING, measured across the RAW payloads under animations/.../1p/ and
+ * confirmed by the offsets chaining exactly:
+ *
+ *   header 64 = five {count, offset, flags} descriptors + a 4-byte terminator
+ *     region 0  KeyTimes        count 0 means implicit and dense
+ *     region 1  MappingIndices  count u16
+ *     region 2  ChannelIndices  count u16
+ *     region 3  Data            count float4, the animated samples
+ *     region 4  ConstData       count float4, the channels that never move
+ *
+ *   p_1p_rifle_crouch_idle_01    0,64 | 129,64 | 129,322 |    0,592 | 128,592
+ *      128*16 = 2048;   592 + 2048 = 2640,  payload 2660  (20 trailing)
+ *   tadtv_1p_rifle_crouchtostand_01
+ *                                0,64 | 129,64 | 129,322 | 2091,592 | 87,34048
+ *      2091*16 = 33456; 592 + 33456 = 34048 = ConstData's own offset, exactly
+ *
+ * A POSE IS THE CASE WHERE DATA IS EMPTY. Every channel sits in ConstData, one
+ * value each, and both index regions are the identity run 0..count-1 because
+ * nothing needs remapping when nothing is animated.
+ *
+ * THE ANIMATED CASE IS NOT DECODED HERE. Data divides by no consistent channel
+ * count - ratios of 103.71, 59.80, 71.22 and 163.52 measured across the tree -
+ * so those samples are per-channel runs addressed through the index regions
+ * rather than a grid. Returning null for them leaves them exactly as they were
+ * instead of inventing a layout that would decode into plausible nonsense.
+ */
+bf6_anim_clip* bf6__anim_raw_pose_open(bf6_ctx* c, bf6_anim_reloc* r)
+{
+    if (r->region_count < 5) return nullptr;
+    const bf6_anim_region& data  = r->regions[3];
+    const bf6_anim_region& konst = r->regions[4];
+    if (data.count != 0u) return nullptr;      /* animated RAW: not this codec */
+    if (konst.count == 0u || konst.count > 65535u) return nullptr;
+    if ((size_t)konst.offset + (size_t)konst.count * 16u > (size_t)r->size) return nullptr;
+
+    AnimClipHandle* h = new AnimClipHandle();
+    h->is_raw_pose = true;
+    h->raw_values.resize((size_t)konst.count * 4u);
+    std::memcpy(h->raw_values.data(), r->data + konst.offset,
+                (size_t)konst.count * 16u);
+
+    /* THE CHANNEL KINDS, derived and then CHECKED rather than declared.
+     *
+     * Nothing in the 64-byte header states the quaternion / vector3 split the
+     * clip struct reports, and the DCT framing's nq/nv/ng words have no
+     * equivalent here. What is true of the values is that quaternions are unit
+     * length and positions are not, so the leading unit-length run IS the
+     * quaternion count.
+     *
+     * That is inference from data, so it carries its own control: everything
+     * AFTER the run must be non-unit. If it is not - all unit, or an empty run
+     * - the split is not trustworthy and the counts are left at zero rather
+     * than reported wrongly. A caller needing it exactly should take it from
+     * bf6_anim_bindings, whose stats carry quaternion_bones / vector_bones /
+     * scalar_bones from the binding itself rather than from the values.
+     */
+    auto unit_like = [&](uint32_t i) {
+        const float* v = &h->raw_values[(size_t)i * 4u];
+        const double m = (double)v[0]*v[0] + (double)v[1]*v[1]
+                       + (double)v[2]*v[2] + (double)v[3]*v[3];
+        return m > 0.9801 && m < 1.0201;          /* magnitude 1 +/- 1% */
+    };
+    uint32_t nq = 0;
+    while (nq < konst.count && unit_like(nq)) ++nq;
+    uint32_t tail_unit = 0;
+    for (uint32_t i = nq; i < konst.count; i++) if (unit_like(i)) ++tail_unit;
+    const bool split_trusted = nq > 0 && nq < konst.count && tail_unit == 0;
+
+    h->c.framing            = BF6_ANIM_RAW;
+    h->c.key_time_count     = 1;
+    h->c.channel_count      = (int32_t)konst.count;
+    h->c.block_count        = 1;
+    h->c.quat_count         = split_trusted ? (int32_t)nq : 0;
+    h->c.vec3_count         = split_trusted ? (int32_t)(konst.count - nq) : 0;
+    h->c.group_count        = 0;
+    h->c.const_quat_count   = h->c.quat_count;
+    h->c.const_vec3_count   = h->c.vec3_count;
+    h->c.const_scalar_count = 0;
+    h->c.sparse_times       = nullptr;
+    h->c.sparse_time_count  = 0;
+    h->c.predicted_stream_bytes = (int64_t)konst.count * 16;
+    h->c.actual_stream_bytes    = (int64_t)konst.count * 16;
+    c->handles[&h->c] = bf6_ctx::HK_ANIMCLIP;
+    return &h->c;
+}
+
+/* ------------------------------------------------ the compact pose blob ---
+ *
+ * A SECOND POSE CONTAINER, and the one that matters most: it holds
+ * p_1p_rifle_stand_idle_01, the authored standing rest pose the first-person
+ * view is built around. bf6_anim_reloc_read refuses it before any codec sees
+ * it - the dword at +4 reads 37, and 37 % 4 != 0 fails the "12n + 4m" shape
+ * test that identifies the reloc container - so it was reported as "clip
+ * unavailable" and the 1P view fell back to sampling frame 0 of a
+ * turn-in-place transition instead.
+ *
+ * It is not a reloc payload at all. It is a flat header and a run of float4:
+ *
+ *   +0x00  u32  scalarCount
+ *   +0x04  u32  vec3Count
+ *   +0x08  u32  quatCount
+ *   +0x0C  u32  channelCount   == quatCount + vec3Count + ceil(scalarCount/4)
+ *   +0x10  u32  dataOffset     == 32
+ *   +0x20       channelCount * float4, quaternions, then vector3s, then the
+ *               packed scalar groups
+ *   +end   4 trailing bytes
+ *
+ * On p_1p_rifle_stand_idle_01 that is 2 / 37 / 89 / 127 / 32 and
+ * 32 + 127*16 + 4 = 2,068 bytes exactly, which is the file's own size. The
+ * size identity is the check: a wrong field order still yields four plausible
+ * counts, and only the total gives it away.
+ */
+bf6_anim_clip* bf6__anim_pose_blob_open(bf6_ctx* c, const char* res_name)
+{
+    const uint8_t* d = nullptr;
+    const int64_t n = bf6_read_raw(c, BF6_RAW_RES, res_name, &d);
+    if (n < 36 || !d) return nullptr;
+    auto u32 = [&](size_t o) { uint32_t v; std::memcpy(&v, d + o, 4); return v; };
+
+    const uint32_t ns = u32(0), nv = u32(4), nq = u32(8), nch = u32(12), off = u32(16);
+    if (off != 32u || nch == 0u || nch > 65535u) return nullptr;
+    /* The declared composition must add up, and the file must be exactly the
+     * size that composition implies. Both, not either. */
+    if (nq + nv + (ns + 3u) / 4u != nch) return nullptr;
+    if ((int64_t)off + (int64_t)nch * 16 + 4 != n) return nullptr;
+
+    AnimClipHandle* h = new AnimClipHandle();
+    h->is_raw_pose = true;                 /* same one-frame sampling path */
+    h->raw_values.resize((size_t)nch * 4u);
+    std::memcpy(h->raw_values.data(), d + off, (size_t)nch * 16u);
+
+    h->c.framing            = BF6_ANIM_RAW;
+    h->c.key_time_count     = 1;
+    h->c.channel_count      = (int32_t)nch;
+    h->c.block_count        = 1;
+    h->c.quat_count         = (int32_t)nq;
+    h->c.vec3_count         = (int32_t)nv;
+    h->c.group_count        = (int32_t)((ns + 3u) / 4u);
+    h->c.scalar_count       = (int32_t)ns;
+    h->c.const_quat_count   = (int32_t)nq;
+    h->c.const_vec3_count   = (int32_t)nv;
+    h->c.const_scalar_count = (int32_t)ns;
+    h->c.sparse_times       = nullptr;
+    h->c.sparse_time_count  = 0;
+    h->c.predicted_stream_bytes = (int64_t)nch * 16;
+    h->c.actual_stream_bytes    = (int64_t)nch * 16;
+    c->handles[&h->c] = bf6_ctx::HK_ANIMCLIP;
+    return &h->c;
+}
+
 bf6_anim_clip* bf6_anim_clip_open(bf6_ctx* c, const char* res_name)
 {
     bf6_anim_reloc* r = bf6_anim_reloc_read(c, res_name);
-    if (!r) return nullptr;
+    /* Not a reloc payload at all - try the flat pose blob before giving up,
+     * which is where the standing rest poses live. */
+    if (!r) return bf6__anim_pose_blob_open(c, res_name);
+    if (r->framing == BF6_ANIM_RAW) {
+        bf6_anim_clip* clip = bf6__anim_raw_pose_open(c, r);
+        bf6_free(c, r);
+        return clip;
+    }
     if (r->framing == BF6_ANIM_VBR) {
         bf6_anim_clip* clip = bf6__anim_vbr_open(c, res_name, r);
         bf6_free(c, r);
@@ -741,6 +911,23 @@ int bf6_anim_clip_sample(bf6_ctx* c, bf6_anim_clip* clip, int ordinal, float* ou
 {
     if (!c || !clip || !out || ordinal < 0) return 0;
     AnimClipHandle* h = (AnimClipHandle*)clip;
+    /* A POSE HAS ONE FRAME, and every ordinal is that frame. Refusing anything
+     * past ordinal 0 would be technically right and practically wrong: a caller
+     * stepping a clip it believes is animated should stand still on the pose,
+     * not stop dead partway through. */
+    if (h->is_raw_pose) {
+        const size_t n = h->raw_values.size();
+        if (!n) return 0;
+        std::memcpy(out, h->raw_values.data(), n * sizeof(float));
+        if (out_quat_magnitude) {
+            /* The first channel's magnitude, the same self-check the other
+             * codecs report - 1.0 here means the values arrived undamaged. */
+            const float* v = h->raw_values.data();
+            *out_quat_magnitude = (float)std::sqrt((double)v[0]*v[0] + (double)v[1]*v[1]
+                                                 + (double)v[2]*v[2] + (double)v[3]*v[3]);
+        }
+        return 1;
+    }
     if (h->is_vbr)
         return bf6__anim_vbr_sample(h, ordinal, out, out_quat_magnitude) ? 1 : 0;
     const uint32_t block = (uint32_t)ordinal >> 3;

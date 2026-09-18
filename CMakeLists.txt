@@ -635,6 +635,10 @@ add_executable(anim_test test/anim_test.cpp)
 target_link_libraries(anim_test PRIVATE bf6_core_static)
 target_include_directories(anim_test PRIVATE src include)
 
+add_executable(anim_raw_probe test/anim_raw_probe.cpp)
+target_link_libraries(anim_raw_probe PRIVATE bf6_core_static)
+target_include_directories(anim_raw_probe PRIVATE src include)
+
 add_executable(anim_vbr_live_test test/anim_vbr_live_test.cpp)
 target_link_libraries(anim_vbr_live_test PRIVATE bf6_core_static)
 target_include_directories(anim_vbr_live_test PRIVATE src include)
@@ -1863,3 +1867,8 @@ target_include_directories(waterblock_probe PRIVATE src include)
 add_executable(expr_dark_probe test/expr_dark_probe.cpp)
 target_link_libraries(expr_dark_probe PRIVATE bf6_core_static)
 target_include_directories(expr_dark_probe PRIVATE src include)
+
+# The pose-trajectory matching database, field by field.
+add_executable(ptm_probe test/ptm_probe.cpp)
+target_link_libraries(ptm_probe PRIVATE bf6_core_static)
+target_include_directories(ptm_probe PRIVATE src include)

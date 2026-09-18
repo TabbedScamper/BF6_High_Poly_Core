@@ -243,13 +243,78 @@ int bf6_anim_bindings(bf6_ctx* c, const char* clip_ebx,
     }
     const int transformKeys = clip->quat_count + clip->vec3_count;
     const int scalarKeys = (int)map_keys.size() - transformKeys;
-    const bool packedDctLayout = clip->framing == BF6_ANIM_DCT &&
-        scalarKeys >= 0 &&
+    /* THE TEST IS THE LAYOUT, NOT THE CODEC THAT PRODUCED IT.
+     *
+     * These were gated on `framing == BF6_ANIM_DCT` and `!= BF6_ANIM_DCT`, as
+     * though packing scalars four to a float4 were a property of the DCT codec.
+     * It is not - it is a property of the payload. The flat pose blob packs the
+     * same way: p_1p_rifle_stand_idle_01 declares 89 quaternions, 37 vectors
+     * and 2 scalars, stores 127 float4 records, and its channel map carries 128
+     * keys because the map counts scalars INDIVIDUALLY while the payload packs
+     * them. Both numbers are right and they are not equal.
+     *
+     * Gated on the framing that clip could only take the direct branch, where
+     * 128 != 127 rejected it and a perfectly good pose came back as "layout
+     * mismatch". Ungated, the packed branch recognises it - and this is not a
+     * weaker test: the group arithmetic still has to hold exactly, so counts
+     * that do not add up are refused as firmly as before.
+     *
+     * A clip with no scalars satisfies both branches identically, which is why
+     * dropping the framing condition changes no verdict that used to pass. */
+    bool packedLayout = scalarKeys >= 0 &&
         clip->group_count == (scalarKeys + 3) / 4 &&
         clip->channel_count == transformKeys + clip->group_count;
-    const bool directLayout = clip->framing != BF6_ANIM_DCT &&
-        (int)map_keys.size() == clip->channel_count;
-    if (!packedDctLayout && !directLayout) {
+    const bool directLayout = (int)map_keys.size() == clip->channel_count;
+
+    /* WHEN THE PAYLOAD CANNOT STATE ITS OWN VECTOR / SCALAR SPLIT.
+     *
+     * The RAW framing declares no channel kinds at all, so its reader derives
+     * the quaternion count from unit length - which is sound, quaternions are
+     * unit and nothing else is - and then cannot tell a vector3 from a float4
+     * holding four packed scalars, because neither is unit. It reports every
+     * non-quaternion as a vector3 and no groups, and the check above then
+     * fails by exactly the number of scalars that were packed.
+     *
+     * The two counts determine the split, so solve rather than guess. With
+     * Q quaternions, C payload channels and K map keys:
+     *
+     *     v + g = C - Q        the payload stores vectors and groups
+     *     v + s = K - Q        the map names vectors and scalars
+     *     g = ceil(s / 4)      four scalars to a float4
+     *  => s - ceil(s/4) = K - C
+     *
+     * which is strictly increasing in s, so there is at most one answer and
+     * finding it confirms the reading rather than assuming it. p_1p_rifle_
+     * crouch_idle_01: K-C = 1, s = 2, g = 1, v = 37, and 90 + 37 + 2 = 129
+     * keys against 90 + 37 + 1 = 128 stored channels.
+     *
+     * A clip that already stated a consistent split never reaches this. */
+    int solved_vec3 = clip->vec3_count;
+    if (!packedLayout && !directLayout && clip->group_count == 0 &&
+        clip->quat_count > 0 && scalarKeys >= 0) {
+        const int d = (int)map_keys.size() - clip->channel_count;
+        /* BOUND THE SEARCH BY THE MAP, NOT BY scalarKeys. scalarKeys is
+         * derived from the clip's own vec3 count, which is precisely the
+         * number this loop exists because the payload got wrong - on the
+         * crouch pose it reports 38 where the truth is 37, capping the search
+         * at s = 1 when the answer is s = 2. The most scalars there can be is
+         * every non-quaternion key. */
+        const int max_s = (int)map_keys.size() - clip->quat_count;
+        for (int s = 0; s <= max_s && d >= 0; s++) {
+            const int g = (s + 3) / 4;
+            if (s - g != d) continue;
+            const int v = clip->channel_count - clip->quat_count - g;
+            if (v < 0 || clip->quat_count + v + s != (int)map_keys.size()) break;
+            solved_vec3 = v;
+            packedLayout = true;
+            std::fprintf(stderr,
+                "animation binding: derived the packed split for %s - "
+                "%d quat, %d vec3, %d scalar in %d group(s)\n",
+                clip_ebx, clip->quat_count, v, s, g);
+            break;
+        }
+    }
+    if (!packedLayout && !directLayout) {
         std::fprintf(stderr,
             "animation binding: channel/map layout mismatch path=%s "
             "keys=%zu decoded=%d q=%d v=%d groups=%d framing=%d\n",
@@ -291,7 +356,11 @@ int bf6_anim_bindings(bf6_ctx* c, const char* clip_ebx,
     for (const auto& records : dof_records) report.dof_records += (int32_t)records.size();
     std::vector<bf6_anim_binding> rows(map_keys.size());
     const int quat_end = clip->quat_count;
-    const int vec_end = quat_end + clip->vec3_count;
+    /* The SOLVED vector count, which equals clip->vec3_count for every payload
+     * that stated its own split and differs only for the RAW poses that could
+     * not. Using the clip's own number here would put the scalar boundary one
+     * channel too far along and silently mis-lane every packed scalar. */
+    const int vec_end = quat_end + solved_vec3;
     for (size_t channel = 0; channel < map_keys.size(); ++channel)
     {
         bf6_anim_binding& row = rows[channel];
@@ -303,7 +372,11 @@ int bf6_anim_bindings(bf6_ctx* c, const char* clip_ebx,
         row.component = (int)channel < quat_end ? BF6_ANIM_DOF_QUATERNION
                       : (int)channel < vec_end ? BF6_ANIM_DOF_VECTOR3
                                               : BF6_ANIM_DOF_SCALAR;
-        if (row.component == BF6_ANIM_DOF_SCALAR && packedDctLayout) {
+        /* Packed scalars: the map names them one at a time, the payload stores
+         * four to a float4, so a scalar's channel is its group and its lane is
+         * its position in that group. Keyed on the LAYOUT, which is why the
+         * flag above is no longer named for the DCT codec. */
+        if (row.component == BF6_ANIM_DOF_SCALAR && packedLayout) {
             const int scalar = (int)channel - vec_end;
             row.channel = vec_end + scalar / 4;
             row.lane = scalar % 4;

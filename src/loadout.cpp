@@ -1617,6 +1617,20 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
         if (!p.parse(req, perr)) req = bf6json::Value();
     }
     const std::string role = field(req, "role", "assault");
+    /* "view":"1p" exports the FIRST-PERSON clip on the first-person rig, the
+     * same switch bf6_loadout_soldier takes. Without it this function could
+     * only ever animate the third-person soldier, and the arms the player
+     * actually looks at stayed a still photograph.
+     *
+     * A 1P clip is not simply "the 3P clip on a different skeleton": it binds
+     * ske_soldier_1p through soldier_1p.rig, and the authored resting motion
+     * is a POSE plus additive fidget layers rather than a looping cycle - see
+     * the note at k1pStandClip. This exports the base; layering the additives
+     * on top is the caller's to do, and is the same decision in both engines,
+     * so it will move here once it exists in one. */
+    const bool first_person = field(req, "view", "3p") == "1p";
+    const char* const rig_ebx = first_person ? kRig1p : kRig;
+    const char* const ske_ebx = first_person ? kSkeleton1p : kSkeleton;
 
     std::string error, clip_path;
     std::vector<bf6_anim_binding> bindings;
@@ -1628,18 +1642,50 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
     bf6_skeleton* s = nullptr;
     bf6_anim_clip* clip = nullptr;
     do {
-        clip_path = resolve_idle_clip(c, role, bindings, stats, error);
+        if (first_person) {
+            /* The first-person resting hold. Now that the RAW and flat pose
+             * containers read, this is the authored asset rather than frame 0
+             * of a turn-in-place transition standing in for it. */
+            clip_path = k1pStandClip;
+            bf6_anim_binding_stats st{};
+            const int n = bf6_anim_bindings(c, clip_path.c_str(), rig_ebx, ske_ebx,
+                                            nullptr, 0, &st);
+            if (n < 1 || n > 4096) {
+                error = "The first-person hold has no readable animation binding.";
+                break;
+            }
+            bindings.assign((size_t)n, bf6_anim_binding{});
+            if (bf6_anim_bindings(c, clip_path.c_str(), rig_ebx, ske_ebx,
+                                  bindings.data(), n, &stats) != n) {
+                error = "The first-person hold has no readable animation binding.";
+                break;
+            }
+        } else {
+            clip_path = resolve_idle_clip(c, role, bindings, stats, error);
+        }
         if (clip_path.empty()) break;
         /* The PLAIN rig, with no renderbones appended: a clip binds rig bones,
          * and the record's shared base rig is exactly this list, so track bone
          * indices line up with it without any further resolution. */
-        s = bf6_skeleton_compose(c, kSkeleton, nullptr);
+        s = bf6_skeleton_compose(c, ske_ebx, nullptr);
         if (!s || s->bone_count < 1 || s->bone_count > 8192) {
             error = "The character render skeleton is unavailable.";
             break;
         }
         clip = bf6_anim_clip_open(c, clip_path.c_str());
-        if (!clip || clip->channel_count != (int)bindings.size() || clip->key_time_count < 1) {
+        /* NOT AN EQUALITY. `bindings` has one entry per channel-map KEY and
+         * `channel_count` counts STORED channels, and those differ whenever
+         * scalars are packed four to a float4 - the 1P hold declares 89
+         * quaternions, 38 vectors and 2 scalars, so 129 keys against 128
+         * stored. Both numbers are right. Requiring them equal rejected the
+         * first-person clip outright with "the selected soldier pose is
+         * unavailable", which is the same mistake the binding reader's layout
+         * check made, in a second place.
+         *
+         * More stored channels than keys would be genuinely wrong - there
+         * would be no binding to place them with - so that is still refused. */
+        if (!clip || clip->channel_count < 1 ||
+            clip->channel_count > (int)bindings.size() || clip->key_time_count < 1) {
             error = "The selected soldier pose is unavailable.";
             break;
         }

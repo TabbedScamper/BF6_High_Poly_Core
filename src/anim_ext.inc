@@ -156,7 +156,13 @@ struct AnimClipHandle {
      * with the stride VERIFIED by column purity rather than derived. */
     bool                        is_raw_anim = false;
     uint32_t                    raw_stride  = 0;
-    std::vector<float>          raw_values;       /* channel_count * 4 */
+    std::vector<float>          raw_values;       /* frames * raw_stride * 4 */
+    /* The channel -> slot permutation (region 2's content, rebuilt by
+     * inverting region 1). A slot below raw_stride is a column of Data; one at
+     * or above it is a record of raw_const. Empty means the clip exposes its
+     * animated run alone, the way it did before the permutation was read. */
+    std::vector<uint16_t>       raw_slot;
+    std::vector<float>          raw_const;        /* ConstData, 4 per record */
     AnimVbrMetadata             vbr{};
     std::vector<float>          vbr_palette;
     std::vector<uint16_t>       vbr_block_sizes;
@@ -507,6 +513,39 @@ static double bf6__raw_column_purity(const float* recs, uint32_t count, uint32_t
     return (double)pure / (double)stride;
 }
 
+/* ONE CHANNEL OF AN ANIMATED RAW CLIP, at one frame.
+ *
+ * The single place that knows how a channel index becomes storage, so the
+ * quat/vec3 derivation at open time and the sampler cannot drift apart - they
+ * did drift once already, the derivation reading slot order while a caller
+ * indexed in channel order, and the result was a clip that bound cleanly and
+ * posed wrongly.
+ *
+ * Returns nullptr when the channel has no storage. That happens for the
+ * trailing packed-scalar keys: ConstData packs four scalars to a float4, so a
+ * clip with 62 constant channels can ship 61 records. Those keys carry no bone
+ * transform, so a caller that skips them loses nothing - but it must be told,
+ * not handed a neighbouring channel's rotation.
+ */
+static const float* bf6__raw_channel_at(const AnimClipHandle* h, uint32_t frame, uint32_t ch)
+{
+    const uint32_t stride = h->raw_stride;
+    if (!stride) return nullptr;
+    /* No permutation: channels ARE the animated slots, as before. */
+    const uint32_t slot = h->raw_slot.empty()
+                        ? ch
+                        : (ch < h->raw_slot.size() ? h->raw_slot[ch] : 0xFFFFu);
+    if (slot == 0xFFFFu) return nullptr;
+    if (slot < stride) {
+        const size_t at = ((size_t)frame * stride + slot) * 4u;
+        if (at + 4u > h->raw_values.size()) return nullptr;
+        return &h->raw_values[at];
+    }
+    const size_t at = (size_t)(slot - stride) * 4u;
+    if (at + 4u > h->raw_const.size()) return nullptr;
+    return &h->raw_const[at];
+}
+
 /* The leading ascending run of the slot -> channel permutation. */
 static uint32_t bf6__raw_animated_run(const bf6_anim_reloc* r)
 {
@@ -695,33 +734,86 @@ bf6_anim_clip* bf6__anim_raw_anim_open(bf6_ctx* c, bf6_anim_reloc* r)
     h->raw_values.resize((size_t)data.count * 4u);
     std::memcpy(h->raw_values.data(), recs, (size_t)data.count * 16u);
 
+    /* THE FULL CHANNEL SET, not just the animated run.
+     *
+     * This used to report channel_count = stride and drop ConstData on the
+     * floor with a (void) cast, which made an animated RAW clip look like it
+     * drove only the bones that move. Nothing binds against that: the rig's
+     * channel map has an entry for every channel, animated or not, so
+     * bf6_anim_bindings saw 128 keys against 66 channels and refused the clip
+     * outright. 354 of the 788 first-person rifle clips failed exactly this
+     * way - vaulting, sprint-to-crouch, stand-to-prone, mounted, parachute.
+     *
+     * The container states the layout; it did not need inferring. Region 1
+     * (MappingIndices) is a permutation slot -> channel, whose leading
+     * ascending run is the animated slots and whose tail is the constant ones,
+     * and region 2 (ChannelIndices) is its inverse. Checked on
+     * ladtv_1p_rifle_stand_idle_01: r1's ascending run is 66 entries long,
+     * which is the stride the column-purity scan independently picked, and
+     * r1[0]=9 with r2[9]=0, r1[66]=0 with r2[0]=66 - the two regions invert
+     * each other in both directions.
+     *
+     * So: channel c lives at slot r2[c]; slots below stride are a column of
+     * Data, slots at or above it are a record of ConstData. */
+    const bf6_anim_region& map = r->regions[1];
+    uint32_t nch = stride;
+    if (map.count > stride && map.count <= 65535u &&
+        (size_t)map.offset + (size_t)map.count * 2u <= (size_t)r->size) {
+        nch = map.count;
+        h->raw_slot.resize(nch, 0xFFFFu);
+        for (uint32_t s = 0; s < nch; s++) {
+            uint16_t ch = 0;
+            std::memcpy(&ch, r->data + map.offset + (size_t)s * 2u, 2);
+            if (ch < nch) h->raw_slot[ch] = (uint16_t)s;   /* invert r1 ourselves */
+        }
+        /* Derived from r1 rather than read from r2, then CHECKED against r2
+         * where r2 is present. Inverting the permutation we already trust
+         * cannot disagree with itself; trusting r2 blindly could. */
+        const bf6_anim_region& inv = r->regions[2];
+        if (inv.count == nch &&
+            (size_t)inv.offset + (size_t)inv.count * 2u <= (size_t)r->size) {
+            for (uint32_t ch = 0; ch < nch; ch++) {
+                uint16_t s = 0;
+                std::memcpy(&s, r->data + inv.offset + (size_t)ch * 2u, 2);
+                if (h->raw_slot[ch] != s) { h->raw_slot.clear(); nch = stride; break; }
+            }
+        }
+        if (h->raw_slot.empty()) nch = stride;
+    }
+    if (!h->raw_slot.empty() && konst.count &&
+        (size_t)konst.offset + (size_t)konst.count * 16u <= (size_t)r->size) {
+        h->raw_const.resize((size_t)konst.count * 4u);
+        std::memcpy(h->raw_const.data(), r->data + konst.offset, (size_t)konst.count * 16u);
+    }
+
     h->c.framing        = BF6_ANIM_RAW;
     h->c.key_time_count = (int32_t)(data.count / stride);
-    h->c.channel_count  = (int32_t)stride;
+    h->c.channel_count  = (int32_t)nch;
     h->c.block_count    = (int32_t)(data.count / stride);
     /* Derived per frame 0 the same way the pose reader does, with the same
      * control: the trailing values must NOT be unit or the split is not
-     * reported at all. */
+     * reported at all. Read through the permutation, so the split describes
+     * CHANNEL order - the order a binding indexes in - and not slot order. */
     uint32_t nq = 0;
-    auto unit0 = [&](uint32_t i) {
-        const float* v = &h->raw_values[(size_t)i * 4u];
+    auto unit0 = [&](uint32_t ch) {
+        const float* v = bf6__raw_channel_at(h, 0, ch);
+        if (!v) return false;
         const double m = (double)v[0]*v[0] + (double)v[1]*v[1]
                        + (double)v[2]*v[2] + (double)v[3]*v[3];
         return m > 0.9801 && m < 1.0201;
     };
-    while (nq < stride && unit0(nq)) ++nq;
+    while (nq < nch && unit0(nq)) ++nq;
     uint32_t tail_unit = 0;
-    for (uint32_t i = nq; i < stride; i++) if (unit0(i)) ++tail_unit;
-    const bool trusted = nq > 0 && nq < stride && tail_unit == 0;
+    for (uint32_t i = nq; i < nch; i++) if (unit0(i)) ++tail_unit;
+    const bool trusted = nq > 0 && nq < nch && tail_unit == 0;
     h->c.quat_count  = trusted ? (int32_t)nq : 0;
-    h->c.vec3_count  = trusted ? (int32_t)(stride - nq) : 0;
+    h->c.vec3_count  = trusted ? (int32_t)(nch - nq) : 0;
     h->c.group_count = 0;
     h->c.const_quat_count = h->c.const_vec3_count = h->c.const_scalar_count = 0;
     h->c.sparse_times      = nullptr;
     h->c.sparse_time_count = 0;
     h->c.predicted_stream_bytes = (int64_t)data.count * 16;
     h->c.actual_stream_bytes    = (int64_t)data.count * 16;
-    (void)konst;
     c->handles[&h->c] = bf6_ctx::HK_ANIMCLIP;
     return &h->c;
 }
@@ -1066,11 +1158,25 @@ int bf6_anim_clip_sample(bf6_ctx* c, bf6_anim_clip* clip, int ordinal, float* ou
         if (!stride) return 0;
         const size_t frames = h->raw_values.size() / ((size_t)stride * 4u);
         if ((size_t)ordinal >= frames) return 0;
-        const float* src = &h->raw_values[(size_t)ordinal * stride * 4u];
-        std::memcpy(out, src, (size_t)stride * 4u * sizeof(float));
-        if (out_quat_magnitude)
-            *out_quat_magnitude = (float)std::sqrt((double)src[0]*src[0] + (double)src[1]*src[1]
-                                                 + (double)src[2]*src[2] + (double)src[3]*src[3]);
+        /* Channel by channel through the permutation, because the animated
+         * channels are scattered across the map rather than being its first
+         * `stride` entries - a straight memcpy of the frame's Data row wrote
+         * every constant channel's value into the wrong place. Identity for a
+         * channel with no storage, so an unresolved packed scalar reads as a
+         * no-op instead of as a neighbour's rotation. */
+        const int32_t nch = clip->channel_count;
+        for (int32_t ch = 0; ch < nch; ch++) {
+            const float* v = bf6__raw_channel_at(h, (uint32_t)ordinal, (uint32_t)ch);
+            float* dst = out + (size_t)ch * 4u;
+            if (v) { dst[0] = v[0]; dst[1] = v[1]; dst[2] = v[2]; dst[3] = v[3]; }
+            else   { dst[0] = dst[1] = dst[2] = 0.f; dst[3] = 1.f; }
+        }
+        if (out_quat_magnitude) {
+            const float* v = bf6__raw_channel_at(h, (uint32_t)ordinal, 0);
+            *out_quat_magnitude = v ? (float)std::sqrt((double)v[0]*v[0] + (double)v[1]*v[1]
+                                                     + (double)v[2]*v[2] + (double)v[3]*v[3])
+                                    : 0.f;
+        }
         return 1;
     }
     if (h->is_raw_pose) {

@@ -313,6 +313,8 @@ struct PhaseCtrl : Ctrl {
         if (child) child->restart(rt);
         copy_from_child();
     }
+    /* QI 0x1405ce680: unanswered interfaces go to the child (+0x60) */
+    Ctrl* tag_leaf() override { return child ? child->tag_leaf() : nullptr; }
 };
 
 /* --------------------------------------------------------- transitions */
@@ -659,6 +661,9 @@ struct ChooserCtrl : Ctrl {
     }
     void set_time(Runtime& rt, float t) override { if (child) child->set_time(rt, t); copy_timing(); }
     void set_phase(Runtime& rt, float p) override { if (child) child->set_phase(rt, p); copy_timing(); }
+    /* QI 0x1409bde40: to the chosen child (+0x60); a blend answers with its
+     * incoming side */
+    Ctrl* tag_leaf() override { return child ? child->tag_leaf() : nullptr; }
 };
 
 /* ContextDatabaseChooserController (FUN_1408ab830 / FUN_1408abb70). */
@@ -730,6 +735,9 @@ struct CdbChooserCtrl : Ctrl {
     }
     void set_time(Runtime& rt, float t) override { if (child) child->set_time(rt, t); copy_timing(); }
     void set_phase(Runtime& rt, float p) override { if (child) child->set_phase(rt, p); copy_timing(); }
+    /* QI 0x1408ab6d0: to the chosen child (+0x60); a blend answers with its
+     * incoming side */
+    Ctrl* tag_leaf() override { return child ? child->tag_leaf() : nullptr; }
 };
 
 std::string cdb_lookup(Runtime& rt, const Obj* cdb_asset)
@@ -1216,7 +1224,8 @@ struct NodeCtrl : Ctrl {
     void update(Runtime& rt, float dt, Pose& out) override;
     void set_time(Runtime& rt, float t) override { if (child) child->set_time(rt, t); copy_timing(); }
     void set_phase(Runtime& rt, float p) override { if (child) child->set_phase(rt, p); copy_timing(); }
-    Ctrl* tag_leaf() override { return nullptr; }
+    /* QI 0x14099e860: unanswered interfaces go to the node's child (+0x70) */
+    Ctrl* tag_leaf() override { return child ? child->tag_leaf() : nullptr; }
 };
 
 
@@ -1294,6 +1303,8 @@ struct StateFlowCtrl : Ctrl {
     }
     void set_time(Runtime& rt, float t) override { if (node) node->set_time(rt, t); copy_timing(); }
     void set_phase(Runtime& rt, float p) override { if (node) node->set_phase(rt, p); copy_timing(); }
+    /* QI 0x14099b600: unanswered interfaces go to the current node (+0x78) */
+    Ctrl* tag_leaf() override { return node ? node->tag_leaf() : nullptr; }
 };
 
 void NodeCtrl::init(Runtime& rt, StateFlowCtrl* owner, const Obj* a)

@@ -5162,6 +5162,29 @@ BF6_API int  bf6_ant_runtime_pose(const bf6_ant_runtime*, float* out, int bone_m
  * machine. Returns the length needed. */
 BF6_API int  bf6_ant_runtime_notes(const bf6_ant_runtime*, char* out, int out_len);
 
+/* The weapon-inspect drag: camera-yaw input -> fb.camerainput.yaw.float, as
+ * the soldier logic computes it. Parameters are READ from the installed
+ * prefab. `raw` is the camera-yaw action value in [-1, 1], one call per input
+ * update; `from_mouse` picks ValueModifierForMouse over ValueModifier.
+ * OPEN, stated so it is not mistaken for measured: how mouse counts become
+ * `raw`; and the yaw ClampMin pin is unlinked in the shipped prefab, so when
+ * clamp_min_linked is 0 the clamp_min used (0) is NOT from the game. */
+typedef struct {
+    float   accumulated_at_start;     /* AccumulatedValueAtStart */
+    float   value_modifier;           /* ValueModifier (non-mouse) */
+    float   value_modifier_mouse;     /* ValueModifierForMouse */
+    int32_t modifier_on_accumulated;
+    float   base, clamp_max, clamp_min;
+    int32_t clamp_min_linked;
+} bf6_inspect_input_params;
+typedef struct {
+    float   accumulated, start, last_frame, rotation, yaw;
+    int32_t active, reset;
+} bf6_inspect_input_state;
+BF6_API int   bf6_inspect_input_params_read(bf6_ctx*, bf6_inspect_input_params* out, char* err, int err_len);
+BF6_API float bf6_inspect_input_step(const bf6_inspect_input_params*, bf6_inspect_input_state*,
+                                     int inspecting, float raw, int from_mouse);
+
 /* ------------------------------------------------------- renderbones ----- */
 /* THE PROCEDURAL BONES ABOVE THE RIG.
  *

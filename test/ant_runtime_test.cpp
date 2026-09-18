@@ -93,6 +93,33 @@ int main(int argc, char** argv)
         bf6_free(c, rt);
         rc = fails ? 1 : 0;
     }
+    {
+        /* THE DRAG. Parameters come from the installed prefab; the decode says
+         * start 0.15, modifiers 0.005 / 1 (mouse), base 0.15, max 0.25, and a
+         * yaw ClampMin pin with no link. */
+        bf6_inspect_input_params ip{};
+        if (!bf6_inspect_input_params_read(c, &ip, err, (int)sizeof(err))) { std::printf("  drag params: %s\n", err); bad("inspect input params did not read"); }
+        else {
+            std::printf("drag params: start %.3f mod %.3f mouse %.3f base %.3f max %.3f min %.3f (linked %d)\n",
+                        ip.accumulated_at_start, ip.value_modifier, ip.value_modifier_mouse, ip.base,
+                        ip.clamp_max, ip.clamp_min, ip.clamp_min_linked);
+            if (std::fabs(ip.accumulated_at_start - 0.15f) > 1e-6f || std::fabs(ip.base - 0.15f) > 1e-6f ||
+                std::fabs(ip.clamp_max - 0.25f) > 1e-6f || std::fabs(ip.value_modifier - 0.005f) > 1e-6f ||
+                std::fabs(ip.value_modifier_mouse - 1.f) > 1e-6f)
+                bad("drag parameters differ from the decoded prefab values");
+            bf6_inspect_input_state s{};
+            const float y0 = bf6_inspect_input_step(&ip, &s, 1, 0.f, 1);
+            const float y1 = bf6_inspect_input_step(&ip, &s, 1, 0.05f, 1);     /* right */
+            for (int i = 0; i < 20; ++i) bf6_inspect_input_step(&ip, &s, 1, 0.05f, 1);
+            const float ymax = s.yaw;
+            const float yback = bf6_inspect_input_step(&ip, &s, 1, -0.05f, 1);  /* straight back */
+            std::printf("drag: start %.3f, +0.05 -> %.3f, held right -> %.3f, one step back -> %.3f\n", y0, y1, ymax, yback);
+            if (std::fabs(y0 - 0.15f) > 1e-6f) bad("inspect does not start at 0.15");
+            if (!(y1 > 0.12f)) bad("a right drag does not cross the 0.12 flip threshold");
+            if (std::fabs(ymax - 0.25f) > 1e-6f) bad("held right does not stop at the clamp");
+            if (!(yback < ymax - 0.04f)) bad("reversing wound up against the clamp");
+        }
+    }
     std::printf("%s\n", fails ? "FAILED" : "PASS");
     bf6_close(c);
     return rc;

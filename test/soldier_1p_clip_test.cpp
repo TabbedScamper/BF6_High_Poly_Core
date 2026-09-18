@@ -209,6 +209,47 @@ int main(int argc, char** argv)
     if (moved < 1e-4)
         bad("every frame of the 1P clip is frame 0 - this is a still pose, not motion");
 
+    /* THE JOIN. The clip and the soldier are two separate calls, and the tracks
+     * address bones by INDEX. An engine builds its Skeleton3D from the skinned
+     * record's rig and then plays these tracks against it, so if the two
+     * disagree about what bone 87 is, every check above still passes and the
+     * arms animate from the wrong joints. Nothing downstream can detect that;
+     * it has to be checked here, where both numbers are in one process.
+     *
+     * A skinned 1P record is also the precondition for animating at all - an
+     * unskinned record is a baked mesh with no skeleton to drive. */
+    {
+        const char* const REQ_1P_SKINNED =
+            "{\"character\":\"cha0001wisp\",\"outfit\":\"001\",\"faction\":\"alliance\","
+            "\"role\":\"assault\",\"item\":\"carbine/m4a1\",\"view\":\"1p\",\"skinned\":\"1\"}";
+        uint8_t* blob = nullptr;
+        const int64_t n = bf6_loadout_soldier(c, REQ_1P_SKINNED, nullptr, &blob);
+        if (n <= 0 || !blob) {
+            bad("the skinned 1P soldier record could not be built - nothing to animate");
+        } else {
+            const std::string head = head_of(blob, n);
+            /* One "name" per rig entry is the bone count; the record writes the
+             * rig as an array of objects and this only needs how many. */
+            long rig_bones = 0;
+            const size_t rig_at = head.find("\"rig\":[");
+            if (rig_at != std::string::npos)
+                for (size_t a = head.find("\"name\":", rig_at); a != std::string::npos;
+                     a = head.find("\"name\":", a + 1))
+                    ++rig_bones;
+            std::printf("  skinned 1P record: rig carries %ld bone(s)\n", rig_bones);
+            if (rig_bones < 1)
+                bad("the skinned 1P record carries no rig - Godot would build a "
+                    "static mesh with no skeleton to animate");
+            long worst = -1;
+            for (int b : first.bone_index) if (b > worst) worst = b;
+            std::printf("  clip's highest track bone index is %ld\n", worst);
+            if (rig_bones > 0 && worst >= rig_bones)
+                bad("a clip track addresses a bone the skinned record's rig does "
+                    "not have - the two are built on different skeletons");
+            bf6_free(c, blob);
+        }
+    }
+
     std::printf("\n%s\n", fails == 0 ? "PASS: 0 failure(s)"
                                      : "FAILED");
     bf6_close(c);

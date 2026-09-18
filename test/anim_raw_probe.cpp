@@ -209,6 +209,30 @@ void probe(bf6_ctx* c, const std::string& name)
          * Measured as mean absolute difference over the first few hundred
          * records. The smaller mean says which stride follows a single bone. */
         if (i == 3 && g.count > 8 && (uint32_t)r->region_count > 4) {
+            /* THE ANIMATED RUN, COUNTED FROM THE PERMUTATION ITSELF.
+             *
+             * r1 is slot -> channel with the animated channels first, so the
+             * run ends at the first descent. Counting it beats deriving it
+             * from r1.count - r4.count, which disagrees with the measured
+             * frame stride on some clips and not others - and a count that is
+             * right three times out of four is the most dangerous kind. */
+            uint32_t run = 0;
+            const bf6_anim_region& idx = r->regions[1];
+            if (idx.count >= 2 &&
+                (size_t)idx.offset + (size_t)idx.count * 2 <= (size_t)r->size) {
+                uint16_t prev = 0; std::memcpy(&prev, r->data + idx.offset, 2);
+                run = 1;
+                for (uint32_t k = 1; k < idx.count; k++) {
+                    uint16_t v; std::memcpy(&v, r->data + idx.offset + (size_t)k * 2, 2);
+                    if (v < prev) break;
+                    prev = v; ++run;
+                }
+            }
+            std::printf("      permutation: animated run %u, r1.count %u, const %u, "
+                        "r1-const %u, r1-1-const %u\n",
+                        run, r->regions[1].count, r->regions[4].count,
+                        r->regions[1].count - r->regions[4].count,
+                        r->regions[1].count - 1 - r->regions[4].count);
             const uint32_t A = r->regions[1].count - r->regions[4].count;
             if (A >= 2 && g.count > A * 2) {
                 auto rec = [&](uint32_t k, int lane) {
@@ -303,7 +327,41 @@ void census(bf6_ctx* c, const std::vector<std::string>& names)
             else std::snprintf(ratio, sizeof(ratio), "%.2f", (double)data / (double)anim);
         }
         std::string leaf = n.substr(n.find_last_of('/') + 1);
-        std::printf("%-62s %5u %5u %6ld %8u %7s\n", leaf.c_str(), chan, konst, anim, data, ratio);
+        /* THE MEASURED STRIDE against the permutation's run, over the whole
+         * population. One clip agreeing is a coincidence; a column of
+         * run-minus-one with a handful of run is a rule with an exception
+         * worth naming. */
+        char strideCol[48] = "-";
+        if (data > 8 && anim >= 2) {
+            auto rec = [&](uint32_t k, int lane) {
+                float v; std::memcpy(&v, r->data + r->regions[3].offset
+                                     + ((size_t)k * 4 + lane) * 4, 4);
+                return (double)v;
+            };
+            /* CHEAP ON PURPOSE. Scanning every stride over 200 records for
+             * every clip in the tree does not finish; 40 records is plenty to
+             * separate "same bone, next frame" from "different bone", and the
+             * search only has to cover strides near the run. */
+            auto meandiff = [&](uint32_t stride) {
+                double acc = 0.0; uint32_t m = 0;
+                for (uint32_t k = 0; k + stride < data && m < 40; k++, m++)
+                    for (int l = 0; l < 4; l++) acc += std::fabs(rec(k, l) - rec(k + stride, l));
+                return m ? acc / (double)(m * 4) : 1e30;
+            };
+            double best = 1e30; uint32_t best_s = 0;
+            const uint32_t lo = anim > 6 ? (uint32_t)anim - 5u : 2u;
+            const uint32_t hi_raw = (uint32_t)anim + 5u;
+            const uint32_t cap = hi_raw < data / 2 ? hi_raw : data / 2;
+            for (uint32_t s = lo; s <= cap; s++) {
+                const double d = meandiff(s);
+                if (d < best) { best = d; best_s = s; }
+            }
+            const long delta = (long)anim - (long)best_s;
+            std::snprintf(strideCol, sizeof(strideCol), "%u %s run%+ld",
+                          best_s, data % best_s == 0 ? "exact" : "RAGGED", -delta);
+        }
+        std::printf("%-52s %5u %5u %6ld %8u %8s  %s\n",
+                    leaf.c_str(), chan, konst, anim, data, ratio, strideCol);
         bf6_free(c, r);
     }
     std::printf("\n%d of %d RAW clip(s) divide exactly\n", fits, total);

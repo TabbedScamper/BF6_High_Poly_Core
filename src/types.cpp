@@ -390,6 +390,35 @@ ResolvedType TypeDb::resolve(uint64_t type_va) const
 
     if (out.te == 0x04)
     {
+        /* THE ELEMENT TYPE IS AT +48, PRIMITIVES INCLUDED.
+         *
+         * The slot search below only accepts struct/class/string/enum/guid/
+         * resref targets, so an array of u8, bool, i16, u16, u64 or f32 found
+         * no element, fell back to a 4-byte stride in Ebx::read_array, and read
+         * four times past its own end. A ContextDatabase's per-group key counts
+         * (u8[10]) came back as ten words with the group's own hash inside them.
+         *
+         * Measured over the whole schema (array_elem_slot_probe, 815 distinct
+         * array types): wherever the search succeeds its answer is slot 48,
+         * 798 of 798 with none disagreeing; of the 17 it misses, 10 resolve at
+         * slot 48 and are exactly the shared primitive array types, and 7 hold
+         * nothing there and keep the search below. So slot 48 is taken first
+         * whenever it resolves to ANY type. */
+        if (fits(data_, (size_t)od + 48, 8))
+        {
+            const uint64_t cand = rd<uint64_t>(data_, (size_t)od + 48);
+            const int64_t o2 = cand > image_base_ ? offset_of(cand) : -1;
+            if (o2 >= 0 && fits(data_, (size_t)o2, 8))
+            {
+                const uint64_t tido2 = rd<uint64_t>(data_, (size_t)o2);
+                const int64_t od2 = tido2 > image_base_ ? offset_of(tido2) : -1;
+                if (od2 >= 0 && fits(data_, (size_t)od2, 24))
+                {
+                    const uint8_t te2 = (uint8_t)((rd<uint16_t>(data_, (size_t)od2 + 4) >> 5) & 0x1F);
+                    if (te2 != 0) { out.elem_va = cand; return out; }
+                }
+            }
+        }
         // Array: the element type pointer. Its offset varies for anonymous
         // arrays, so try the known slots and take the first that dereferences
         // to a plausible TypeInfoData.
@@ -406,6 +435,19 @@ ResolvedType TypeDb::resolve(uint64_t type_va) const
             }
         }
     }
+    return out;
+}
+
+std::vector<uint64_t> TypeDb::debug_typeinfo_qwords(uint64_t type_va, int n) const
+{
+    std::vector<uint64_t> out;
+    const int64_t o = offset_of(type_va);
+    if (o < 0 || !fits(data_, (size_t)o, 8)) return out;
+    const uint64_t tido = rd<uint64_t>(data_, (size_t)o);
+    const int64_t od = offset_of(tido);
+    if (od < 0) return out;
+    for (int k = 0; k < n && fits(data_, (size_t)od + (size_t)k * 8, 8); ++k)
+        out.push_back(rd<uint64_t>(data_, (size_t)od + (size_t)k * 8));
     return out;
 }
 

@@ -96,6 +96,10 @@ public:
     // A field's type_va -> what that type is.
     ResolvedType resolve(uint64_t type_va) const;
 
+    // Research: the first `n` qwords of the TypeInfoData a type_va points at,
+    // so a record whose layout resolve() does not know can be read directly.
+    std::vector<uint64_t> debug_typeinfo_qwords(uint64_t type_va, int n) const;
+
     // ---- diagnostics, all of which exist because a silent failure here looks
     // like an empty map rather than an error ----
     bool     typeinfo_found() const { return ti_found_; }

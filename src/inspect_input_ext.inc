@@ -89,6 +89,58 @@ int bf6_inspect_input_params_read(bf6_ctx* c, bf6_inspect_input_params* p, char*
     return 1;
 }
 
+/* --------------------------------------- which weapon the graph sees --- */
+
+int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
+                    int32_t* weapon_type, char* err, int err_len)
+{
+    auto fail = [&](const std::string& why) {
+        if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str());
+        return 0;
+    };
+    if (specific_weapon) *specific_weapon = -1;
+    if (weapon_type) *weapon_type = -1;          /* not established; see the header */
+    if (!c || !item) return fail("missing argument");
+    /* The item's leaf names the blueprint: <leaf>_wb, the same rule
+     * bf6_base_weapon_stats uses. */
+    std::string bare = item;
+    const size_t slash = bare.find_last_of('/');
+    if (slash != std::string::npos) bare = bare.substr(slash + 1);
+    const std::string want = bare + "_wb";
+    const int n = bf6_list_ebx(c, want.c_str(), nullptr, 0);
+    if (n <= 0) return fail("no weapon blueprint named " + want);
+    std::vector<bf6_asset> rows((size_t)n);
+    const int got = bf6_list_ebx(c, want.c_str(), rows.data(), n);
+    std::string wb;
+    for (int i = 0; i < got; ++i) {
+        const std::string p = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+        const size_t s = p.find_last_of('/');
+        if ((s == std::string::npos ? p : p.substr(s + 1)) == want && (wb.empty() || p.size() < wb.size())) wb = p;
+    }
+    if (wb.empty()) return fail("no weapon blueprint named " + want);
+    bf6ant::Graph g(c);
+    const bf6ant::Obj* root = g.root(wb);
+    if (!root) return fail("weapon blueprint unreadable: " + wb);
+    /* SoldierWeaponBlueprint 0x9e113e77 -> SoldierWeaponData; if that link is
+     * not there, the data instance is found by type rather than assumed. */
+    static const char* kSoldierWeaponData = "4c01cee3-9af9-0b6e-04d7-e0c7c562a393";
+    const bf6ant::Obj* data = g.resolve(root->f(0x9e113e77u), root);
+    if (!data || data->type != kSoldierWeaponData) {
+        data = nullptr;
+        for (int i = 0; i < 4096; ++i) {
+            bf6::EbxValue ref; ref.kind = bf6::EbxValue::Kind::InstanceRef; ref.instance = i;
+            const bf6ant::Obj* o = g.resolve(&ref, root);
+            if (!o) break;
+            if (o->type == kSoldierWeaponData) { data = o; break; }
+        }
+    }
+    if (!data) return fail("no SoldierWeaponData in " + wb);
+    const bf6::EbxValue* v = data->f(0xe287c7f3u);
+    if (!v) return fail("this weapon's data carries no specific-weapon value");
+    if (specific_weapon) *specific_weapon = (int32_t)ii_iv(v);
+    return 1;
+}
+
 /* ------------------------------------------------ the roll's phase ---- */
 
 namespace {

@@ -75,10 +75,16 @@ int main(int argc, char** argv)
     bf6_inspect_input_params ip{};
     if (!bf6_inspect_input_params_read(c, &ip, err, (int)sizeof(err))) { std::printf("drag params: %s\n", err); bad("drag params"); }
 
+    /* Both guns get the same run: the M4A1 (rifle) and the M18 (pistol), whose
+     * enumerators in wep.specificweapon.enum are 46 and 54. The state machine
+     * is the same for every weapon; what changes is every lookup under it. */
+    for (const auto& gun : { std::pair<const char*, std::pair<int, int>>{"M4A1", {46, 0}},
+                             std::pair<const char*, std::pair<int, int>>{"M18", {54, 5}} }) {
+    std::printf("== %s (specificweapon %d, type %d)\n", gun.first, gun.second.first, gun.second.second);
     bf6_ant_runtime* rt = bf6_ant_runtime_create(c, kRoot, kRig, kSke, err, (int)sizeof(err));
     if (!rt) { std::printf("create: %s\n", err); bf6_close(c); return 1; }
-    bf6_ant_runtime_set_int(rt, kWeapon, 46);
-    bf6_ant_runtime_set_int(rt, kType, 0);
+    bf6_ant_runtime_set_int(rt, kWeapon, gun.second.first);
+    bf6_ant_runtime_set_int(rt, kType, gun.second.second);
     const int bones = bf6_ant_runtime_pose(rt, nullptr, 0);
     std::vector<float> pose((size_t)bones * 12), first;
 
@@ -117,10 +123,17 @@ int main(int argc, char** argv)
     for (int i = 0; i < 90; ++i) step(0.f, false);     /* enter plays out, hands to r */
     if (!reached("1p.inspect.r.node")) bad("enter did not hand off to the right-side node");
     for (int i = 0; i < 120; ++i) step(-0.02f, false); /* drag left */
-    if (!reached("1p.inspect.rtol.node")) bad("left drag did not start the r->l roll");
-    if (!reached("1p.inspect.l.node")) bad("the r->l roll did not reach the left-side node");
+    /* A PISTOL DOES NOT ROLL TO THE LEFT SIDE, and that is the graph's own
+     * rule, not this test's: the r node watches an EnumerationEnumeratorPair on
+     * fb.weapontype and the r -> rtol transition needs it FALSE. The sweep
+     * below asks the graph which type it names, and only type 5 (Pistol)
+     * blocks the roll. */
+    const bool rolls = gun.second.second != 5;
+    if (reached("1p.inspect.rtol.node") != rolls)
+        bad(rolls ? "left drag did not start the r->l roll" : "a pistol rolled to the left side");
+    if (rolls && !reached("1p.inspect.l.node")) bad("the r->l roll did not reach the left-side node");
     for (int i = 0; i < 120; ++i) step(0.02f, false);  /* drag right */
-    if (!reached("1p.inspect.ltor.node")) bad("right drag did not start the l->r roll");
+    if (rolls && !reached("1p.inspect.ltor.node")) bad("right drag did not start the l->r roll");
     step(0.f, true);                                   /* second press */
     for (int i = 0; i < 200; ++i) step(0.f, false);
     if (!reached("1p.exit.inspect.r.node") && !reached("1p.exit.inspect.l.node")) bad("second press did not exit");
@@ -135,6 +148,51 @@ int main(int argc, char** argv)
     bf6_ant_runtime_notes(rt, notes.data(), (int)notes.size());
     std::printf("notes:\n%s", notes.data());
     bf6_free(c, rt);
+    }
+
+    {
+        /* WHICH WEAPON TYPES ROLL TO THE LEFT SIDE. The r node's third watched
+         * condition is an EnumerationEnumeratorPair on fb.weapontype, and the
+         * r -> rtol transition requires it FALSE, so one type cannot roll. This
+         * asks the graph which, rather than assuming it. */
+        std::printf("left-side roll by weapon type:");
+        for (int t = 0; t <= 9; ++t) {
+            bf6_ant_runtime* r = bf6_ant_runtime_create(c, kRoot, kRig, kSke, err, (int)sizeof(err));
+            if (!r) break;
+            bf6_ant_runtime_set_int(r, kWeapon, 46);
+            bf6_ant_runtime_set_int(r, kType, t);
+            bf6_inspect_input_state s{};
+            bf6_inspect_aim_state a{};
+            bool rolled = false;
+            for (int i = 0; i < 220; ++i) {
+                bf6_ant_runtime_set_bool(r, kToggle, i == 0 ? 1 : 0);
+                const float y = bf6_inspect_input_step(&ip, &s, 1, i < 90 ? 0.f : -0.02f, 1);
+                bf6_ant_runtime_set_float(r, kYaw, y);
+                bf6_ant_runtime_set_float(r, kAim, bf6_inspect_aim_step(&ap, &a, y, 1.f));
+                bf6_ant_runtime_update(r, 1.f / 60.f);
+                char nb[512] = {0};
+                bf6_ant_runtime_node(r, nb, (int)sizeof(nb));
+                if (std::string(nb).find("rtol") != std::string::npos) { rolled = true; break; }
+            }
+            std::printf(" %d:%s", t, rolled ? "yes" : "NO");
+            if (rolled == (t == 5)) bad("the type that blocks the left-side roll is not Pistol alone");
+            bf6_free(c, r);
+        }
+        std::printf("\n");
+    }
+
+    {
+        /* The ids come out of the weapon's own data, not out of this test. */
+        int32_t sw = -1, wt = -1;
+        if (!bf6_inspect_ids(c, "common/hardware/weapons/carbine/m4a1", &sw, &wt, err, (int)sizeof(err)))
+            { std::printf("  ids: %s\n", err); bad("the M4A1's animation ids did not read"); }
+        std::printf("m4a1 ids: specificweapon %d, weapontype %d\n", sw, wt);
+        if (sw != 46) bad("the M4A1's specific-weapon value is not its enumerator (46)");
+        int32_t sw2 = -1;
+        if (bf6_inspect_ids(c, "m18", &sw2, nullptr, err, (int)sizeof(err)) && sw2 != 54)
+            bad("the M18's specific-weapon value is not its enumerator (54)");
+        std::printf("m18 ids: specificweapon %d\n", sw2);
+    }
     std::printf("%s\n", fails ? "FAILED" : "PASS");
     bf6_close(c);
     return fails ? 1 : 0;

@@ -5214,6 +5214,26 @@ BF6_API int   bf6_inspect_aim_params_read(bf6_ctx*, bf6_inspect_aim_params* out,
 BF6_API float bf6_inspect_aim_step(const bf6_inspect_aim_params*, bf6_inspect_aim_state*,
                                    float yaw, float dt_ticks);
 
+/* WHICH WEAPON THE ANIMATION GRAPH THINKS IT IS. Every per-weapon lookup in
+ * ANT (inspect, reloads, holds) keys on two game states, and this reads them
+ * for a weapon item ("common/hardware/weapons/carbine/m4a1", or just its leaf):
+ *
+ *   *specific_weapon  fb.wep.specificweapon: SoldierWeaponData 0xe287c7f3, the
+ *                     Int32 that equals the weapon's own enumerator in
+ *                     wep.specificweapon.enum (M4A1 46). Measured against the
+ *                     weapon's animation WeaponAsset enumerator pair on 63 of
+ *                     the 64 shipped weapons; the KSG carries 0 there, which is
+ *                     a data anomaly, not a rule.
+ *   *weapon_type      fb.weapontype: NOT ESTABLISHED. No field of the weapon's
+ *                     data carries it and no weapon asset imports the
+ *                     enumeration, so it is written by code from something
+ *                     else. -1 is returned and the caller must decide what to
+ *                     do about it rather than be handed a guess.
+ *
+ * Returns 1 when the specific weapon was read, 0 with a reason in `err`. */
+BF6_API int bf6_inspect_ids(bf6_ctx*, const char* item, int32_t* specific_weapon,
+                            int32_t* weapon_type, char* err, int err_len);
+
 /* ------------------------------------------------------- renderbones ----- */
 /* THE PROCEDURAL BONES ABOVE THE RIG.
  *

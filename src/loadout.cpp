@@ -291,6 +291,29 @@ bool any_bound(const bf6_mesh* m)
  * material the reader bound, serialized the same way for a weapon and a
  * soldier. */
 
+/* THE BIND RIG, for an engine that means to pose the mesh itself.
+ *
+ * `local` is the bind pose relative to the parent - a rest pose - and `inverse`
+ * is the bind model pose inverted, which is what a skin needs.
+ *
+ * `posed` is the SAME parent-relative slot with the sampled idle frame written
+ * into it, which is what a skeleton's animatable pose is. It is here so that a
+ * skinned soldier can be shown standing the way the static one already stands;
+ * without it an engine can only draw the character in its bind stance, and
+ * "looks wrong" would be indistinguishable from "skinned wrong".
+ *
+ * The POSED MODEL transforms are still deliberately absent. Those are the
+ * flattened product of the whole chain, and an engine that has `local`,
+ * `parent` and `posed` recomputes them itself; shipping them would invite
+ * someone to use a composed frame as though it were a rest pose. */
+struct BindBone {
+    std::string name;
+    int32_t parent = -1;
+    float local[12]{};
+    float inverse[12]{};
+    float posed[12]{};
+};
+
 struct Sec {
     std::string mesh, bundle;
     uint64_t state_key = 0;
@@ -303,6 +326,29 @@ struct Sec {
     float roughness = 0;
     std::vector<std::pair<int, int>> textures;          /* slot, texture id */
     std::vector<std::pair<uint32_t, int>> shader_textures; /* name32, texture id */
+    /* PER-VERTEX SKIN BINDING, kept only when the caller asks to skin the
+     * soldier itself. `sbones` is already RESOLVED through the composed
+     * skeleton, so a consumer never repeats the 0x8000 renderbone rule - that
+     * rule is exactly the sort of thing two engines get subtly different.
+     * When these are present `pos`/`nrm` are the BIND pose, not the posed
+     * mesh, because a posed vertex cannot be re-posed. */
+    int influences = 0;
+    std::vector<uint16_t> sbones;
+    std::vector<float>    sweights;
+    /* The bone this section hangs off rigidly, or -1. Only the weapon uses it,
+     * and only in skinned mode: the rifle has no skin binding of its own, so
+     * without a bone to follow it would stay where one sampled frame put it
+     * while the soldier holding it moved. */
+    int attach_bone = -1;
+    /* RENDERBONES ARE PER MESH, not per character.
+     *
+     * The base rig is shared - 291 bones on the soldier - but each mesh appends
+     * its own renderbones on top, so a skin index at or above the base count
+     * means "renderbone k OF THIS MESH". Exporting one composed rig for the
+     * whole soldier looked right and was not: the test found indices up to 297
+     * against a 291-bone rig. These are the appended ones for this section's
+     * mesh, and they are few - under ten. */
+    std::vector<BindBone> rbones;
 };
 
 /* Row-vector 4x3 affine matrices, the convention bf6_bone and the Unreal
@@ -393,7 +439,7 @@ void transform_sections(std::vector<Sec>& secs, const M43& t)
  * appended renderbone; a weapon skeleton has none. False with `error` set. */
 bool read_sections(bf6_ctx* c, const std::string& mesh, const std::string& bundle, const std::string& variation,
                    const std::vector<M43>* skin, int rig_bones, std::vector<Sec>& out,
-                   std::string& error)
+                   std::string& error, bool want_skin = false)
 {
     const char* var = variation.empty() ? nullptr : variation.c_str();
     bf6_mesh* m = bf6_read_armory_mesh_scoped(c, mesh.c_str(), 0, bundle.empty() ? nullptr : bundle.c_str(), var);
@@ -421,6 +467,29 @@ bool read_sections(bf6_ctx* c, const std::string& mesh, const std::string& bundl
         if (s.uv0) o.uv.assign(s.uv0, s.uv0 + (size_t)s.vertex_count * 2);
         o.idx.assign(s.indices, s.indices + (size_t)s.index_count);
         if (s.colors) o.colors.assign(s.colors, s.colors + (size_t)s.vertex_count);
+        /* THE SKIN BINDING, when the caller means to pose the mesh itself.
+         *
+         * Captured BEFORE the CPU skinning below and resolved here, so no
+         * consumer has to repeat the 0x8000 renderbone rule - a rule two
+         * engines would eventually implement differently. Passing `skin` as
+         * null is what leaves `pos`/`nrm` at the BIND pose, which is the only
+         * pose a skinned mesh can be re-posed from.
+         *
+         * `bf6_skin_index_to_bone` is not used here because the caller has
+         * already handed us `rig_bones`, which is the same resolution without
+         * needing the skeleton handle to still be alive. */
+        if (want_skin && m->mesh_type == 1 && s.skin_bones && s.skin_weights
+            && s.skin_influences > 0) {
+            const size_t lanes = (size_t)s.vertex_count * (size_t)s.skin_influences;
+            o.influences = s.skin_influences;
+            o.sbones.resize(lanes);
+            o.sweights.assign(s.skin_weights, s.skin_weights + lanes);
+            for (size_t k = 0; k < lanes; ++k) {
+                const uint16_t raw = s.skin_bones[k];
+                const int bone = (raw & 0x8000) ? rig_bones + ((raw & 0x7fff) >> 1) : raw;
+                o.sbones[k] = (uint16_t)(bone < 0 ? 0 : bone);
+            }
+        }
         if (skin && !skin->empty() && m->mesh_type == 1 && s.skin_bones && s.skin_weights) {
             const int bones = (int)skin->size();
             for (int v = 0; v < s.vertex_count; ++v) {
@@ -522,6 +591,60 @@ void serialize(bf6_ctx* c, const std::vector<Sec>& secs, std::string& sections_j
             body.resize(at + s.colors.size());
             std::memcpy(&body[at], s.colors.data(), s.colors.size() * sizeof(uint32_t));
         }
+        /* THE SKIN BINDING, present only in skinned mode. `skin_bones` rides in
+         * the float body as exact uint32 bit patterns, the same way indices and
+         * colours already do, so the body stays one float array and a consumer
+         * that ignores these fields is unaffected. The ids are ALREADY resolved
+         * against the composed rig - no consumer repeats the 0x8000 rule. */
+        std::snprintf(buf, sizeof(buf), ",\"influences\":%d,\"attach_bone\":%d",
+                      s.influences, s.attach_bone);
+        sections_json += buf;
+        if (s.influences > 0 && !s.sbones.empty()) {
+            std::snprintf(buf, sizeof(buf), ",\"skin_bones\":%zu", body.size());
+            sections_json += buf;
+            at = body.size();
+            body.resize(at + s.sbones.size());
+            for (size_t k = 0; k < s.sbones.size(); ++k) {
+                const uint32_t v = s.sbones[k];
+                std::memcpy(&body[at + k], &v, sizeof(uint32_t));
+            }
+            std::snprintf(buf, sizeof(buf), ",\"skin_weights\":%zu", body.size());
+            sections_json += buf;
+            body.insert(body.end(), s.sweights.begin(), s.sweights.end());
+        } else {
+            sections_json += ",\"skin_bones\":-1,\"skin_weights\":-1";
+        }
+        /* THIS MESH'S OWN APPENDED RENDERBONES. A skin index at or above
+         * `rig_bones` addresses this list, so it belongs to the SECTION and not
+         * to the record - exporting one composed rig for the whole soldier is
+         * what produced indices past the end of it. */
+        if (!s.rbones.empty()) {
+            sections_json += ",\"renderbones\":[";
+            for (size_t i = 0; i < s.rbones.size(); ++i) {
+                const BindBone& b = s.rbones[i];
+                if (i) sections_json += ',';
+                sections_json += "{\"name\":";
+                json_str(sections_json, b.name);
+                std::snprintf(buf, sizeof(buf), ",\"parent\":%d,\"local\":[", b.parent);
+                sections_json += buf;
+                for (int k = 0; k < 12; ++k) {
+                    std::snprintf(buf, sizeof(buf), "%s%.9g", k ? "," : "", b.local[k]);
+                    sections_json += buf;
+                }
+                sections_json += "],\"inverse\":[";
+                for (int k = 0; k < 12; ++k) {
+                    std::snprintf(buf, sizeof(buf), "%s%.9g", k ? "," : "", b.inverse[k]);
+                    sections_json += buf;
+                }
+                sections_json += "],\"posed\":[";
+                for (int k = 0; k < 12; ++k) {
+                    std::snprintf(buf, sizeof(buf), "%s%.9g", k ? "," : "", b.posed[k]);
+                    sections_json += buf;
+                }
+                sections_json += "]}";
+            }
+            sections_json += ']';
+        }
         if (s.has_material) {
             std::snprintf(buf, sizeof(buf),
                           ",\"alpha_test\":%d,\"translucent\":%d,\"alpha_from_albedo\":%d,\"nsm\":%d,"
@@ -550,12 +673,15 @@ void serialize(bf6_ctx* c, const std::vector<Sec>& secs, std::string& sections_j
     }
 }
 
-/* The 'BLWP' record around a JSON head and a float body. */
-int64_t record(const std::string& head, const std::vector<float>& body, uint8_t** out)
+/* The 'BLWP' record around a JSON head and a float body. `magic` names the
+ * record kind; the layout is the same for all of them, so a reader that knows
+ * one knows them all. */
+int64_t record(const std::string& head, const std::vector<float>& body, uint8_t** out,
+               uint32_t magic = 0x50574C42u /* BLWP */)
 {
     std::string j = head;
     while ((j.size() + 12) % 4) j.push_back(' ');
-    const uint32_t hdr[3] = {0x50574C42u /* BLWP */, 1u, (uint32_t)j.size()};
+    const uint32_t hdr[3] = {magic, 1u, (uint32_t)j.size()};
     const size_t total = 12 + j.size() + body.size() * sizeof(float);
     *out = (uint8_t*)std::malloc(total);
     if (!*out) return -1;
@@ -735,6 +861,23 @@ std::string replace_all(std::string s, const std::string& from, const std::strin
 
 const char* const kRig = "animations/glacier/global/rigging/soldier_3p.rig";
 const char* const kSkeleton = "common/characters/_soldier/ske_soldier_3p";
+/* THE FIRST-PERSON PAIR. Not interchangeable with the third-person one: both
+ * resolve the same NUMBER of channels for a 1P clip (129 either way), and 119
+ * of those 129 land on a different bone. Pairing a 1P clip with the 3P rig
+ * therefore produces a fully-bound and entirely wrong pose, which is why the
+ * two travel together everywhere below rather than being picked separately. */
+const char* const kRig1p = "animations/glacier/global/rigging/soldier_1p.rig";
+const char* const kSkeleton1p = "common/characters/_soldier/ske_soldier_1p";
+
+/* The neutral standing hold a first-person view rests in.
+ *
+ * NOT p_1p_rifle_stand_idle_01, which is the obvious candidate and is a
+ * one-frame clip authored at 60 fps - exactly the right shape - but which
+ * bf6_anim_bindings reports unavailable, so its payload is not readable the way
+ * ordinary clips are. This is a turn-in-place transition, and its FIRST FRAME
+ * is the idle it turns out of: the same rest pose, reachable. */
+const char* const k1pStandClip =
+    "animations/glacier/assets/1p/common/rifle/loco/t_1p_rifle_stand_idle_turn_inplace_left_01";
 
 struct Pose {
     std::vector<bf6_anim_binding> bindings;
@@ -744,22 +887,145 @@ struct Pose {
 
 /* The first authored sample of the role's front-end loadout idle: a static
  * editor stand-in needs one pose, not the whole clip. */
-bool pose_samples(bf6_ctx* c, const std::string& role, Pose& out, std::string& error)
+/* WHICH FRONT-END IDLE THE MOUNT ACTUALLY CARRIES for this role, with its
+ * bindings read. Shared by the single-frame pose and the whole-clip export so
+ * the two can never disagree about which clip a role means. */
+std::string resolve_idle_clip(bf6_ctx* c, const std::string& role,
+                              std::vector<bf6_anim_binding>& bindings,
+                              bf6_anim_binding_stats& stats, std::string& error)
 {
-    const std::string clip_path = "animations/glacier/assets/frontend/mainmenu/loadout/ui_frontend_standing_idle_" + role + "_01";
-    const int count = bf6_anim_bindings(c, clip_path.c_str(), kRig, kSkeleton, nullptr, 0, &out.stats);
-    if (count < 1 || count > 4096) { error = "The selected soldier pose has no readable animation binding."; return false; }
-    out.bindings.assign((size_t)count, bf6_anim_binding{});
-    if (bf6_anim_bindings(c, clip_path.c_str(), kRig, kSkeleton, out.bindings.data(), count, &out.stats) != count) {
-        error = "The selected soldier pose has no readable animation binding.";
-        return false;
+    /* _02 IS THE LOADOUT TAKE. EVERY ROLE, NO EXCEPTIONS.
+     *
+     * This used to take the first suffix that resolved, trying _01 first. The
+     * front-end mount carries assault's _01 and not the other three, so assault
+     * played the _01 take and the other three played _02 - a different
+     * performance, of a different length (1139 frames against 565, 701 and
+     * 701). Three of four soldiers stood differently from the fourth, and
+     * nothing reported an error because each had found *a* clip.
+     *
+     * The inconsistency was real; preferring _01 was the wrong repair. The
+     * menu viewer traced the actual controller chain rather than guessing at
+     * filenames: the installed Class.Loadout.Node selects classloadout.cbd,
+     * whose Collection.SoldierClass.EnumGS outcomes are the four
+     * ui.loadout.idlecl.<class>.rc assets, and each of those RCs has the
+     * matching idle[_cl]_<class>_02 clip as its repeated unit-weight base
+     * entry. The similarly named _01 clips belong to a different (detail)
+     * surface and are referenced by none of these controllers. So _02 is what
+     * the loadout screen plays, and assault was the odd one out.
+     *
+     * A happy consequence: every _02 is already in the front-end mount, so
+     * nothing has to be widened to find them.
+     *
+     * The idlebreak01..04 families are optional HALF-weight interruptions on
+     * the same controllers, not alternatives to this base entry - they are the
+     * next thing to add, not a fallback.
+     *
+     * The "cl_" spelling is the class-loadout surface's own naming; the plain
+     * one is the loadout screen's, which is what a spawner preview stands for,
+     * so it is tried first. _01 remains last as a genuine last resort. */
+    static const char* const kVariants[3] = { "_02", "_01", "_03" };
+    const std::string base = "animations/glacier/assets/frontend/mainmenu/loadout/"
+                             "ui_frontend_standing_idle_";
+    const std::string stems[2] = { role, "cl_" + role };
+    std::string clip_path;
+    int count = 0;
+    for (const std::string& stem : stems) {
+        for (const char* suffix : kVariants) {
+            const std::string candidate = base + stem + suffix;
+            const int n = bf6_anim_bindings(c, candidate.c_str(), kRig, kSkeleton,
+                                            nullptr, 0, &stats);
+            if (n >= 1 && n <= 4096) { clip_path = candidate; count = n; break; }
+        }
+        if (count) break;
     }
+    if (count < 1 || count > 4096) {
+        error = "The selected soldier pose has no readable animation binding.";
+        return std::string();
+    }
+    bindings.assign((size_t)count, bf6_anim_binding{});
+    if (bf6_anim_bindings(c, clip_path.c_str(), kRig, kSkeleton,
+                          bindings.data(), count, &stats) != count) {
+        error = "The selected soldier pose has no readable animation binding.";
+        return std::string();
+    }
+    return clip_path;
+}
+
+bool pose_samples(bf6_ctx* c, const std::string& role, Pose& out, std::string& error,
+                  bool first_person = false)
+{
+    /* WHICH VARIANT THE ARCHIVE ACTUALLY CARRIES, not a hardcoded suffix.
+     *
+     * This asked for "_01" and nothing else, which made Engineer, Support and
+     * Recon fail with "no readable animation binding" while Assault worked.
+     * Nothing is wrong with those clips or with the decode: under a FULL mount
+     * all four resolve identically, 505 bindings and 1,139 keys each. The
+     * front-end mount this preview uses simply carries a different variant of
+     * each -
+     *
+     *     ui_frontend_standing_idle_assault_01    present
+     *     ui_frontend_standing_idle_engineer_02   present, and no _01
+     *     ui_frontend_standing_idle_support_02    present, and no _01
+     *     ui_frontend_standing_idle_recon_02      present, and no _01
+     *
+     * - so one fixed suffix could only ever satisfy one role. A static editor
+     * stand-in wants ANY authored idle for the role, so take the first that
+     * resolves and stop caring which number it is. The "cl_" spellings are the
+     * same clips under the archive's other naming, tried last so the plain ones
+     * win where both exist. */
+    std::string clip_path;
+    if (first_person) {
+        /* ONE CLIP FOR EVERY ROLE. A first-person view is a pair of arms and a
+         * weapon, and the arms do not know which class is wearing them - the
+         * per-role poses are a property of the third-person loadout screen. */
+        clip_path = k1pStandClip;
+        bf6_anim_binding_stats st{};
+        const int n = bf6_anim_bindings(c, clip_path.c_str(), kRig1p, kSkeleton1p, nullptr, 0, &st);
+        if (n < 1 || n > 4096) {
+            error = "The first-person hold has no readable animation binding.";
+            return false;
+        }
+        out.bindings.assign((size_t)n, bf6_anim_binding{});
+        if (bf6_anim_bindings(c, clip_path.c_str(), kRig1p, kSkeleton1p,
+                              out.bindings.data(), n, &out.stats) != n) {
+            error = "The first-person hold has no readable animation binding.";
+            return false;
+        }
+    } else {
+        clip_path = resolve_idle_clip(c, role, out.bindings, out.stats, error);
+    }
+    if (clip_path.empty()) return false;
     bf6_anim_clip* clip = bf6_anim_clip_open(c, clip_path.c_str());
     if (!clip) { error = "The selected soldier pose is unavailable."; return false; }
-    bool ok = clip->channel_count == count && clip->key_time_count >= 1;
+    /* BINDINGS AND CHANNELS ARE NOT THE SAME COUNT, and requiring that they be
+     * was a rule inferred from one clip family. Every front-end 3P idle has 505
+     * of each, which looked like an invariant; the first-person stand clip has
+     * 129 bindings against 128 channels and was refused outright with "the
+     * selected soldier pose is unavailable".
+     *
+     * A binding names a channel; nothing says every binding finds one. So size
+     * the sample buffer by the CLIP's channel count, and drop the bindings that
+     * point outside it - then the completeness check below is still exact,
+     * because the stats are rebuilt from what actually survived. */
+    bool ok = clip->channel_count >= 1 && clip->key_time_count >= 1;
     if (ok) {
-        out.channels.assign((size_t)count * 4, 0.f);
+        out.channels.assign((size_t)clip->channel_count * 4, 0.f);
         ok = bf6_anim_clip_sample(c, clip, 0, out.channels.data(), nullptr) != 0;
+    }
+    if (ok) {
+        std::vector<bf6_anim_binding> kept;
+        kept.reserve(out.bindings.size());
+        int quats = 0, vecs = 0;
+        for (const bf6_anim_binding& b : out.bindings) {
+            if (b.channel < 0 || (size_t)b.channel * 4 + 3 >= out.channels.size()) continue;
+            if (b.component == BF6_ANIM_DOF_QUATERNION) ++quats;
+            else if (b.component == BF6_ANIM_DOF_VECTOR3) ++vecs;
+            kept.push_back(b);
+        }
+        out.bindings.swap(kept);
+        out.stats.quaternion_bones = quats;
+        out.stats.vector_bones = vecs;
+        ok = !out.bindings.empty();
     }
     bf6_free(c, clip);
     if (!ok) error = "The selected soldier pose is unavailable.";
@@ -767,9 +1033,12 @@ bool pose_samples(bf6_ctx* c, const std::string& role, Pose& out, std::string& e
 }
 
 /* The posed skinning palette for one character mesh, the weapon frame in the
- * hand, and the point between the feet. */
+ * hand, and the point between the feet. `bind` is filled when asked for. */
 bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& mesh, const Pose& pose,
-              std::vector<M43>& skin, int& rig_bones, M43& weapon, float foot[3], std::string& error)
+              std::vector<M43>& skin, int& rig_bones, M43& weapon, float foot[3], std::string& error,
+              std::vector<BindBone>* bind = nullptr, M43* weapon_local = nullptr,
+              int* weapon_bone = nullptr, float* eye_y = nullptr,
+              bool first_person = false, float* view_origin = nullptr)
 {
     std::string renderbones;
     /* Prefer the mesh asset's own Renderbones import; some outfits reuse another rig. */
@@ -781,12 +1050,30 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
         if (rows[i].field_hash == 0xA38BC860 && rows[i].path[0]) renderbones = rows[i].path;
     if (ends(renderbones, ".ebx")) renderbones.resize(renderbones.size() - 4);
     if (renderbones.empty() && ebx.count(mesh_asset + "_renderbonesdata")) renderbones = mesh_asset + "_renderbonesdata";
-    bf6_skeleton* s = bf6_skeleton_compose(c, kSkeleton, renderbones.empty() ? nullptr : renderbones.c_str());
+    /* The skeleton must match the rig the pose was bound against, or every
+     * channel lands on a plausible wrong bone. */
+    bf6_skeleton* s = bf6_skeleton_compose(c, first_person ? kSkeleton1p : kSkeleton,
+                                           renderbones.empty() ? nullptr : renderbones.c_str());
     if (!s) { error = "The character render skeleton is unavailable."; return false; }
     bool ok = s->bone_count >= 1 && s->bone_count <= 8192;
     std::vector<M43> local, model;
     if (ok) {
         rig_bones = s->rig_bone_count;
+        if (bind) {
+            /* Read from the skeleton BEFORE the pose is applied to `local`
+             * below - after that loop `local` is the posed rest, not the bind
+             * rest, and the difference is invisible until something animates. */
+            bind->resize((size_t)s->bone_count);
+            for (int i = 0; i < s->bone_count; ++i) {
+                BindBone& b = (*bind)[(size_t)i];
+                b.name = s->bones[i].name ? s->bones[i].name : "";
+                b.parent = s->bones[i].parent;
+                for (int k = 0; k < 12; ++k) {
+                    b.local[k] = s->bones[i].local[k];
+                    b.inverse[k] = s->bones[i].inverse[k];
+                }
+            }
+        }
         local.resize((size_t)s->bone_count);
         model.resize((size_t)s->bone_count);
         skin.assign((size_t)s->bone_count, identity43());
@@ -808,8 +1095,18 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
             error = "The soldier pose did not bind completely.";
             ok = false;
         }
+        /* `local` is now the SAMPLED frame, still parent-relative. Copying it
+         * here rather than earlier is the whole point: a bone the clip did not
+         * bind keeps its bind value, so `posed` is a complete pose for every
+         * bone and a consumer never has to know which ones the clip touched. */
+        if (ok && bind)
+            for (int i = 0; i < s->bone_count; ++i)
+                for (int k = 0; k < 12; ++k)
+                    (*bind)[(size_t)i].posed[k] = local[(size_t)i].m[k];
     }
     int right_hand = -1, right_grip = -1, feet = 0;
+    float eye_l = 0.f, eye_r = 0.f, head_y = 0.f;
+    bool have_eye_l = false, have_eye_r = false, have_head = false;
     bool have_weapon = false;
     foot[0] = foot[1] = foot[2] = 0;
     for (int i = 0; ok && i < s->bone_count; ++i) {
@@ -821,6 +1118,26 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
         if (!nm) continue;
         if (std::strcmp(nm, "Wep_Align") == 0) { weapon = model[(size_t)i]; have_weapon = true; }
         if (std::strcmp(nm, "RightHand") == 0) right_hand = i;
+        /* WHERE THE SOLDIER'S EYES ARE, at the pose actually shown.
+         *
+         * NOT CameraJoint, which was the first answer and a wrong one. At bind
+         * pose it sits at 1.6938 and looks perfect; under the front-end idle it
+         * reported a 2.20 m eye, because it is a CAMERA TRACK and the menu
+         * animates it to wherever the menu camera belongs. Anatomy does not
+         * move like that, so anatomy is what gets measured: the eye joints
+         * themselves, averaged, and the head only if a rig lacks them. */
+        if (eye_y) {
+            if (std::strcmp(nm, "LeftEye") == 0) { eye_l = model[(size_t)i].m[10]; have_eye_l = true; }
+            else if (std::strcmp(nm, "RightEye") == 0) { eye_r = model[(size_t)i].m[10]; have_eye_r = true; }
+            else if (std::strcmp(nm, "Head") == 0) { head_y = model[(size_t)i].m[10]; have_head = true; }
+        }
+        /* THE VIEW POINT, for a first-person build. Here CameraJoint is exactly
+         * right and the eye joints are not: this rig has no face, and the whole
+         * point of the 1P skeleton is that its camera chain IS the view. The
+         * arms get anchored to it so an engine can parent the record straight
+         * onto its camera at identity. */
+        if (view_origin && std::strcmp(nm, "CameraJoint") == 0)
+            for (int k = 0; k < 3; ++k) view_origin[k] = model[(size_t)i].m[9 + k];
         if (std::strcmp(nm, "Wep_IK_RightHand") == 0) right_grip = i;
         if (std::strcmp(nm, "LeftFoot") == 0 || std::strcmp(nm, "RightFoot") == 0) {
             for (int k = 0; k < 3; ++k) foot[k] += model[(size_t)i].m[9 + k];
@@ -828,14 +1145,29 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
         }
     }
     if (ok && feet) for (int k = 0; k < 3; ++k) foot[k] /= (float)feet;
+    if (ok && eye_y) {
+        if (have_eye_l && have_eye_r) *eye_y = (eye_l + eye_r) * 0.5f;
+        else if (have_eye_l) *eye_y = eye_l;
+        else if (have_eye_r) *eye_y = eye_r;
+        else if (have_head) *eye_y = head_y;
+    }
     if (ok) {
         if (have_weapon && right_hand >= 0 && right_grip >= 0) {
             /* Front-end clips carry a separate weapon IK target whose offset is
              * not applied to the rendered arm: join the authored grip frame to
              * the wrist actually drawn, or every rifle floats above the hands. */
             M43 grip_inv;
-            if (inverse43(model[(size_t)right_grip], grip_inv))
+            if (inverse43(model[(size_t)right_grip], grip_inv)) {
+                /* THE GRIP IN THE HAND'S OWN FRAME, before the hand's model
+                 * pose is composed back on. An engine that animates attaches
+                 * the weapon to RightHand with exactly this as its local
+                 * transform, and the rifle then rides the hand through the
+                 * clip instead of hanging in the air where one sampled frame
+                 * happened to leave it. */
+                if (weapon_local) *weapon_local = mul(weapon, grip_inv);
+                if (weapon_bone) *weapon_bone = right_hand;
                 weapon = mul(mul(weapon, grip_inv), model[(size_t)right_hand]);
+            }
         } else {
             error = "The pose has no complete weapon-to-hand binding.";
             ok = false;
@@ -960,8 +1292,31 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
     const std::string role = field(req, "role", "assault");
     const std::string item = field(req, "item", "carbine/m4a1");
     const std::string fits = field(req, "fits", "");
+    /* SKINNED MODE, off by default so every existing caller is unaffected.
+     *
+     * With "skinned":"1" the record carries the BIND-pose vertices, the
+     * per-vertex skin binding and the composed rig, and the engine poses the
+     * mesh itself - which is what lets it play an animation rather than stand
+     * in one sampled frame. Without it the behaviour is exactly as before: the
+     * core skins at the sampled pose and hands back a static mesh. */
+    const bool want_skin = field(req, "skinned", "") == "1";
+    /* "view":"1p" builds what the player sees of themselves - their own arms
+     * and their weapon, on the first-person skeleton - instead of the whole
+     * soldier seen from outside. */
+    const bool first_person = field(req, "view", "3p") == "1p";
 
     std::vector<Sec> secs;
+    /* Filled only in skinned mode. `mesh_rig` is one mesh's whole composed
+     * skeleton; `base_rig` is the shared part of it, kept once. */
+    std::vector<BindBone> mesh_rig, base_rig;
+    int base_rig_bones = 0;
+    /* Where the engine puts the skeleton so the posed soldier's feet meet the
+     * floor, since in skinned mode the geometry itself is not moved. */
+    float root_offset[3] = {0, 0, 0};
+    bool have_root = false;
+    /* The eye height this soldier actually stands at, measured from the ground
+     * they are placed on. Declared out here so the record writer can see it. */
+    float eye_out = 0.f;
     std::string error, detail;
     auto finish = [&]() -> int64_t {
         std::string sections_json;
@@ -973,7 +1328,57 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
         json_str(j, error);
         j += ",\"detail\":";
         json_str(j, detail);
-        j += ",\"sections\":[" + sections_json + "],\"anchors\":{}}";
+        j += ",\"sections\":[" + sections_json + "]";
+        /* EYE HEIGHT, in BOTH modes, because standing a camera in this
+         * soldier's boots does not require their skeleton - only this number.
+         * 0 when the pose could not be measured, which a consumer must read as
+         * "use your own default" rather than as "this soldier has no head". */
+        if (eye_out > 0.f) {
+            char eb[64];
+            std::snprintf(eb, sizeof(eb), ",\"eye\":%.6g", eye_out);
+            j += eb;
+        }
+        /* THE BIND RIG, only when asked for. An engine rebuilds its skeleton
+         * from `local` (rest, parent-relative) and binds the skin with
+         * `inverse`; both are 3x4 row-major, the same convention as every other
+         * transform this API hands out. */
+        if (!base_rig.empty()) {
+            char cb[128];
+            std::snprintf(cb, sizeof(cb), ",\"rig_bones\":%d", base_rig_bones);
+            j += cb;
+            if (have_root) {
+                std::snprintf(cb, sizeof(cb), ",\"root\":[%.9g,%.9g,%.9g]",
+                              root_offset[0], root_offset[1], root_offset[2]);
+                j += cb;
+            }
+            j += ",\"rig\":[";
+            for (size_t i = 0; i < base_rig.size(); ++i) {
+                const BindBone& b = base_rig[i];
+                if (i) j += ',';
+                j += "{\"name\":";
+                json_str(j, b.name);
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), ",\"parent\":%d,\"local\":[", b.parent);
+                j += buf;
+                for (int k = 0; k < 12; ++k) {
+                    std::snprintf(buf, sizeof(buf), "%s%.9g", k ? "," : "", b.local[k]);
+                    j += buf;
+                }
+                j += "],\"inverse\":[";
+                for (int k = 0; k < 12; ++k) {
+                    std::snprintf(buf, sizeof(buf), "%s%.9g", k ? "," : "", b.inverse[k]);
+                    j += buf;
+                }
+                j += "],\"posed\":[";
+                for (int k = 0; k < 12; ++k) {
+                    std::snprintf(buf, sizeof(buf), "%s%.9g", k ? "," : "", b.posed[k]);
+                    j += buf;
+                }
+                j += "]}";
+            }
+            j += ']';
+        }
+        j += ",\"anchors\":{}}";
         return record(j, body, out);
     };
 
@@ -995,22 +1400,63 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
     if (!ch || !outfit) { error = "The selected character or outfit is unavailable."; return finish(); }
 
     Pose pose;
-    if (!pose_samples(c, role, pose, error)) return finish();
+    if (!pose_samples(c, role, pose, error, first_person)) return finish();
 
     const std::string base = ch->root + "/set/set_001/" + character + "_set_001";
     std::vector<std::string> meshes;
-    for (const std::string& p : res)
-        if (starts(p, base) && ends(p, "_mesh") && p.find("_1p") == std::string::npos) meshes.push_back(p);
     std::string face_bundle;
-    for (const std::string& p : bundles)
-        if (starts(p, "pf_" + character + "_face_001_") && p.find('/') == std::string::npos && ends(p, "_bundle_3p")) { face_bundle = p; break; }
-    for (const char* suffix : {"base_standard", "parts_standard"}) {
-        const std::string mesh = ch->root + "/face/_base/" + character + "_face_" + suffix + "_mesh";
-        if (resources.count(mesh)) meshes.push_back(mesh);
+    if (first_person) {
+        /* WHAT A PLAYER SEES OF THEMSELVES: their own arms and their own legs,
+         * and nothing else. No headgear, no backpack, no face - a first-person
+         * soldier that included them would be standing inside their own head.
+         * These are per character AND per outfit, named as the 3P meshes are,
+         * which is why the ordinary sweep below has to exclude them.
+         *
+         * TWO MESHES, NOT ONE, and taking only the first is why looking down
+         * showed nothing:
+         *
+         *   <outfit>_1parms_mesh   2 sections, 15,251 verts, bones 127-200
+         *                          LeftShoulder..RightThumbBridge_VPJ - arms
+         *                          and hands
+         *   <outfit>_1p_mesh       2 sections, 36,205 verts, bones 11-36
+         *                          Hips, both legs, Spine..Spine2 - the body
+         *                          seen when looking down
+         *
+         * `_1p_mesh` was loaded by NEITHER path: this branch asked for the
+         * `_1parms_mesh` suffix, and the 3P sweep below drops any name
+         * containing `_1p`. The install pairs them 1:1 (323 of each under
+         * common/characters/), so a character with arms has a body to match. */
+        for (const std::string& p : res)
+            if (starts(p, base) && (ends(p, "_1parms_mesh") || ends(p, "_1p_mesh")))
+                meshes.push_back(p);
+        if (meshes.empty()) {
+            error = "This character has no first-person arms.";
+            return finish();
+        }
+    } else {
+        for (const std::string& p : res)
+            if (starts(p, base) && ends(p, "_mesh") && p.find("_1p") == std::string::npos) meshes.push_back(p);
+        for (const std::string& p : bundles)
+            if (starts(p, "pf_" + character + "_face_001_") && p.find('/') == std::string::npos && ends(p, "_bundle_3p")) { face_bundle = p; break; }
+        for (const char* suffix : {"base_standard", "parts_standard"}) {
+            const std::string mesh = ch->root + "/face/_base/" + character + "_face_" + suffix + "_mesh";
+            if (resources.count(mesh)) meshes.push_back(mesh);
+        }
     }
 
     M43 weapon = identity43();
+    M43 weapon_local = identity43();
+    int weapon_bone = -1;
+    float camera_y = 0.f;      /* the eye joints' height in rig space, before placing */
+    float view[3] = {0, 0, 0}; /* CameraJoint's position, the first-person origin */
+    bool have_view = false;
     float foot[3] = {0, 0, 0};
+    /* The ground offset. In the default path this is measured from the posed
+     * vertices after the loop. In skinned mode there ARE no posed vertices, so
+     * it is accumulated here from the palette instead - the soldier must stand
+     * on the floor in the pose it is shown in, not in its bind stance. */
+    float min_y = 1e30f;
+    bool any = false;
     int parts = 0;
     for (const std::string& mesh : meshes) {
         const bool face = mesh.find("/face/") != std::string::npos;
@@ -1024,11 +1470,57 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
         if (!ebx.count(variation)) variation.clear();
         std::vector<M43> skin;
         int rig_bones = 0;
-        if (!skin_for(c, ebx, mesh, pose, skin, rig_bones, weapon, foot, error)) { secs.clear(); return finish(); }
-        const size_t from = secs.size();
-        if (!read_sections(c, mesh, face ? face_bundle : outfit->bundle, variation, &skin, rig_bones, secs, error)) {
+        if (!skin_for(c, ebx, mesh, pose, skin, rig_bones, weapon, foot, error,
+                      want_skin ? &mesh_rig : nullptr, &weapon_local, &weapon_bone,
+                      &camera_y, first_person, view)) {
             secs.clear();
             return finish();
+        }
+        const size_t from = secs.size();
+        /* In skinned mode the palette is deliberately WITHHELD: handing it over
+         * would CPU-skin the vertices into the sampled pose, and a posed vertex
+         * cannot be re-posed. The engine gets bind-pose geometry plus the
+         * binding and does the posing itself. */
+        if (!read_sections(c, mesh, face ? face_bundle : outfit->bundle, variation,
+                           want_skin ? nullptr : &skin, rig_bones, secs, error, want_skin)) {
+            secs.clear();
+            return finish();
+        }
+        if (want_skin && !mesh_rig.empty()) {
+            /* The first rig_bones entries are the shared base rig - identical
+             * for every mesh - and everything above is THIS mesh's appended
+             * renderbones. Keep the base once and hand the appendix to the
+             * sections this mesh just produced. */
+            if (base_rig.empty() && (int)mesh_rig.size() >= rig_bones)
+                base_rig.assign(mesh_rig.begin(), mesh_rig.begin() + rig_bones);
+            base_rig_bones = rig_bones;
+            std::vector<BindBone> appendix;
+            if ((int)mesh_rig.size() > rig_bones)
+                appendix.assign(mesh_rig.begin() + rig_bones, mesh_rig.end());
+            for (size_t i = from; i < secs.size(); ++i) secs[i].rbones = appendix;
+            /* HOW LOW THE POSED SOLDIER REACHES, without ever building the
+             * posed mesh. Only the height is wanted, so only the palette's y
+             * column is applied - the same sum the renderer would do, one
+             * component wide. */
+            for (size_t i = from; i < secs.size(); ++i) {
+                const Sec& s = secs[i];
+                if (s.influences <= 0 || s.sbones.empty()) continue;
+                const size_t vcount = s.pos.size() / 3;
+                for (size_t v = 0; v < vcount; ++v) {
+                    float y = 0.f, total = 0.f;
+                    for (int lane = 0; lane < s.influences; ++lane) {
+                        const size_t at = v * (size_t)s.influences + (size_t)lane;
+                        const float w = s.sweights[at];
+                        const uint16_t b = s.sbones[at];
+                        if (w <= 0.f || b >= skin.size()) continue;
+                        const float* p = &s.pos[v * 3];
+                        const float* m = skin[b].m;
+                        y += w * (p[0] * m[1] + p[1] * m[4] + p[2] * m[7] + m[10]);
+                        total += w;
+                    }
+                    if (total > 1e-6f) { min_y = std::min(min_y, y / total); any = true; }
+                }
+            }
         }
         if (ends(mesh, "_patch_mesh")) {
             const std::string badge = std::string("common/characters/_shared/patches/faction/t_patch_faction_")
@@ -1049,16 +1541,49 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
         ++parts;
     }
 
-    float min_y = 1e30f;
-    bool any = false;
-    for (const Sec& s : secs)
-        for (size_t v = 1; v < s.pos.size(); v += 3) { min_y = std::min(min_y, s.pos[v]); any = true; }
+    if (!want_skin)
+        for (const Sec& s : secs)
+            for (size_t v = 1; v < s.pos.size(); v += 3) { min_y = std::min(min_y, s.pos[v]); any = true; }
+    /* Both modes place the soldier with their lowest point on the floor, so the
+     * eye height above that floor is the same subtraction either way. */
+    if (any && camera_y != 0.f) eye_out = camera_y - min_y;
     std::vector<Sec> gun;
     std::string anchors_unused;
     if (!assemble_weapon(c, item.c_str(), fits.c_str(), portal_enums, gun, anchors_unused, error)) { secs.clear(); return finish(); }
-    transform_sections(gun, weapon);
+    /* In skinned mode the weapon is left in the HAND's frame and the bone is
+     * named, so it can be attached and ride the animation; otherwise it is
+     * planted at the sampled frame, which is all a static soldier needs. */
+    transform_sections(gun, want_skin ? weapon_local : weapon);
+    const size_t gun_from = secs.size();
     for (Sec& s : gun) secs.push_back(std::move(s));
-    if (any) {
+    if (first_person) {
+        /* ANCHORED ON THE EYE, not on the floor. A first-person build has no
+         * feet to stand on and its whole job is to be parented to a camera, so
+         * the origin is CameraJoint and the engine attaches the record at
+         * identity. Placing it by the lowest vertex, as the 3P soldier is,
+         * would hang the arms wherever the shoulders happened to reach. */
+        have_view = view[0] != 0.f || view[1] != 0.f || view[2] != 0.f;
+        if (have_view) {
+            M43 anchor = identity43();
+            anchor.m[9] = -view[0];
+            anchor.m[10] = -view[1];
+            anchor.m[11] = -view[2];
+            transform_sections(secs, anchor);
+        }
+    } else if (want_skin) {
+        /* THE GEOMETRY IS NOT MOVED. It is in rig space, which is the only
+         * space the skinning palette will accept it in - translating it here
+         * would be invisible at bind pose, where the palette is the identity,
+         * and would tear the soldier apart the moment a pose was applied. The
+         * engine is told where to stand the skeleton instead. */
+        if (any) {
+            root_offset[0] = -foot[0];
+            root_offset[1] = -min_y;
+            root_offset[2] = -foot[2];
+            have_root = true;
+        }
+        for (size_t i = gun_from; i < secs.size(); ++i) secs[i].attach_bone = weapon_bone;
+    } else if (any) {
         M43 anchor = identity43();
         anchor.m[9] = -foot[0];
         anchor.m[10] = -min_y;
@@ -1069,4 +1594,121 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
     std::snprintf(b, sizeof(b), "Posed soldier, %d character parts and configured weapon", parts);
     detail = b;
     return finish();
+}
+
+/* THE WHOLE IDLE CLIP AS PARENT-RELATIVE BONE TRACKS.
+ *
+ * bf6_loadout_soldier's "posed" is one frame of this. Handing back every frame
+ * in the same shape is what turns a rigged soldier into a moving one, and doing
+ * the decode here rather than in each engine is what keeps them moving
+ * identically - the binding rules, the 0x8000 resolution and the choice of clip
+ * variant are all decisions, and a decision made twice is made differently. */
+extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json, uint8_t** out)
+{
+    if (!c || !out) return -1;
+    *out = nullptr;
+    char why[512] = {0};
+    if (!bf6_mount_frontend(c, why, sizeof(why))) return -1;
+
+    bf6json::Value req;
+    if (request_json && *request_json) {
+        std::string perr;
+        bf6json::Parser p(request_json, std::strlen(request_json));
+        if (!p.parse(req, perr)) req = bf6json::Value();
+    }
+    const std::string role = field(req, "role", "assault");
+
+    std::string error, clip_path;
+    std::vector<bf6_anim_binding> bindings;
+    bf6_anim_binding_stats stats{};
+    std::vector<float> body;
+    std::string tracks_json;
+    int frames = 0, bones_out = 0;
+
+    bf6_skeleton* s = nullptr;
+    bf6_anim_clip* clip = nullptr;
+    do {
+        clip_path = resolve_idle_clip(c, role, bindings, stats, error);
+        if (clip_path.empty()) break;
+        /* The PLAIN rig, with no renderbones appended: a clip binds rig bones,
+         * and the record's shared base rig is exactly this list, so track bone
+         * indices line up with it without any further resolution. */
+        s = bf6_skeleton_compose(c, kSkeleton, nullptr);
+        if (!s || s->bone_count < 1 || s->bone_count > 8192) {
+            error = "The character render skeleton is unavailable.";
+            break;
+        }
+        clip = bf6_anim_clip_open(c, clip_path.c_str());
+        if (!clip || clip->channel_count != (int)bindings.size() || clip->key_time_count < 1) {
+            error = "The selected soldier pose is unavailable.";
+            break;
+        }
+        frames = clip->key_time_count;
+
+        /* Which bones the clip actually drives. Everything else stays at its
+         * rest transform, so shipping a flat track for it would be bytes that
+         * say "unchanged" several hundred times a frame. */
+        std::vector<int> track_of((size_t)s->bone_count, -1);
+        std::vector<int> bone_of;
+        for (const bf6_anim_binding& b : bindings) {
+            if (b.bone < 0 || b.bone >= s->bone_count) continue;
+            if (b.component != BF6_ANIM_DOF_QUATERNION && b.component != BF6_ANIM_DOF_VECTOR3) continue;
+            if (track_of[(size_t)b.bone] < 0) {
+                track_of[(size_t)b.bone] = (int)bone_of.size();
+                bone_of.push_back(b.bone);
+            }
+        }
+        if (bone_of.empty()) { error = "The selected soldier pose drives no bone."; break; }
+        bones_out = (int)bone_of.size();
+
+        /* Bone-major: one bone's whole track is contiguous, because that is how
+         * an engine builds an animation track - per bone, not per frame. */
+        body.assign((size_t)bones_out * (size_t)frames * 12, 0.f);
+        std::vector<float> channels((size_t)clip->channel_count * 4, 0.f);
+        std::vector<M43> local((size_t)s->bone_count);
+        bool ok = true;
+        for (int f = 0; f < frames && ok; ++f) {
+            if (!bf6_anim_clip_sample(c, clip, f, channels.data(), nullptr)) { ok = false; break; }
+            /* Start from the BIND local every frame. A bone the clip rotates
+             * but does not translate then keeps its authored offset, instead of
+             * collapsing onto its parent. */
+            for (int i = 0; i < s->bone_count; ++i) local[(size_t)i] = from12(s->bones[i].local);
+            for (const bf6_anim_binding& b : bindings) {
+                if (b.bone < 0 || b.bone >= s->bone_count) continue;
+                if (b.channel < 0 || (size_t)b.channel * 4 + 3 >= channels.size()) { ok = false; break; }
+                const float* v = channels.data() + (size_t)b.channel * 4;
+                if (b.component == BF6_ANIM_DOF_QUATERNION)
+                    quat_rows(v[0], v[1], v[2], v[3], local[(size_t)b.bone].m);
+                else if (b.component == BF6_ANIM_DOF_VECTOR3)
+                    for (int k = 0; k < 3; ++k) local[(size_t)b.bone].m[9 + k] = v[k];
+            }
+            for (int t = 0; t < bones_out; ++t) {
+                const float* m = local[(size_t)bone_of[(size_t)t]].m;
+                float* dst = &body[((size_t)t * (size_t)frames + (size_t)f) * 12];
+                for (int k = 0; k < 12; ++k) dst[k] = m[k];
+            }
+        }
+        if (!ok) { error = "The selected soldier pose could not be sampled."; break; }
+
+        for (int t = 0; t < bones_out; ++t) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "%s{\"bone\":%d,\"track\":%zu}", t ? "," : "",
+                          bone_of[(size_t)t], (size_t)t * (size_t)frames * 12);
+            tracks_json += buf;
+        }
+    } while (false);
+    if (clip) bf6_free(c, clip);
+    if (s) bf6_free(c, s);
+    if (!error.empty()) { body.clear(); tracks_json.clear(); frames = 0; bones_out = 0; }
+
+    std::string j = "{\"clip\":";
+    json_str(j, clip_path);
+    j += ",\"error\":";
+    json_str(j, error);
+    char hb[96];
+    std::snprintf(hb, sizeof(hb), ",\"frames\":%d,\"bones\":%d,\"tracks\":[", frames, bones_out);
+    j += hb;
+    j += tracks_json;
+    j += "]}";
+    return record(j, body, out, 0x41574C42u /* BLWA */);
 }

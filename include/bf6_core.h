@@ -5131,6 +5131,37 @@ BF6_API int         bf6_ant_cdb_match(const bf6_ant_cdb*, const uint8_t* values,
                                       uint8_t* ctx_out, int ctx_max,
                                       uint8_t* scores_out, int scores_max);
 
+/* ---------------------------------------------------------- ANT runtime -- */
+/* ANT - the game's animation graph - evaluated over time. Create it on a root
+ * controller asset (a state machine .sf, a super-layers .slc, a clip ...)
+ * bound to a rig and skeleton; set game states by their asset path; update by
+ * elapsed SECONDS (the graph runs in 1/60 s ticks internally); read the pose
+ * as one parent-relative 3x4 (12 floats, the same layout as bf6_bone.local)
+ * per skeleton bone.
+ *
+ * Each controller type is implemented from the executable (research repo,
+ * ANT findings). Anything a graph needs that is not implemented is NAMED:
+ * bf6_ant_runtime_notes lists it. A graph with notes still runs; the notes
+ * say where it differs from the game. */
+typedef struct bf6_ant_runtime bf6_ant_runtime;
+
+/* Free with bf6_free. NULL with a reason in `err` on failure. */
+BF6_API bf6_ant_runtime* bf6_ant_runtime_create(bf6_ctx*, const char* root_asset,
+                                                const char* rig, const char* skeleton,
+                                                char* err, int err_len);
+BF6_API void bf6_ant_runtime_set_bool(bf6_ant_runtime*, const char* state, int value);
+BF6_API void bf6_ant_runtime_set_float(bf6_ant_runtime*, const char* state, float value);
+BF6_API void bf6_ant_runtime_set_int(bf6_ant_runtime*, const char* state, int32_t value);
+/* Advance by `seconds`. Returns 1, or 0 if the runtime has nothing to run. */
+BF6_API int  bf6_ant_runtime_update(bf6_ant_runtime*, float seconds);
+/* The current pose: 12 floats per bone into out (bone_max bones). Returns the
+ * bone count. */
+BF6_API int  bf6_ant_runtime_pose(const bf6_ant_runtime*, float* out, int bone_max);
+/* Newline-separated notes (unimplemented or unevaluable pieces met so far),
+ * then a line "state: <current state node>" when the root is a state
+ * machine. Returns the length needed. */
+BF6_API int  bf6_ant_runtime_notes(const bf6_ant_runtime*, char* out, int out_len);
+
 /* ------------------------------------------------------- renderbones ----- */
 /* THE PROCEDURAL BONES ABOVE THE RIG.
  *

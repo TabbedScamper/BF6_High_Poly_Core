@@ -71,6 +71,9 @@ struct Runtime {
     std::vector<std::string> notes;                 /* omitted/unknown behaviour met at runtime */
     std::map<std::string, std::unique_ptr<ClipSource>> clips;
     std::map<std::string, bf6_ant_cdb*> cdbs;
+    std::map<std::string, int> bone_index;          /* skeleton bone name -> index */
+    std::map<std::string, std::unique_ptr<Mask>> masks;   /* blend-mask asset -> built mask */
+    bool first_update = true;                        /* the root's first evaluation */
     explicit Runtime(bf6_ctx* cc) : c(cc), g(cc) {}
     ~Runtime() { for (auto& kv : cdbs) if (kv.second) bf6_free(c, kv.second); }
     void note(const std::string& s) {
@@ -621,8 +624,288 @@ std::string cdb_lookup(Runtime& rt, const Obj* cdb_asset)
     if (!cdb_values(rt, *x, v)) rt.note("context database input not evaluable: " + cdb_asset->path);
     const int pick = bf6_ant_cdb_match(h, v.data(), (int)v.size(), nullptr, 0, nullptr, 0);
     const char* e = pick >= 0 ? bf6_ant_cdb_entry(h, pick) : nullptr;
+    static const bool trace = std::getenv("BF6_ANT_TRACE") != nullptr;
+    if (trace) {
+        std::string hx; for (uint8_t b : v) { char t[4]; std::snprintf(t, sizeof t, "%02x", b); hx += t; }
+        std::fprintf(stderr, "ant lookup %s -> %d %s  values %s\n", cdb_asset->path.c_str(), pick,
+                     e ? e : "(none)", hx.c_str());
+    }
     return e ? std::string(e) : std::string();
 }
+
+/* ---------------------------------------------------------- blend masks */
+
+constexpr const char* kT_BlendMaskList = "04045519-ccc7-012b-da52-9d83e2511499";
+constexpr const char* kT_CdbAsset      = "6fa5a6cc-ab97-ef80-9a98-59b5bd2edbda";
+
+/* A DofSetAsset's records: (bone name, component 'q'/'t'/...) in record order,
+ * from the packed blob in 0xf71b7fd3 (research: dof-names-and-pose-offsets-
+ * ship-in-the-ds-payload). */
+std::vector<std::pair<std::string, char>> ds_records(const Obj* ds)
+{
+    std::vector<std::pair<std::string, char>> out;
+    if (!ds) return out;
+    const bf6::EbxValue* f = ds->f(0xf71b7fd3u);
+    if (!f) return out;
+    std::vector<uint8_t> b;
+    for (const auto& it : f->items) {
+        const uint64_t u = it.kind == bf6::EbxValue::Kind::Int ? (uint64_t)it.i : it.u;
+        for (int k = 0; k < 8; ++k) b.push_back((uint8_t)(u >> (8 * k)));
+    }
+    if (b.size() < 32) return out;
+    uint32_t h[8];
+    std::memcpy(h, b.data(), 32);
+    const uint32_t n = h[1] + 1;
+    const size_t blob = 32 + (size_t)n * 32;
+    for (uint32_t i = 0; i < n && 32 + (size_t)i * 32 + 32 <= b.size(); ++i) {
+        uint32_t r[8];
+        std::memcpy(r, b.data() + 32 + (size_t)i * 32, 32);
+        const size_t no = blob + r[3];
+        if (no >= b.size()) { out.emplace_back(std::string(), 0); continue; }
+        const std::string s((const char*)b.data() + no, strnlen((const char*)b.data() + no, b.size() - no));
+        const size_t dot = s.rfind('.');
+        out.emplace_back(dot == std::string::npos ? s : s.substr(0, dot),
+                         dot == std::string::npos ? 0 : s[dot + 1]);
+    }
+    return out;
+}
+
+/* FUN_14079af40: build a BlendMaskList's per-DOF weights. A set named by a
+ * BlendMaskAsset takes that asset's per-record weights; otherwise a set in the
+ * list takes its whole-set weight (missing = 0); every other DOF is 0. Sets
+ * are matched by identity - the same DofSetAsset - which is what the engine's
+ * hdr[7] comparison identifies. Per-DOF and per-set weight SOURCES (dynamic)
+ * are named in notes and their constants used. */
+const Mask* build_mask(Runtime& rt, const Obj* list)
+{
+    if (!list) return nullptr;
+    auto it = rt.masks.find(list->path);
+    if (it != rt.masks.end()) return it->second.get();
+    auto m = std::make_unique<Mask>();
+    m->rot.assign((size_t)rt.bones, 0.f);
+    m->tr.assign((size_t)rt.bones, 0.f);
+    auto put = [&](const std::pair<std::string, char>& rec, float w) {
+        auto b = rt.bone_index.find(rec.first);
+        if (b == rt.bone_index.end()) return;
+        if (rec.second == 'q') m->rot[(size_t)b->second] = w;
+        else if (rec.second == 't') m->tr[(size_t)b->second] = w;
+    };
+    std::map<std::string, bool> done;
+    if (const bf6::EbxValue* ms = list->f(0x7512e8c8u))
+        for (const auto& mr : ms->items) {
+            const Obj* bm = rt.g.resolve(&mr, list);
+            if (!bm) continue;
+            const Obj* ds = rt.g.resolve(bm->f(0xe91906a2u), bm);
+            if (!ds) continue;
+            const auto recs = ds_records(ds);
+            const bf6::EbxValue* ws = bm->f(0x8cf424e7u);
+            if (bm->f(0x202e54f7u) && !bm->f(0x202e54f7u)->items.empty())
+                rt.note("blend mask per-DOF weight sources not evaluated (constants used): " + bm->path);
+            for (size_t i = 0; i < recs.size(); ++i)
+                put(recs[i], ws && i < ws->items.size() ? (float)numv(&ws->items[i]) : 0.f);
+            done[ds->path] = true;
+        }
+    const bf6::EbxValue* sets = list->f(0x4c23c8ceu);
+    const bf6::EbxValue* sw = list->f(0x42c8b257u);
+    if (list->f(0x6d77fca0u) && !list->f(0x6d77fca0u)->items.empty())
+        rt.note("blend mask per-set weight sources not evaluated (constants used): " + list->path);
+    if (sets) for (size_t j = 0; j < sets->items.size(); ++j) {
+        const Obj* ds = rt.g.resolve(&sets->items[j], list);
+        if (!ds || done.count(ds->path)) continue;
+        const float w = sw && j < sw->items.size() ? (float)numv(&sw->items[j]) : 0.f;
+        for (const auto& rec : ds_records(ds)) put(rec, w);
+    }
+    const Mask* out = m.get();
+    rt.masks[list->path] = std::move(m);
+    return out;
+}
+
+/* ---------------------------------------------------------- super-layers */
+
+constexpr const char* kT_SuperLayers = "2719b155-2f8d-4f8e-f516-4fad3b362bbe";
+
+/* The built-in layer weight curve, 21 floats at 0x149b7a764 (FUN_14071e400). */
+constexpr float kLayerCurve[21] = {
+    1.0f, .973403f, .960834f, .942676f, .916827f, .880797f, .832018f, .768525f, .689974f, .598688f, .5f,
+    .401312f, .310026f, .231475f, .167982f, .119203f, .083173f, .057324f, .039166f, .026597f, 0.0f };
+constexpr float kLayerEps = 1.52587890625e-05f;   /* 2^-16, DAT_14931f850 */
+
+/* A controller asset's effective controller: a ContextDatabaseAsset (or a
+ * wrapper) used where a controller is expected resolves to its chosen entry
+ * for the current game states - how SuperLayers resolves its base and layer
+ * assets through the chooser interfaces (FUN_140720470). */
+const Obj* resolve_ctrl_asset(Runtime& rt, const Obj* a)
+{
+    for (int guard = 0; a && guard < 8; ++guard) {
+        if (a->type == kT_CdbAsset) {
+            const std::string e = cdb_lookup(rt, a);
+            a = e.empty() ? nullptr : rt.g.root(e);
+            continue;
+        }
+        if (a->type == kT_CdbWrapper) {
+            const std::string e = cdb_lookup(rt, rt.g.resolve(a->f(0x37ee8be9u), a));
+            a = e.empty() ? nullptr : rt.g.root(e);
+            continue;
+        }
+        return a;
+    }
+    return a;
+}
+
+struct SuperLayersCtrl : Ctrl {
+    struct Inst { std::unique_ptr<Ctrl> ctrl; const Obj* src = nullptr; float w = 0.f, T = 0.f, delay = 0.f; };
+    struct Layer {
+        const Obj* e = nullptr;
+        std::vector<Inst> inst;        /* newest first */
+        float r = 0.f, remain = 0.f, W = 1.f, last_w = 1.f;
+        bool dir_out = false, prev_trig = false;
+        const Mask* mask = nullptr;
+    };
+    std::unique_ptr<Ctrl> base;
+    const Obj* cur_base = nullptr;
+    std::vector<Layer> layers;
+    int sync = -1;
+    bool first = true;
+
+    static float curve(float r) {
+        const float t = (1.f - r) * 20.f;
+        const int i = (int)std::trunc(t);
+        if (i >= 20) return 0.f;
+        if (i < 0) return 1.f;
+        const float f = std::fmin(std::fmax(t - (float)i, 0.f), 1.f);
+        return (1.f - f) * kLayerCurve[i] + f * kLayerCurve[i + 1];
+    }
+    float srcf(Runtime& rt, const Obj* e, uint32_t src_hash, uint32_t const_hash) {
+        if (const Obj* s = rt.g.resolve(e->f(src_hash), e)) { bool ok = false; const float v = rt.st.as_float(rt.g, s, ok); if (ok) return v; }
+        return (float)numv(e->f(const_hash));
+    }
+    bool srcb(Runtime& rt, const Obj* e, uint32_t src_hash, uint32_t const_hash) {
+        if (const Obj* s = rt.g.resolve(e->f(src_hash), e)) { bool ok = false; const bool v = rt.st.as_bool(rt.g, s, ok); if (ok) return v; }
+        return boolv(e->f(const_hash));
+    }
+
+    void init(Runtime& rt, const Obj* a) {
+        asset = a;
+        sync = (int)numv(a->f(0x1b6ad390u));
+        if (const bf6::EbxValue* es = a->f(0xcf111f58u))
+            for (const auto& er : es->items) { Layer L; L.e = rt.g.resolve(&er, a); layers.push_back(std::move(L)); }
+        refresh_base(rt);
+        for (auto& L : layers) if (L.e) {
+            if ((int)numv(L.e->f(0x787a258eu)) >= 2 && (int)numv(L.e->f(0x787a258eu)) <= 3)
+                rt.note("ModelSpace layer blend (never ships) not implemented: " + a->path);
+            if (L.e->f(0x899b420cu) && L.e->f(0x899b420cu)->kind != bf6::EbxValue::Kind::Null)
+                rt.note("additive-capture layer (+0xa8) not implemented: " + a->path);
+        }
+    }
+    void refresh_base(Runtime& rt) {
+        const Obj* b = resolve_ctrl_asset(rt, rt.g.resolve(asset->f(0x046783f8u), asset));
+        if (!b || b == cur_base) return;
+        auto nc = rt.make(b);
+        if (!nc) return;
+        if (!base) base = std::move(nc);
+        else {
+            rt.note("super-layers base crossfade curve not read (linear over +0x78 ticks)");
+            auto t = std::make_unique<TransitionCtrl>();
+            t->duration = srcf(rt, asset, 0xc2ad7611u, 0x26b662f5u);
+            t->target = std::move(nc); t->source = std::move(base);
+            base = std::move(t);
+        }
+        cur_base = b;
+    }
+
+    void update(Runtime& rt, float dt, Pose& out) override {
+        refresh_base(rt);
+        if (base) { base->update(rt, dt, out); collapse_finished(base); }
+        else out = rt.bind;
+        for (auto& L : layers) {
+            if (!L.e) continue;
+            const Obj* e = L.e;
+            bool enabled = srcb(rt, e, 0x6e8c0b93u, 0x18daea78u);
+            const float weight = srcf(rt, e, 0x71f01f90u, 0x89b14df8u);
+            const float tIn = srcf(rt, e, 0x6705f3e0u, 0xa26fe9d9u);
+            const float tOut = srcf(rt, e, 0x859432c8u, 0x2312f573u);
+            const float tX = srcf(rt, e, 0xb7d0341du, 0xcbfae21cu);
+            const int upd = (int)numv(e->f(0xe94c4a4eu));
+            if ((upd == 1 || upd == 2) && weight <= 0.f) enabled = false;
+            L.last_w = weight;
+            const Obj* trig = rt.g.resolve(e->f(0x437be494u), e);
+            bool restart = false;
+            if (enabled) {
+                if (trig) {
+                    bool ok = false; const bool v = rt.st.as_bool(rt.g, trig, ok);
+                    restart = !L.prev_trig && v;
+                    L.prev_trig = v;
+                }
+                const Obj* ca = resolve_ctrl_asset(rt, rt.g.resolve(e->f(0x81309ef7u), e));
+                const bool fresh = (!trig && (L.inst.empty() || L.inst.front().src != ca)) || restart;
+                if (ca && fresh) {
+                    Inst n;
+                    n.ctrl = rt.make(ca);
+                    n.src = ca;
+                    if (L.inst.empty()) {
+                        L.remain = tIn; L.r = first ? 1.f : 0.f; L.W = L.r; L.dir_out = false;
+                        L.mask = build_mask(rt, rt.g.resolve(e->f(0x795e0190u), e));
+                    } else L.inst.front().T = tX;
+                    const float off = srcf(rt, e, 0x3f3bf41au, 0xdb29a4dcu);
+                    if (off > 0.f && n.ctrl) n.ctrl->set_time(rt, n.ctrl->time + off);
+                    n.w = (first || L.inst.empty()) ? 1.f : 0.f;
+                    n.T = tX;
+                    n.delay = std::fmin(off, 0.f);
+                    if (n.ctrl) L.inst.insert(L.inst.begin(), std::move(n));
+                }
+                if (!L.mask) L.mask = build_mask(rt, rt.g.resolve(e->f(0x795e0190u), e));
+            }
+            if (L.inst.empty()) continue;
+            const bool finished = trig ? (tOut >= L.inst.front().ctrl->remaining)
+                                       : (!resolve_ctrl_asset(rt, rt.g.resolve(e->f(0x81309ef7u), e)) && upd == 0);
+            if (!enabled || finished) {
+                if (!L.dir_out) L.remain = tOut;
+                const float k = dt < L.remain ? dt / L.remain : 1.f;
+                L.r -= L.r * k; L.remain = std::fmax(L.remain - dt, 0.f); L.dir_out = true;
+                if (finished && std::fabs(L.r) <= kLayerEps) { L.inst.clear(); continue; }
+            } else {
+                if (L.dir_out) L.remain = tX;
+                const float k = dt < L.remain ? dt / L.remain : 1.f;
+                L.r += (1.f - L.r) * k; L.remain = std::fmax(L.remain - dt, 0.f); L.dir_out = false;
+            }
+            if (e->f(0x5f5ba288u) && !e->f(0x5f5ba288u)->items.empty())
+                rt.note("custom layer blend curve not implemented (built-in S-curve used): " + asset->path);
+            L.W = curve(L.r) * weight;
+            /* FUN_14071e500: instances of one layer crossfade, newest first. */
+            const int mode = (int)numv(e->f(0x787a258eu));
+            Pose lp; bool have = false;
+            for (size_t k = 0; k < L.inst.size();) {
+                Inst& n = L.inst[k];
+                const float kk = dt < n.T ? dt / n.T : 1.f;
+                if (k == 0) n.w += (1.f - n.w) * kk;
+                else { n.w -= n.w * kk; if (std::fabs(n.w) <= 1.1920929e-7f) { L.inst.erase(L.inst.begin() + (long)k); continue; } }
+                const float cw = curve(n.w);
+                float ddt = dt;
+                if (n.delay < 0.f) { n.delay += dt; ddt = std::fmax(n.delay, 0.f); if (n.delay >= 0.f) n.delay = 0.f; }
+                Pose p;
+                const bool run = upd == 0 || L.last_w > 0.f;
+                if (run) n.ctrl->update(rt, ddt, p); else p = rt.bind;
+                if (std::fabs(cw) > kLayerEps) {
+                    if (!have) { lp = p; have = true; }
+                    else if (mode == 0) pose_blend(lp, p, cw, nullptr);
+                    else pose_add(lp, p, mode == 4 ? -cw : cw, nullptr);
+                }
+                ++k;
+            }
+            if (!have || std::fabs(L.W) <= kLayerEps) continue;
+            if (mode == 0) pose_blend(out, lp, L.W, L.mask);
+            else if (mode == 1 || mode == 4) pose_add(out, lp, mode == 4 ? -L.W : L.W, L.mask);
+        }
+        /* timing from the sync layer's newest instance, else the base */
+        Ctrl* src = base.get();
+        if (sync >= 0 && sync < (int)layers.size() && !layers[(size_t)sync].inst.empty())
+            src = layers[(size_t)sync].inst.front().ctrl.get();
+        if (src) { phase = src->phase; time = src->time; length = src->length; remaining = src->remaining; }
+        first = false;
+    }
+    void set_time(Runtime& rt, float t) override { if (base) base->set_time(rt, t); }
+    void set_phase(Runtime& rt, float p) override { if (base) base->set_phase(rt, p); }
+};
 
 /* Other controller types are added here as their specs land. Until then an
  * unknown type is NAMED in notes and yields the bind pose, so a partially
@@ -638,6 +921,12 @@ std::unique_ptr<Ctrl> Runtime::make(const Obj* a)
     if (!a) return nullptr;
     if (a->type == kT_Clip) { auto c = std::make_unique<ClipCtrl>(); c->init(*this, a); return c; }
     if (a->type == kT_Phase) { auto c = std::make_unique<PhaseCtrl>(); c->init(*this, a); return c; }
+    if (a->type == kT_SuperLayers) { auto c = std::make_unique<SuperLayersCtrl>(); c->init(*this, a); return c; }
+    if (a->type == kT_CdbAsset) {
+        /* a ContextDatabaseAsset where a controller is expected: its entry */
+        const Obj* e = resolve_ctrl_asset(*this, a);
+        return e ? make(e) : nullptr;
+    }
     if (a->type == kT_Chooser) {
         /* factory FUN_1409bece0: no dynamic flag = static choice at creation */
         const bool dyn = boolv(a->f(0x66fdcb25u)) || boolv(a->f(0xa0f5b40bu)) || boolv(a->f(0xe25a9213u)) || boolv(a->f(0x7e3f6d2eu));
@@ -671,3 +960,93 @@ std::unique_ptr<Ctrl> Runtime::make(const Obj* a)
 }
 
 }  // namespace bf6ant
+
+/* ------------------------------------------------------------ C API --- */
+
+struct AntRuntimeHandle {
+    std::unique_ptr<bf6ant::Runtime> rt;
+    std::unique_ptr<bf6ant::Ctrl> root;
+    bf6ant::Pose pose;
+    std::string root_path;
+};
+
+void bf6__antrt_delete(void* p) { delete (AntRuntimeHandle*)p; }
+
+bf6_ant_runtime* bf6_ant_runtime_create(bf6_ctx* c, const char* root_asset, const char* rig,
+                                        const char* skeleton, char* err, int err_len)
+{
+    auto fail = [&](const std::string& why) -> bf6_ant_runtime* {
+        if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str());
+        return nullptr;
+    };
+    if (!c || !root_asset || !rig || !skeleton) return fail("missing argument");
+    auto h = std::make_unique<AntRuntimeHandle>();
+    h->rt = std::make_unique<bf6ant::Runtime>(c);
+    bf6ant::Runtime& rt = *h->rt;
+    rt.rig = rig; rt.ske = skeleton;
+    bf6_skeleton* s = bf6_skeleton_compose(c, skeleton, nullptr);
+    if (!s || s->bone_count < 1) { if (s) bf6_free(c, s); return fail(std::string("skeleton: ") + skeleton); }
+    rt.bones = s->bone_count;
+    rt.bind.resize((size_t)s->bone_count);
+    for (int i = 0; i < s->bone_count; ++i) {
+        float q[4];
+        bf6ant::quat_from_rows(s->bones[i].local, q);
+        rt.bind.q[(size_t)i] = { q[0], q[1], q[2], q[3] };
+        rt.bind.t[(size_t)i] = { s->bones[i].local[9], s->bones[i].local[10], s->bones[i].local[11] };
+        if (s->bones[i].name) rt.bone_index[s->bones[i].name] = i;
+    }
+    bf6_free(c, s);
+    const bf6ant::Obj* root = rt.g.root(root_asset);
+    if (!root) return fail("root asset: " + rt.g.error());
+    h->root = rt.make(root);
+    if (!h->root) return fail("root asset has no controller");
+    h->root_path = root_asset;
+    h->pose = rt.bind;
+    AntRuntimeHandle* out = h.release();
+    c->handles[out] = bf6_ctx::HK_ANTRT;
+    return reinterpret_cast<bf6_ant_runtime*>(out);
+}
+
+void bf6_ant_runtime_set_bool(bf6_ant_runtime* r, const char* s, int v)
+{ if (r && s) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_bool(s, v != 0); }
+void bf6_ant_runtime_set_float(bf6_ant_runtime* r, const char* s, float v)
+{ if (r && s) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_float(s, v); }
+void bf6_ant_runtime_set_int(bf6_ant_runtime* r, const char* s, int32_t v)
+{ if (r && s) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_int(s, v); }
+
+int bf6_ant_runtime_update(bf6_ant_runtime* r, float seconds)
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h || !h->root) return 0;
+    bf6ant::Pose p;
+    h->root->update(*h->rt, seconds * bf6ant::kTicksPerSecond, p);
+    if (p.q.size() != h->rt->bind.q.size()) p = h->rt->bind;
+    h->pose = p;
+    h->rt->first_update = false;
+    return 1;
+}
+
+int bf6_ant_runtime_pose(const bf6_ant_runtime* r, float* out, int bone_max)
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    if (!h) return 0;
+    const int n = (int)h->pose.q.size();
+    if (out)
+        for (int i = 0; i < n && i < bone_max; ++i) {
+            float* m = out + (size_t)i * 12;
+            bf6ant::rows_from_quat(h->pose.q[(size_t)i].data(), m);
+            m[9] = h->pose.t[(size_t)i][0]; m[10] = h->pose.t[(size_t)i][1]; m[11] = h->pose.t[(size_t)i][2];
+        }
+    return n;
+}
+
+int bf6_ant_runtime_notes(const bf6_ant_runtime* r, char* out, int out_len)
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    if (!h) return 0;
+    std::string s;
+    for (const auto& n : h->rt->notes) s += n + "\n";
+    for (const auto& u : h->rt->st.unknown()) s += "game state not evaluable: " + u + "\n";
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)s.size() + 1;
+}

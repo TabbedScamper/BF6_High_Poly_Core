@@ -294,33 +294,56 @@ void qmul(const float* a, const float* b, float* o)   /* Hamilton product a*b */
 }
 }  // namespace
 
-void pose_blend(Pose& dst, const Pose& src, float w, const std::vector<float>* mask)
+namespace {
+/* nlerp(a,b,t) = normalize(a + (hemi(a,b) - a) * t), hemi flips b to a's side. */
+void nlerp(const float* a, const float* b, float t, float* o)
+{
+    const float d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    const float s = d > 0.f ? 1.f : -1.f;
+    for (int c = 0; c < 4; ++c) o[c] = a[c] + (s * b[c] - a[c]) * t;
+    qnorm(o);
+}
+}  // namespace
+
+void pose_blend(Pose& dst, const Pose& src, float w, const Mask* mask)
 {
     for (size_t i = 0; i < dst.q.size() && i < src.q.size(); ++i) {
-        const float k = w * (mask && i < mask->size() ? (*mask)[i] : 1.f);
-        if (k <= 0.f) continue;
-        float* a = dst.q[i].data();
-        const float* b = src.q[i].data();
-        const float d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-        const float s = d < 0.f ? -1.f : 1.f;               /* shortest arc */
-        for (int c = 0; c < 4; ++c) a[c] = a[c] * (1.f - k) + s * b[c] * k;
-        qnorm(a);
-        for (int c = 0; c < 3; ++c) dst.t[i][(size_t)c] = dst.t[i][(size_t)c] * (1.f - k) + src.t[i][(size_t)c] * k;
+        const float wr = w * (mask && i < mask->rot.size() ? mask->rot[i] : 1.f);
+        const float wt = w * (mask && i < mask->tr.size() ? mask->tr[i] : 1.f);
+        if (src.vq[i]) {
+            if (!dst.vq[i]) { dst.q[i] = src.q[i]; dst.vq[i] = 1; }
+            else if (wr != 0.f) { float o[4]; nlerp(dst.q[i].data(), src.q[i].data(), wr, o); for (int c = 0; c < 4; ++c) dst.q[i][(size_t)c] = o[c]; }
+        }
+        if (src.vt[i]) {
+            if (!dst.vt[i]) { dst.t[i] = src.t[i]; dst.vt[i] = 1; }
+            else if (wt != 0.f) for (int c = 0; c < 3; ++c) dst.t[i][(size_t)c] = dst.t[i][(size_t)c] * (1.f - wt) + src.t[i][(size_t)c] * wt;
+        }
     }
 }
 
-void pose_add(Pose& dst, const Pose& delta, float w, const std::vector<float>* mask)
+void pose_add(Pose& dst, const Pose& add, float w, const Mask* mask)
 {
-    for (size_t i = 0; i < dst.q.size() && i < delta.q.size(); ++i) {
-        const float k = w * (mask && i < mask->size() ? (*mask)[i] : 1.f);
-        if (k <= 0.f) continue;
-        float d[4] = { delta.q[i][0] * k, delta.q[i][1] * k, delta.q[i][2] * k, 1.f + (delta.q[i][3] - 1.f) * k };
-        qnorm(d);
-        float r[4];
-        qmul(dst.q[i].data(), d, r);
-        qnorm(r);
-        for (int c = 0; c < 4; ++c) dst.q[i][(size_t)c] = r[c];
-        for (int c = 0; c < 3; ++c) dst.t[i][(size_t)c] += delta.t[i][(size_t)c] * k;
+    static const float I[4] = {0, 0, 0, 1};
+    for (size_t i = 0; i < dst.q.size() && i < add.q.size(); ++i) {
+        if (add.vq[i]) {
+            float a[4] = { add.q[i][0], add.q[i][1], add.q[i][2], add.q[i][3] };
+            float k;
+            if (mask) k = w * (i < mask->rot.size() ? mask->rot[i] : 1.f);
+            else { k = std::fabs(w); if (w < 0.f) { a[0] = -a[0]; a[1] = -a[1]; a[2] = -a[2]; } }
+            if (k != 0.f) {
+                float d[4], r[4];
+                nlerp(I, a, k, d);
+                qmul(dst.q[i].data(), d, r);
+                qnorm(r);
+                for (int c = 0; c < 4; ++c) dst.q[i][(size_t)c] = r[c];
+                dst.vq[i] = 1;
+            }
+        }
+        if (add.vt[i]) {
+            const float k = w * (mask && i < mask->tr.size() ? mask->tr[i] : 1.f);
+            for (int c = 0; c < 3; ++c) dst.t[i][(size_t)c] += add.t[i][(size_t)c] * k;
+            dst.vt[i] = 1;
+        }
     }
 }
 
@@ -362,8 +385,8 @@ bool ClipSource::sample(bf6_ctx* c, float frames, bool loop, Pose& out) const
         const size_t b = (size_t)bone_[k];
         if (b >= out.q.size()) continue;
         const float* v = ch.data() + (size_t)ch_[k] * 4;
-        if (comp_[k] == BF6_ANIM_DOF_QUATERNION) { out.q[b] = { v[0], v[1], v[2], v[3] }; qnorm(out.q[b].data()); }
-        else out.t[b] = { v[0], v[1], v[2] };
+        if (comp_[k] == BF6_ANIM_DOF_QUATERNION) { out.q[b] = { v[0], v[1], v[2], v[3] }; qnorm(out.q[b].data()); out.vq[b] = 1; }
+        else { out.t[b] = { v[0], v[1], v[2] }; out.vt[b] = 1; }
     }
     return true;
 }

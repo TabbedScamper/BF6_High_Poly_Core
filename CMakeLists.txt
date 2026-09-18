@@ -639,6 +639,14 @@ add_executable(soldier_1p_clip_test test/soldier_1p_clip_test.cpp)
 target_link_libraries(soldier_1p_clip_test PRIVATE bf6_core_static)
 target_include_directories(soldier_1p_clip_test PRIVATE src include)
 
+add_executable(ant_runtime_test test/ant_runtime_test.cpp)
+target_link_libraries(ant_runtime_test PRIVATE bf6_core_static)
+target_include_directories(ant_runtime_test PRIVATE src include)
+
+add_executable(ds_names_probe test/ds_names_probe.cpp)
+target_link_libraries(ds_names_probe PRIVATE bf6_core_static)
+target_include_directories(ds_names_probe PRIVATE src include)
+
 add_executable(ant_graph_test test/ant_graph_test.cpp)
 target_link_libraries(ant_graph_test PRIVATE bf6_core_static)
 target_include_directories(ant_graph_test PRIVATE src include)

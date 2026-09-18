@@ -81,17 +81,30 @@ private:
     std::vector<std::string> unknown_;
 };
 
-/* POSE: per skeleton bone, local rotation (x,y,z,w) and translation. */
+/* POSE: per skeleton bone, local rotation (x,y,z,w) and translation, each with
+ * a validity flag. A slot nothing has written is INVALID: the engine's Blend
+ * copies into it instead of lerping against it (research spec_superlayers,
+ * FUN_140845cb0). Values of invalid slots hold the bind pose so a final pose
+ * always has something to show. */
 struct Pose {
     std::vector<std::array<float, 4>> q;
     std::vector<std::array<float, 3>> t;
-    void resize(size_t n) { q.assign(n, {0, 0, 0, 1}); t.assign(n, {0, 0, 0}); }
+    std::vector<uint8_t> vq, vt;
+    void resize(size_t n) { q.assign(n, {0, 0, 0, 1}); t.assign(n, {0, 0, 0}); vq.assign(n, 0); vt.assign(n, 0); }
 };
+
+/* Per-bone blend mask: separate weights for the rotation and translation DOFs
+ * of each bone. Null = unmasked. */
+struct Mask { std::vector<float> rot, tr; };
 
 void quat_from_rows(const float* m9, float* q);   /* inverse of loadout's quat_rows */
 void rows_from_quat(const float* q, float* m9);
-void pose_blend(Pose& dst, const Pose& src, float w, const std::vector<float>* mask);  /* nlerp/lerp toward src */
-void pose_add(Pose& dst, const Pose& delta, float w, const std::vector<float>* mask);  /* dst * delta^w */
+/* Blend_Mode 0: q = nlerp(dst, src, w), v = lerp; invalid dst slots copy src. */
+void pose_blend(Pose& dst, const Pose& src, float w, const Mask* mask);
+/* Blend_Mode 1 (Additive), 4 (Subtractive = w negated): local space,
+ * q = dst (x) nlerp(I, add', |w|) with add' = conj(add) when w < 0; v += w*add.
+ * Masked: w_slot = w*mask, q = dst (x) nlerp(I, add, w_slot), no conjugate. */
+void pose_add(Pose& dst, const Pose& add, float w, const Mask* mask);
 
 /* A clip bound to one rig/skeleton pair, sampled at a time in FRAMES into a
  * pose. Bones the clip does not drive are left as they are in `out`. */

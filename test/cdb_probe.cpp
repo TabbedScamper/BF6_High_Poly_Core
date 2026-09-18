@@ -57,7 +57,7 @@ void print_struct_rows(const bf6::EbxValue* a, const char* what)
             const bf6::EbxValue& v = kv.second;
             if (v.kind == bf6::EbxValue::Kind::Array) {
                 std::printf(" %08x=[", kv.first);
-                for (const auto& it : v.items) std::printf("%llx,", (unsigned long long)it.u);
+                for (const auto& it : v.items) std::printf("%lld,", it.kind == bf6::EbxValue::Kind::Int ? (long long)it.i : (long long)it.u);
                 std::printf("]");
             } else if (v.kind == bf6::EbxValue::Kind::Real) {
                 std::printf(" %08x=%g", kv.first, v.f);
@@ -131,12 +131,13 @@ static void jhex(std::string& o, const uint8_t* p, size_t n)
     for (size_t i = 0; i < n; ++i) { o += H[p[i] >> 4]; o += H[p[i] & 15]; }
     o += '"';
 }
-static void jwords(std::string& o, const bf6::EbxValue* a)
+/* Each element at its OWN width, from the reflection (u8 / u16 / i32). */
+static void jwords(std::string& o, const bf6::EbxValue* a, int width = 4)
 {
     std::vector<uint8_t> b;
     if (a) for (const auto& it : a->items) {
-        const uint32_t u = (uint32_t)it.u;
-        for (int k = 0; k < 4; ++k) b.push_back((uint8_t)(u >> (8 * k)));
+        const uint64_t u = it.kind == bf6::EbxValue::Kind::Int ? (uint64_t)it.i : it.u;
+        for (int k = 0; k < width; ++k) b.push_back((uint8_t)(u >> (8 * k)));
     }
     jhex(o, b.data(), b.size());
 }
@@ -178,16 +179,16 @@ static int json_export(bf6_ctx* c, bf6::TypeDb& db, const char* list, const char
                           jint(v.field(0x33b68e77)), jint(v.field(0x8cdd2d61)), jint(v.field(0xa62d74a2)),
                           jint(v.field(0x1bd17c7e)));
             j += b;
-            j += ",\"w38\":"; jwords(j, v.field(0x74701328));
+            j += ",\"w38\":"; jwords(j, v.field(0x74701328), 2);
             j += ",\"w50\":"; jwords(j, v.field(0x69e2f3b6));
-            j += ",\"w88\":"; jwords(j, v.field(0xcefcf711));
+            j += ",\"w88\":"; jwords(j, v.field(0xcefcf711), 1);
             /* +0x58 struct */
             if (const bf6::EbxValue* s58 = v.field(0xf834e6ec)) {
                 std::snprintf(b, sizeof(b), ",\"s58\":{\"flag\":%d,\"n\":%lld,\"w8\":",
                               s58->field(0xc85c7364) && s58->field(0xc85c7364)->b ? 1 : 0,
                               jint(s58->field(0x9ed408fd)));
-                j += b; jwords(j, s58->field(0xfe23fac1));
-                j += ",\"w10\":"; jwords(j, s58->field(0xa6c330ab));
+                j += b; jwords(j, s58->field(0xfe23fac1), 1);
+                j += ",\"w10\":"; jwords(j, s58->field(0xa6c330ab), 1);
                 j += "}";
             }
             j += ",\"groups\":[";
@@ -197,7 +198,7 @@ static int json_export(bf6_ctx* c, bf6::TypeDb& db, const char* list, const char
                     std::snprintf(b, sizeof(b), "%s{\"hash\":%lld,\"u10\":%lld,\"u11\":%lld,\"bytes\":",
                                   k ? "," : "", jint(g.field(0x58ac9cec)), jint(g.field(0xe58491f6)),
                                   jint(g.field(0x16e8e080)));
-                    j += b; jwords(j, g.field(0x0424c3f9)); j += "}";
+                    j += b; jwords(j, g.field(0x0424c3f9), 1); j += "}";
                 }
             j += "],\"keys\":[";
             if (const bf6::EbxValue* ks = v.field(0x03f14c46))

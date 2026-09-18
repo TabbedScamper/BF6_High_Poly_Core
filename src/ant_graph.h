@@ -73,6 +73,8 @@ public:
     float as_float(Graph& g, const Obj* o, bool& ok);
     int32_t as_int(Graph& g, const Obj* o, bool& ok);
     const std::vector<std::string>& unknown() const { return unknown_; }
+    /* SignalChooserPolicy entry test; ok=false when an input is not evaluable. */
+    bool signal_pass(Graph& g, const Obj* entry, bool& ok);
 private:
     void note_unknown(const Obj* o);
     std::map<std::string, Value> m_;

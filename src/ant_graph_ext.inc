@@ -77,6 +77,9 @@ constexpr const char* kEnumAsset         = "a5cab29b-aabb-e8f1-8ecb-a48ad0b941e9
 constexpr const char* kEnumChannel       = "8308d4de-c89c-ebda-5629-55b5ab2e55f9";
 constexpr const char* kEnumItem          = "37948790-7933-b4e3-f96d-ab1e63ef9383";
 constexpr const char* kFloatComparison   = "57ef39ec-4fd6-988d-f799-23c09a6addbc";
+constexpr const char* kBoolChooser       = "48155699-ed9c-adcf-4e0a-ccd29461119c";
+constexpr const char* kSignalPolicy      = "7f33ed8d-73d6-8951-ba5e-f3e83c50ab23";
+constexpr const char* kSignalEntry       = "e430c3f8-f311-79c7-b0c4-d2a9a200ddd4";
 constexpr uint32_t kDefault   = 0x97ea1523u;   /* the authored default value, every state type */
 constexpr uint32_t kItemEnum  = 0xffc4267fu;   /* enum item: which enumeration state */
 constexpr uint32_t kItemValue = 0x7daad29fu;   /* enum item: the value it names */
@@ -97,6 +100,35 @@ double num(const bf6::EbxValue* v)
     }
 }
 }  // namespace
+
+/* SignalChooserPolicy's entry test (FUN_1409bdc80): every bool in +0x38
+ * (0xdf9f1fba) must read TRUE and every bool in +0x30 (0xb6eb75d4) FALSE.
+ * Items that are null or have no bool face are IGNORED by the engine (it
+ * queries the bool interface and skips when absent); here an item whose type
+ * is not one we can evaluate sets ok=false instead, because "we could not
+ * read it" is not the same as "it has no bool face". Only SignalChooserEntry
+ * can pass. */
+bool States::signal_pass(Graph& g, const Obj* e, bool& ok)
+{
+    ok = true;
+    if (!e || e->type != kSignalEntry) return false;
+    auto all = [&](uint32_t h, bool want) -> bool {
+        const bf6::EbxValue* l = e->f(h);
+        if (!l) return true;
+        for (const auto& it : l->items) {
+            const Obj* s = g.resolve(&it, e);
+            if (!s) continue;
+            bool sok = false;
+            const bool v = as_bool(g, s, sok);
+            if (!sok) { ok = false; return false; }
+            if (v != want) return false;
+        }
+        return true;
+    };
+    if (!all(0xdf9f1fbau, true)) return false;
+    if (!all(0xb6eb75d4u, false)) return false;
+    return true;
+}
 
 void States::note_unknown(const Obj* o)
 {
@@ -121,6 +153,30 @@ bool States::as_bool(Graph& g, const Obj* o, bool& ok)
         if (!eok) return false;
         ok = true;
         return cur == (int32_t)num(o->f(kItemValue));
+    }
+    if (o->type == kBoolChooser) {
+        /* BoolGameStateChooserAsset (FUN_1409c0350 / FUN_1409c03e0): the
+         * policy picks an entry with current index -1 and NO last-entry
+         * fallback; the value is that entry's bool, false when none matches.
+         * Only SignalChooserPolicy is implemented - the only policy any
+         * shipped BoolGameStateChooser uses. */
+        const Obj* pol = g.resolve(o->f(0x0ff9bae2u), o);
+        const bf6::EbxValue* es = o->f(0xc7166a0cu);
+        if (!pol || pol->type != kSignalPolicy) { note_unknown(o); return false; }
+        ok = true;
+        if (!es) return false;
+        for (const auto& er : es->items) {
+            const Obj* e = g.resolve(&er, o);
+            bool pok = true;
+            if (e && signal_pass(g, e, pok) && pok) {
+                bool bok = false;
+                const bool v = as_bool(g, g.resolve(e->f(0x81309ef7u), e), bok);
+                if (!bok) { ok = false; return false; }
+                return v;
+            }
+            if (!pok) { ok = false; return false; }
+        }
+        return false;
     }
     if (o->type == kFloatComparison) {
         /* GameStateCompareOp - decoded (research: 1p-animation-is-one-authored-

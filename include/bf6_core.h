@@ -5152,6 +5152,25 @@ BF6_API bf6_ant_runtime* bf6_ant_runtime_create(bf6_ctx*, const char* root_asset
 BF6_API void bf6_ant_runtime_set_bool(bf6_ant_runtime*, const char* state, int value);
 BF6_API void bf6_ant_runtime_set_float(bf6_ant_runtime*, const char* state, float value);
 BF6_API void bf6_ant_runtime_set_int(bf6_ant_runtime*, const char* state, int32_t value);
+/* EQUIP A WEAPON the way the game does it, not by setting one state. Besides
+ * fb.wep.specificweapon and fb.weapontype (bf6_inspect_ids gives both), the
+ * 1P pre-update expression program copies them into the dual-wield CACHED
+ * states when the soldier is not dual-wielding (pc 0x12a0c..0x12b28:
+ * dualwield.specificweapon.cached := fb.wep.specificweapon,
+ * dualwield.weapontype.cached := fb.weapontype) - and the stance and
+ * weapon-pose lookups key on the CACHED ones. Left at their default (1,
+ * 1HGadget) every rifle stands in the grenade pose. weapon_type < 0 leaves
+ * the type states unset. */
+BF6_API void bf6_ant_runtime_set_weapon(bf6_ant_runtime*, int32_t specific_weapon, int32_t weapon_type);
+/* WHICH ASSET A LOOKUP PICKS FOR A WEAPON. Follows `asset` through context
+ * databases and their wrappers, with the weapon equipped as
+ * bf6_ant_runtime_set_weapon does, to the controller asset the game would
+ * build - for "animations/kingston/controllers/1p.weaponpose.cdb", the stance
+ * the first-person 1p.locostance.slc stands in (the M4A1's own
+ * p_1p_oma_m4a1_stand_idle_01, not a generic rifle hold). Returns the length
+ * needed; "" when nothing matches. */
+BF6_API int bf6_ant_resolve_for_weapon(bf6_ctx*, const char* asset, int32_t specific_weapon,
+                                       int32_t weapon_type, char* out, int out_len);
 /* Advance by `seconds`. Returns 1, or 0 if the runtime has nothing to run. */
 BF6_API int  bf6_ant_runtime_update(bf6_ant_runtime*, float seconds);
 /* The current pose: 12 floats per bone into out (bone_max bones). Returns the

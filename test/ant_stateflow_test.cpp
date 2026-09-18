@@ -83,8 +83,7 @@ int main(int argc, char** argv)
     std::printf("== %s (specificweapon %d, type %d)\n", gun.first, gun.second.first, gun.second.second);
     bf6_ant_runtime* rt = bf6_ant_runtime_create(c, kRoot, kRig, kSke, err, (int)sizeof(err));
     if (!rt) { std::printf("create: %s\n", err); bf6_close(c); return 1; }
-    bf6_ant_runtime_set_int(rt, kWeapon, gun.second.first);
-    bf6_ant_runtime_set_int(rt, kType, gun.second.second);
+    bf6_ant_runtime_set_weapon(rt, gun.second.first, gun.second.second);   /* incl. the dual-wield cached states */
     const int bones = bf6_ant_runtime_pose(rt, nullptr, 0);
     std::vector<float> pose((size_t)bones * 12), first;
 
@@ -159,8 +158,7 @@ int main(int argc, char** argv)
         for (int t = 0; t <= 9; ++t) {
             bf6_ant_runtime* r = bf6_ant_runtime_create(c, kRoot, kRig, kSke, err, (int)sizeof(err));
             if (!r) break;
-            bf6_ant_runtime_set_int(r, kWeapon, 46);
-            bf6_ant_runtime_set_int(r, kType, t);
+            bf6_ant_runtime_set_weapon(r, 46, t);
             bf6_inspect_input_state s{};
             bf6_inspect_aim_state a{};
             bool rolled = false;

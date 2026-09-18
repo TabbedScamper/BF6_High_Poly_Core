@@ -1920,3 +1920,7 @@ target_include_directories(ptm_probe PRIVATE src include)
 add_executable(anim_clip_drives_probe test/anim_clip_drives_probe.cpp)
 target_link_libraries(anim_clip_drives_probe PRIVATE bf6_core_static)
 target_include_directories(anim_clip_drives_probe PRIVATE src include)
+
+add_executable(ant_weaponpose_probe test/ant_weaponpose_probe.cpp)
+target_link_libraries(ant_weaponpose_probe PRIVATE bf6_core_static)
+target_include_directories(ant_weaponpose_probe PRIVATE src include)

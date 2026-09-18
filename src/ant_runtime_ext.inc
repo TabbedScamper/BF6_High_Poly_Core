@@ -1657,6 +1657,7 @@ std::unique_ptr<Ctrl> Runtime::make(const Obj* a)
 struct AntRuntimeHandle {
     std::unique_ptr<bf6ant::Runtime> rt;
     std::unique_ptr<bf6ant::Ctrl> root;
+    const bf6ant::Obj* root_obj = nullptr;   /* built into `root` on the first update */
     bf6ant::Pose pose;
     std::string root_path;
 };
@@ -1689,8 +1690,12 @@ bf6_ant_runtime* bf6_ant_runtime_create(bf6_ctx* c, const char* root_asset, cons
     bf6_free(c, s);
     const bf6ant::Obj* root = rt.g.root(root_asset);
     if (!root) return fail("root asset: " + rt.g.error());
-    h->root = rt.make(root);
-    if (!h->root) return fail("root asset has no controller");
+    /* THE GRAPH IS BUILT ON THE FIRST UPDATE, not here. Building a controller
+     * runs its lookups (which stance, which weapon pose), and the game builds
+     * a soldier's graph with the soldier's states already live. Built here, a
+     * caller's weapon would arrive one step late: every lookup would first pick
+     * for the authored defaults - a grenade - and then crossfade away. */
+    h->root_obj = root;
     h->root_path = root_asset;
     h->pose = rt.bind;
     AntRuntimeHandle* out = h.release();
@@ -1705,10 +1710,45 @@ void bf6_ant_runtime_set_float(bf6_ant_runtime* r, const char* s, float v)
 void bf6_ant_runtime_set_int(bf6_ant_runtime* r, const char* s, int32_t v)
 { if (r && s) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_int(s, v); }
 
+void bf6_ant_runtime_set_weapon(bf6_ant_runtime* r, int32_t specific_weapon, int32_t weapon_type)
+{
+    if (!r) return;
+    bf6ant::States& st = reinterpret_cast<AntRuntimeHandle*>(r)->rt->st;
+    st.set_int("animations/glacier/global/gamestates/fb.wep.specificweapon.enumgs", specific_weapon);
+    st.set_bool("animations/glacier/global/gamestates/fb.wep.isdualwielding.bool", false);
+    /* not dual-wielding: the program's else-branch copies the live values */
+    st.set_int("animations/glacier/global/gamestates/dualwield.specificweapon.cached.enumgs", specific_weapon);
+    if (weapon_type >= 0) {
+        st.set_int("animations/common/fb.weapontype.enumgs", weapon_type);
+        st.set_int("animations/glacier/global/gamestates/dualwield.weapontype.cached.enumgs", weapon_type);
+    }
+}
+
+int bf6_ant_resolve_for_weapon(bf6_ctx* c, const char* asset, int32_t specific_weapon,
+                               int32_t weapon_type, char* out, int out_len)
+{
+    std::string s;
+    if (c && asset) {
+        AntRuntimeHandle h;
+        h.rt = std::make_unique<bf6ant::Runtime>(c);
+        bf6_ant_runtime_set_weapon(reinterpret_cast<bf6_ant_runtime*>(&h), specific_weapon, weapon_type);
+        if (const bf6ant::Obj* a = h.rt->g.root(asset))
+            if (const bf6ant::Obj* leaf = bf6ant::resolve_ctrl_asset(*h.rt, a)) s = leaf->path;
+    }
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)s.size() + 1;
+}
+
 int bf6_ant_runtime_update(bf6_ant_runtime* r, float seconds)
 {
     auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
-    if (!h || !h->root) return 0;
+    if (!h) return 0;
+    if (!h->root && h->root_obj) {
+        h->root = h->rt->make(h->root_obj);
+        h->root_obj = nullptr;
+        if (!h->root) h->rt->note("root asset has no controller: " + h->root_path);
+    }
+    if (!h->root) return 0;
     bf6ant::Pose p;
     h->root->update(*h->rt, seconds * bf6ant::kTicksPerSecond, p);
     if (p.q.size() != h->rt->bind.q.size()) p = h->rt->bind;

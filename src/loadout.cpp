@@ -969,8 +969,33 @@ std::string resolve_idle_clip(bf6_ctx* c, const std::string& role,
     return clip_path;
 }
 
+/* THE FIRST-PERSON STANCE FOR THIS WEAPON. The game's standing 1P pose is
+ * 1p.locostance.slc, whose base is 1p.weaponpose.cdb: a lookup on the
+ * weapon's animation identity (through the dual-wield cached states) that
+ * lands on each weapon's own stance - the M4A1's is p_1p_oma_m4a1_stand_idle_01.
+ * The generic rifle hold is only the fallback for a weapon the lookup cannot
+ * place; it differs from the M4A1's own stance by up to 39 degrees on the
+ * left hand, which is a hand that misses the weapon. */
+std::string first_person_stance(bf6_ctx* c, const std::string& item)
+{
+    if (!item.empty()) {
+        int32_t sw = -1, wt = -1;
+        char err[256] = {0};
+        if (bf6_inspect_ids(c, item.c_str(), &sw, &wt, err, (int)sizeof(err))) {
+            char path[512] = {0};
+            bf6_ant_resolve_for_weapon(c, "animations/kingston/controllers/1p.weaponpose.cdb", sw, wt, path, (int)sizeof(path));
+            if (path[0]) {
+                bf6_anim_binding_stats st{};
+                const int n = bf6_anim_bindings(c, path, kRig1p, kSkeleton1p, nullptr, 0, &st);
+                if (n >= 1 && n <= 4096) return path;
+            }
+        }
+    }
+    return k1pStandClip;
+}
+
 bool pose_samples(bf6_ctx* c, const std::string& role, Pose& out, std::string& error,
-                  bool first_person = false)
+                  bool first_person = false, const std::string& item = std::string())
 {
     /* WHICH VARIANT THE ARCHIVE ACTUALLY CARRIES, not a hardcoded suffix.
      *
@@ -996,7 +1021,7 @@ bool pose_samples(bf6_ctx* c, const std::string& role, Pose& out, std::string& e
         /* ONE CLIP FOR EVERY ROLE. A first-person view is a pair of arms and a
          * weapon, and the arms do not know which class is wearing them - the
          * per-role poses are a property of the third-person loadout screen. */
-        clip_path = k1pStandClip;
+        clip_path = first_person_stance(c, item);
         bf6_anim_binding_stats st{};
         const int n = bf6_anim_bindings(c, clip_path.c_str(), kRig1p, kSkeleton1p, nullptr, 0, &st);
         if (n < 1 || n > 4096) {
@@ -1048,6 +1073,281 @@ bool pose_samples(bf6_ctx* c, const std::string& role, Pose& out, std::string& e
     bf6_free(c, clip);
     if (!ok) error = "The selected soldier pose is unavailable.";
     return ok;
+}
+
+/* ------------------------------------------------ the weapon's own grip --
+ *
+ * A CLASS IDLE IS NOT HOLDING THIS GUN. The front-end loadout idle is authored
+ * once per class, and its arms and weapon bones carry a generic hold. The
+ * game puts the equipped weapon's own grip on top: an authored H-pose clip per
+ * weapon (`hposes_<weapon>` under assets/3p/weapons/) whose arm and weapon DOFs
+ * replace the idle's, and then a runtime IK pass that lands the left hand on
+ * the weapon's left-hand marker. Without either, the arms stand in a hold made
+ * for no weapon in particular - crossed forearms, a left hand in the air - and
+ * which classes look worst depends only on how far their idle's generic hold
+ * is from a rifle grip. Support and recon are the furthest.
+ *
+ * Both steps are ported from the research UI viewer that poses the four class
+ * stances correctly (impl/bf6_ui_tool/source/viewer/bf6viewer.cpp:
+ * SoldierHposeChannel, ResolveSoldierWeaponHpose, ApplySoldierWeaponHpose,
+ * RotateSoldierModelBasis, SolveSoldierArmIk), which is the oracle here. */
+
+/* Which DOFs the grip pose owns: the weapon's bones and both arms from the
+ * shoulder down (SoldierHposeChannel, mask All). */
+bool hpose_channel(const char* dof)
+{
+    if (!dof || !*dof) return false;
+    std::string name(dof);
+    if (name.size() >= 2 && name[name.size() - 2] == '.') name.resize(name.size() - 2);
+    auto starts = [&](const char* p) { return name.rfind(p, 0) == 0; };
+    return starts("Wep") ||
+           starts("LeftShoulder") || starts("LeftArm") || starts("LeftForeArm") || starts("LeftHand") ||
+           starts("RightShoulder") || starts("RightArm") || starts("RightForeArm") || starts("RightHand");
+}
+
+/* The weapon's grip clip: `hposes_<leaf, lowercase alphanumerics>` under
+ * assets/3p/weapons/. The M2010's grip chooser names it m2010 where the
+ * armory says m2010esr; that one alias is kept exact, as the viewer keeps it,
+ * so no suffix-stripping guess binds a different weapon's grip. */
+std::string resolve_weapon_hpose(bf6_ctx* c, const std::string& item)
+{
+    const size_t slash = item.find_last_of("/\\");
+    const std::string bare = slash == std::string::npos ? item : item.substr(slash + 1);
+    std::string norm;
+    for (unsigned char ch : bare) if (std::isalnum(ch)) norm.push_back((char)std::tolower(ch));
+    if (norm.empty()) return std::string();
+    std::vector<std::string> leaves{ "hposes_" + norm };
+    if (norm == "m2010esr") leaves.push_back("hposes_m2010");
+    for (const std::string& leaf : leaves) {
+        const int n = bf6_list_ebx(c, leaf.c_str(), nullptr, 0);
+        if (n <= 0) continue;
+        std::vector<bf6_asset> rows((size_t)n);
+        const int got = bf6_list_ebx(c, leaf.c_str(), rows.data(), n);
+        for (int i = 0; i < got; ++i) {
+            if (!rows[(size_t)i].name) continue;
+            const std::string path = rows[(size_t)i].name;
+            std::string lower = path;
+            for (char& ch : lower) ch = (char)std::tolower((unsigned char)ch);
+            const size_t at = lower.find_last_of("/\\");
+            const std::string cand = at == std::string::npos ? lower : lower.substr(at + 1);
+            if (cand == leaf && lower.find("/assets/3p/weapons/") != std::string::npos) return path;
+        }
+    }
+    return std::string();
+}
+
+/* Overlay the grip pose's frame `pose_index` (1 by default, as the viewer
+ * plays it) onto every frame of `channels`, DOF by DOF: a destination
+ * binding the grip owns takes the grip clip's value for the SAME DOF name and
+ * component. Scalars are never touched. Returns how many DOFs were replaced;
+ * 0 means there is no grip for this weapon, which is reported, not fatal. */
+struct GripOverride { int channel; float v[4]; };
+
+std::vector<GripOverride> weapon_hpose_overrides(bf6_ctx* c, const std::string& item,
+                                                 const std::vector<bf6_anim_binding>& bindings,
+                                                 int channel_count, std::string* used = nullptr,
+                                                 int pose_index = 1)
+{
+    std::vector<GripOverride> out;
+    const std::string path = resolve_weapon_hpose(c, item);
+    if (path.empty() || channel_count < 1) return out;
+    bf6_anim_binding_stats st{};
+    const int n = bf6_anim_bindings(c, path.c_str(), kRig, kSkeleton, nullptr, 0, &st);
+    if (n < 1 || n > 4096) return out;
+    std::vector<bf6_anim_binding> src((size_t)n);
+    if (bf6_anim_bindings(c, path.c_str(), kRig, kSkeleton, src.data(), n, &st) != n) return out;
+    bf6_anim_clip* clip = bf6_anim_clip_open(c, path.c_str());
+    if (!clip) return out;
+    if (clip->key_time_count > 1 && clip->channel_count > 0) {
+        const int f = std::max(0, std::min(pose_index, clip->key_time_count - 1));
+        std::vector<float> grip((size_t)clip->channel_count * 4, 0.f);
+        if (bf6_anim_clip_sample(c, clip, f, grip.data(), nullptr)) {
+            std::map<std::pair<std::string, int>, const bf6_anim_binding*> by_dof;
+            for (const bf6_anim_binding& b : src) by_dof.emplace(std::make_pair(std::string(b.dof_name), b.component), &b);
+            for (const bf6_anim_binding& d : bindings) {
+                if (d.component == BF6_ANIM_DOF_SCALAR || !hpose_channel(d.dof_name)) continue;
+                auto it = by_dof.find(std::make_pair(std::string(d.dof_name), d.component));
+                if (it == by_dof.end()) continue;
+                const bf6_anim_binding& s = *it->second;
+                if (d.channel < 0 || d.channel >= channel_count || s.channel < 0 || s.channel >= clip->channel_count) continue;
+                GripOverride g{ d.channel, {} };
+                std::memcpy(g.v, grip.data() + (size_t)s.channel * 4, sizeof(g.v));
+                out.push_back(g);
+            }
+        }
+    }
+    bf6_free(c, clip);
+    if (!out.empty() && used) *used = path;
+    static const bool trace = std::getenv("BF6_POSE_TRACE") != nullptr;
+    if (trace) std::fprintf(stderr, "grip pose: %s -> %s, %zu DOF(s) replaced\n", item.c_str(), path.c_str(), out.size());
+    return out;
+}
+
+void apply_grip(const std::vector<GripOverride>& g, float* channels, int channel_count)
+{
+    for (const GripOverride& o : g)
+        if (o.channel >= 0 && o.channel < channel_count)
+            std::memcpy(channels + (size_t)o.channel * 4, o.v, sizeof(o.v));
+}
+
+int apply_weapon_hpose(bf6_ctx* c, const std::string& item, const std::vector<bf6_anim_binding>& bindings,
+                       std::vector<float>& channels, int channel_count, int frames)
+{
+    const std::vector<GripOverride> g = weapon_hpose_overrides(c, item, bindings, channel_count);
+    for (int fr = 0; fr < frames; ++fr) apply_grip(g, channels.data() + (size_t)fr * channel_count * 4, channel_count);
+    return (int)g.size();
+}
+
+/* Turn a model-space basis so `from` points along `to`, keeping its position
+ * (RotateSoldierModelBasis). Row-vector convention, as mul() is. */
+bool rotate_model_basis(M43& m, const float from_in[3], const float to_in[3])
+{
+    auto len = [](const float* v) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); };
+    float from[3] = { from_in[0], from_in[1], from_in[2] }, to[3] = { to_in[0], to_in[1], to_in[2] };
+    const float lf = len(from), lt = len(to);
+    if (lf < 1e-12f || lt < 1e-12f) return false;
+    for (int k = 0; k < 3; ++k) { from[k] /= lf; to[k] /= lt; }
+    float dot = from[0] * to[0] + from[1] * to[1] + from[2] * to[2];
+    if (!std::isfinite(dot)) return false;
+    dot = std::max(-1.f, std::min(dot, 1.f));
+    float axis[3] = { from[1] * to[2] - from[2] * to[1], from[2] * to[0] - from[0] * to[2], from[0] * to[1] - from[1] * to[0] };
+    const float al = len(axis);
+    if (al < 1e-6f) {
+        if (dot > 0.999999f) return true;
+        const float fb[3] = { std::fabs(from[0]) < 0.8f ? 1.f : 0.f, std::fabs(from[0]) < 0.8f ? 0.f : 1.f, 0.f };
+        axis[0] = from[1] * fb[2] - from[2] * fb[1];
+        axis[1] = from[2] * fb[0] - from[0] * fb[2];
+        axis[2] = from[0] * fb[1] - from[1] * fb[0];
+        const float l2 = len(axis);
+        if (l2 < 1e-12f) return false;
+        for (int k = 0; k < 3; ++k) axis[k] /= l2;
+    } else {
+        for (int k = 0; k < 3; ++k) axis[k] /= al;
+    }
+    /* XMMatrixRotationAxis, a row-vector matrix: the transpose of the
+     * column-vector Rodrigues rotation. */
+    const float ang = std::acos(dot), cs = std::cos(ang), sn = std::sin(ang), t = 1.f - cs;
+    const float x = axis[0], y = axis[1], z = axis[2];
+    M43 r = identity43();
+    r.m[0] = t * x * x + cs;     r.m[1] = t * x * y + sn * z; r.m[2] = t * x * z - sn * y;
+    r.m[3] = t * x * y - sn * z; r.m[4] = t * y * y + cs;     r.m[5] = t * y * z + sn * x;
+    r.m[6] = t * x * z + sn * y; r.m[7] = t * y * z - sn * x; r.m[8] = t * z * z + cs;
+    const float px = m.m[9], py = m.m[10], pz = m.m[11];
+    m = mul(m, r);
+    m.m[9] = px; m.m[10] = py; m.m[11] = pz;
+    return true;
+}
+
+/* Recompose every bone after `from` from its local and its parent's model. */
+bool recompose_after(const bf6_skeleton* s, int from, const std::vector<M43>& local, std::vector<M43>& model)
+{
+    for (int b = from + 1; b < s->bone_count; ++b) {
+        const int p = s->bones[b].parent;
+        if (p < 0 || p >= b) return false;
+        model[(size_t)b] = mul(local[(size_t)b], model[(size_t)p]);
+    }
+    return true;
+}
+
+/* Two-bone arm IK to a hand target (SolveSoldierArmIk): the elbow stays on
+ * the side it was bending to, the reach is clamped to what this outfit's
+ * limb lengths can do, and the hand takes the target's orientation. */
+bool solve_arm_ik(const bf6_skeleton* s, int arm, int fore, int hand, const M43& target,
+                  const std::vector<M43>& local, std::vector<M43>& model)
+{
+    if (!s || arm < 0 || fore < 0 || hand < 0 ||
+        s->bones[fore].parent != arm || s->bones[hand].parent != fore) return false;
+    auto P = [&](int b, float* o) { o[0] = model[(size_t)b].m[9]; o[1] = model[(size_t)b].m[10]; o[2] = model[(size_t)b].m[11]; };
+    auto sub = [](const float* a, const float* b, float* o) { for (int k = 0; k < 3; ++k) o[k] = a[k] - b[k]; };
+    auto len = [](const float* v) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); };
+    auto cross = [](const float* a, const float* b, float* o) {
+        o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; };
+    float sh[3], el[3], wr[3], rq[3] = { target.m[9], target.m[10], target.m[11] };
+    P(arm, sh); P(fore, el); P(hand, wr);
+    float u[3], l[3], reach[3];
+    sub(el, sh, u); sub(wr, el, l); sub(rq, sh, reach);
+    const float ul = len(u), ll = len(l), rl = len(reach);
+    if (ul < 1e-5f || ll < 1e-5f || rl < 1e-5f) return false;
+    float dir[3] = { reach[0] / rl, reach[1] / rl, reach[2] / rl };
+    const float minr = std::fabs(ul - ll) + 1e-5f, maxr = ul + ll - 1e-5f;
+    const float sr = std::max(minr, std::min(rl, maxr));
+    const float st[3] = { sh[0] + dir[0] * sr, sh[1] + dir[1] * sr, sh[2] + dir[2] * sr };
+    float nrm[3];
+    cross(u, l, nrm);
+    if (len(nrm) < 1e-5f) { const float up[3] = { 0, 1, 0 }; cross(dir, up, nrm); }
+    if (len(nrm) < 1e-5f) { const float xa[3] = { 1, 0, 0 }; cross(dir, xa, nrm); }
+    { const float nl = len(nrm); for (int k = 0; k < 3; ++k) nrm[k] /= nl; }
+    float bend[3];
+    cross(nrm, dir, bend);
+    { const float bl = len(bend); if (bl < 1e-12f) return false; for (int k = 0; k < 3; ++k) bend[k] /= bl; }
+    const float along = (ul * ul + sr * sr - ll * ll) / (2.f * sr);
+    const float perp = std::sqrt(std::max(0.f, ul * ul - along * along));
+    float ea[3], eb[3];
+    for (int k = 0; k < 3; ++k) { ea[k] = sh[k] + dir[k] * along + bend[k] * perp; eb[k] = sh[k] + dir[k] * along - bend[k] * perp; }
+    auto d2 = [](const float* a, const float* b) { float s2 = 0; for (int k = 0; k < 3; ++k) s2 += (a[k] - b[k]) * (a[k] - b[k]); return s2; };
+    const float* se = d2(ea, el) <= d2(eb, el) ? ea : eb;
+    float from[3], to[3];
+    sub(el, sh, from); sub(se, sh, to);
+    if (!rotate_model_basis(model[(size_t)arm], from, to)) return false;
+    if (!recompose_after(s, arm, local, model)) return false;
+    float me[3], mw[3];
+    P(fore, me); P(hand, mw);
+    sub(mw, me, from); sub(st, me, to);
+    if (!rotate_model_basis(model[(size_t)fore], from, to)) return false;
+    if (!recompose_after(s, fore, local, model)) return false;
+    /* The marker carries the wrist's orientation as well as its position; a
+     * clamped position is kept only when the marker is out of reach. */
+    model[(size_t)hand] = target;
+    if (rl > maxr || rl < minr) { model[(size_t)hand].m[9] = st[0]; model[(size_t)hand].m[10] = st[1]; model[(size_t)hand].m[11] = st[2]; }
+    return recompose_after(s, hand, local, model);
+}
+
+/* THE LEFT HAND GOES TO THE WEAPON. The clip carries the weapon's hand targets
+ * in weapon space under Wep_Align; the game's runtime IK moves that branch so
+ * Wep_IK_RightHand sits on the drawn right hand, and pulls the left arm onto
+ * Wep_IK_LeftHand. The viewer reconstructs exactly that (bf6viewer.cpp
+ * 4250-4330): solvedAlign = inverse(rightIkRelative) * rightHand, then a
+ * two-bone solve of the left arm to leftIkRelative * solvedAlign. The right
+ * arm is left as authored.
+ *
+ * `model` must be composed from `local` on entry. On success both are
+ * updated: `model` holds the solved arm and `local` is re-derived from it, so
+ * a caller that exports locals hands out the same pose it skins. Returns
+ * false (and changes nothing observable) when the rig lacks any of the bones. */
+bool solve_left_arm_to_weapon(const bf6_skeleton* s, std::vector<M43>& local, std::vector<M43>& model)
+{
+    auto find = [&](const char* nm) {
+        for (int i = 0; i < s->bone_count; ++i) if (s->bones[i].name && std::strcmp(s->bones[i].name, nm) == 0) return i;
+        return -1;
+    };
+    const int wa = find("Wep_Align"), ikr = find("Wep_IK_RightHand"), ikl = find("Wep_IK_LeftHand");
+    const int rh = find("RightHand"), la = find("LeftArm"), lf = find("LeftForeArm"), lh = find("LeftHand");
+    M43 inv_wa, inv_right_rel;
+    if (wa < 0 || ikr < 0 || ikl < 0 || rh < 0 || la < 0 || lf < 0 || lh < 0) return false;
+    if (!inverse43(model[(size_t)wa], inv_wa)) return false;
+    const M43 right_rel = mul(model[(size_t)ikr], inv_wa);
+    if (!inverse43(right_rel, inv_right_rel)) return false;
+    const M43 solved_align = mul(inv_right_rel, model[(size_t)rh]);
+    const M43 left_target = mul(mul(model[(size_t)ikl], inv_wa), solved_align);
+    auto dist = [&](const M43& a) {
+        const float dx = a.m[9] - left_target.m[9], dy = a.m[10] - left_target.m[10], dz = a.m[11] - left_target.m[11];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    const float before = dist(model[(size_t)lh]);
+    const std::vector<M43> keep = model;
+    if (!solve_arm_ik(s, la, lf, lh, left_target, local, model)) { model = keep; return false; }
+    /* The viewer's own diagnostic: how far the left hand was from its weapon
+     * marker, and how far it is after the solve. */
+    static const bool trace = std::getenv("BF6_POSE_TRACE") != nullptr;
+    if (trace) std::fprintf(stderr, "left-hand IK: %.4f m from the weapon's marker before, %.4f m after\n",
+                            before, dist(model[(size_t)lh]));
+    for (int i = 0; i < s->bone_count; ++i) {
+        const int p = s->bones[i].parent;
+        M43 inv_p;
+        if (p < 0) local[(size_t)i] = model[(size_t)i];
+        else if (inverse43(model[(size_t)p], inv_p)) local[(size_t)i] = mul(model[(size_t)i], inv_p);
+    }
+    return true;
 }
 
 /* The posed skinning palette for one character mesh, the weapon frame in the
@@ -1163,6 +1463,18 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
         }
     }
     if (ok && feet) for (int k = 0; k < 3; ++k) foot[k] /= (float)feet;
+    /* The left hand to the weapon (solve_left_arm_to_weapon). Third person
+     * only: the reference viewer solves the front-end 3P idles, and whether the
+     * first-person holds want the same pass is not established. The palette
+     * and the exported local pose follow the solved arm, so the static and the
+     * skinned soldier agree. */
+    if (ok && !first_person && solve_left_arm_to_weapon(s, local, model)) {
+        for (int i = 0; i < s->bone_count; ++i) {
+            skin[(size_t)i] = mul(from12(s->bones[i].inverse), model[(size_t)i]);
+            if (bind && i < (int)bind->size())
+                for (int k = 0; k < 12; ++k) (*bind)[(size_t)i].posed[k] = local[(size_t)i].m[k];
+        }
+    }
     if (ok && eye_y) {
         if (have_eye_l && have_eye_r) *eye_y = (eye_l + eye_r) * 0.5f;
         else if (have_eye_l) *eye_y = eye_l;
@@ -1418,7 +1730,12 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
     if (!ch || !outfit) { error = "The selected character or outfit is unavailable."; return finish(); }
 
     Pose pose;
-    if (!pose_samples(c, role, pose, error, first_person)) return finish();
+    if (!pose_samples(c, role, pose, error, first_person, item)) return finish();
+    /* The equipped weapon's own grip over the class idle's generic hold (see
+     * apply_weapon_hpose). Third person only: the grip clips live under
+     * assets/3p/weapons/, and a first-person hold is its own authored clip. */
+    if (!first_person && !pose.channels.empty())
+        apply_weapon_hpose(c, item, pose.bindings, pose.channels, (int)(pose.channels.size() / 4), 1);
 
     const std::string base = ch->root + "/set/set_001/" + character + "_set_001";
     std::vector<std::string> meshes;
@@ -1665,7 +1982,7 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
             /* The first-person resting hold. Now that the RAW and flat pose
              * containers read, this is the authored asset rather than frame 0
              * of a turn-in-place transition standing in for it. */
-            clip_path = k1pStandClip;
+            clip_path = first_person_stance(c, field(req, "item", "carbine/m4a1"));
             bf6_anim_binding_stats st{};
             const int n = bf6_anim_bindings(c, clip_path.c_str(), rig_ebx, ske_ebx,
                                             nullptr, 0, &st);
@@ -1769,8 +2086,15 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
         body.assign((size_t)bones_out * (size_t)frames * 12, 0.f);
         std::vector<float> channels((size_t)clip->channel_count * 4, 0.f);
         std::vector<M43> local((size_t)s->bone_count);
+        std::vector<M43> model((size_t)s->bone_count);
         std::vector<float> add_channels;
         if (add_clip) add_channels.assign((size_t)add_clip->channel_count * 4, 0.f);
+        /* The equipped weapon's grip over the class hold, and the left hand to
+         * the weapon, on EVERY frame - the same two steps bf6_loadout_soldier
+         * applies to its one frame, so frame 0 here is still its `posed`. */
+        const std::vector<GripOverride> grip = first_person
+            ? std::vector<GripOverride>()
+            : weapon_hpose_overrides(c, field(req, "item", "carbine/m4a1"), bindings, clip->channel_count);
 
         bool ok = true;
         for (int f = 0; f < frames && ok; ++f) {
@@ -1780,6 +2104,7 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
              * it. */
             const int base_f = f < clip->key_time_count ? f : clip->key_time_count - 1;
             if (!bf6_anim_clip_sample(c, clip, base_f, channels.data(), nullptr)) { ok = false; break; }
+            apply_grip(grip, channels.data(), clip->channel_count);
             /* Start from the BIND local every frame. A bone the clip rotates
              * but does not translate then keeps its authored offset, instead of
              * collapsing onto its parent. */
@@ -1825,6 +2150,15 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
                     }
                 }
                 if (!ok) break;
+            }
+            if (!first_person) {
+                bool topo = true;
+                for (int i = 0; i < s->bone_count && topo; ++i) {
+                    const int p = s->bones[i].parent;
+                    if (p >= i) { topo = false; break; }
+                    model[(size_t)i] = p < 0 ? local[(size_t)i] : mul(local[(size_t)i], model[(size_t)p]);
+                }
+                if (topo) solve_left_arm_to_weapon(s, local, model);
             }
             for (int t = 0; t < bones_out; ++t) {
                 const float* m = local[(size_t)bone_of[(size_t)t]].m;

@@ -138,6 +138,45 @@ int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
     const bf6::EbxValue* v = data->f(0xe287c7f3u);
     if (!v) return fail("this weapon's data carries no specific-weapon value");
     if (specific_weapon) *specific_weapon = (int32_t)ii_iv(v);
+    /* fb.weapontype is a table lookup, not a field: the weapon's
+     * WeaponAnimBaseSetEnum (0x668292c7) indexes the conversion list the
+     * soldier's weapons component carries (SoldierWeaponsComponentData
+     * 0x0ec7c74b -> AnimBaseSetToAntWeaponTypeList 0xc508f787, rows of
+     * {0x668292c7 base set, 0xfb58aefa ant weapon type}). The component is
+     * read first so the list comes from the soldier rather than a path typed
+     * in here; its own asset is the fallback when that soldier is not in the
+     * mount. */
+    const bf6::EbxValue* base = data->f(0x668292c7u);
+    if (weapon_type && base) {
+        static const char* kSoldier = "common/gameplay/soldier/glacier_soldier";
+        static const char* kWeaponsComponent = "38b92884-0967-6d56-6610-10fec2436912";
+        static const char* kConversionList = "common/hardware/gadgets/_logic/animbasesettoweapontypeconversion";
+        const bf6ant::Obj* list = nullptr;
+        if (const bf6ant::Obj* sr = g.root(kSoldier)) {
+            for (int i = 0; i < 4096 && !list; ++i) {
+                bf6::EbxValue ref; ref.kind = bf6::EbxValue::Kind::InstanceRef; ref.instance = i;
+                const bf6ant::Obj* o = g.resolve(&ref, sr);
+                if (!o) break;
+                if (o->type == kWeaponsComponent) list = g.resolve(o->f(0x0ec7c74bu), o);
+            }
+        }
+        if (!list) {
+            if (const bf6ant::Obj* cr = g.root(kConversionList)) {
+                for (int i = 0; i < 64 && !list; ++i) {
+                    bf6::EbxValue ref; ref.kind = bf6::EbxValue::Kind::InstanceRef; ref.instance = i;
+                    const bf6ant::Obj* o = g.resolve(&ref, cr);
+                    if (!o) break;
+                    if (o->f(0xc508f787u)) list = o;
+                }
+            }
+        }
+        const bf6::EbxValue* rows = list ? list->f(0xc508f787u) : nullptr;
+        if (rows) {
+            const int32_t want_base = (int32_t)ii_iv(base);
+            for (const auto& r : rows->items)
+                if ((int32_t)ii_iv(r.field(0x668292c7u)) == want_base) { *weapon_type = (int32_t)ii_iv(r.field(0xfb58aefau)); break; }
+        }
+    }
     return 1;
 }
 

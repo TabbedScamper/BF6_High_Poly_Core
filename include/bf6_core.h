@@ -5224,11 +5224,14 @@ BF6_API float bf6_inspect_aim_step(const bf6_inspect_aim_params*, bf6_inspect_ai
  *                     weapon's animation WeaponAsset enumerator pair on 63 of
  *                     the 64 shipped weapons; the KSG carries 0 there, which is
  *                     a data anomaly, not a rule.
- *   *weapon_type      fb.weapontype: NOT ESTABLISHED. No field of the weapon's
- *                     data carries it and no weapon asset imports the
- *                     enumeration, so it is written by code from something
- *                     else. -1 is returned and the caller must decide what to
- *                     do about it rather than be handed a guess.
+ *   *weapon_type      fb.weapontype: a TABLE LOOKUP, not a field. The weapon's
+ *                     WeaponAnimBaseSetEnum (SoldierWeaponData 0x668292c7)
+ *                     indexes the conversion list the soldier's weapons
+ *                     component carries (SoldierWeaponsComponentData
+ *                     0x0ec7c74b -> AnimBaseSetToAntWeaponTypeList), whose ten
+ *                     rows cover every FB.WeaponType value once: rifle 0 ->
+ *                     Rifle, 1 -> Pistol, 5 -> LMG and so on. -1 when the list
+ *                     or the weapon's base set is missing.
  *
  * Returns 1 when the specific weapon was read, 0 with a reason in `err`. */
 BF6_API int bf6_inspect_ids(bf6_ctx*, const char* item, int32_t* specific_weapon,

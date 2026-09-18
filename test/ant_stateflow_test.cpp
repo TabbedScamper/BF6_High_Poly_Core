@@ -188,10 +188,18 @@ int main(int argc, char** argv)
             { std::printf("  ids: %s\n", err); bad("the M4A1's animation ids did not read"); }
         std::printf("m4a1 ids: specificweapon %d, weapontype %d\n", sw, wt);
         if (sw != 46) bad("the M4A1's specific-weapon value is not its enumerator (46)");
-        int32_t sw2 = -1;
-        if (bf6_inspect_ids(c, "m18", &sw2, nullptr, err, (int)sizeof(err)) && sw2 != 54)
-            bad("the M18's specific-weapon value is not its enumerator (54)");
-        std::printf("m18 ids: specificweapon %d\n", sw2);
+        if (wt != 0) bad("the M4A1's weapon type is not Rifle (0)");
+        /* The type comes from the base-set conversion table, so a pistol and a
+         * light machine gun have to land on their own rows. */
+        const struct { const char* item; int32_t sw; int32_t wt; } more[] = {
+            { "m18", 54, 5 }, { "minimi", 49, 3 } };
+        for (const auto& m : more) {
+            int32_t s = -1, t = -1;
+            if (!bf6_inspect_ids(c, m.item, &s, &t, err, (int)sizeof(err)))
+                { std::printf("  %s ids: %s\n", m.item, err); bad("a weapon's animation ids did not read"); continue; }
+            std::printf("%s ids: specificweapon %d, weapontype %d\n", m.item, s, t);
+            if (s != m.sw || t != m.wt) bad("a weapon's animation ids differ from its data");
+        }
     }
     std::printf("%s\n", fails ? "FAILED" : "PASS");
     bf6_close(c);

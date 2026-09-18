@@ -78,6 +78,7 @@ constexpr const char* kEnumChannel       = "8308d4de-c89c-ebda-5629-55b5ab2e55f9
 constexpr const char* kEnumItem          = "37948790-7933-b4e3-f96d-ab1e63ef9383";
 constexpr const char* kFloatComparison   = "57ef39ec-4fd6-988d-f799-23c09a6addbc";
 constexpr const char* kBoolChooser       = "48155699-ed9c-adcf-4e0a-ccd29461119c";
+constexpr const char* kEnumPair          = "19b1bfd2-07ad-e287-a6be-7ef64ee5e12b";
 constexpr const char* kSignalPolicy      = "7f33ed8d-73d6-8951-ba5e-f3e83c50ab23";
 constexpr const char* kSignalEntry       = "e430c3f8-f311-79c7-b0c4-d2a9a200ddd4";
 constexpr uint32_t kDefault   = 0x97ea1523u;   /* the authored default value, every state type */
@@ -153,6 +154,19 @@ bool States::as_bool(Graph& g, const Obj* o, bool& ok)
         if (!eok) return false;
         ok = true;
         return cur == (int32_t)num(o->f(kItemValue));
+    }
+    if (o->type == kEnumPair) {
+        /* EnumerationEnumeratorPair, bool face Get 0x1408287a0: the enum game
+         * state (+0x30, 0xc2b95529) equals the referenced EnumerationValueAsset's
+         * Value (+0x38 -> 0xc82b46dd). Either reference missing reads false. */
+        const Obj* e = g.resolve(o->f(0xc2b95529u), o);
+        const Obj* ev = g.resolve(o->f(0xf951f98eu), o);
+        if (!e || !ev) { ok = true; return false; }
+        bool eok = false;
+        const int32_t cur = as_int(g, e, eok);
+        if (!eok) return false;
+        ok = true;
+        return cur == (int32_t)num(ev->f(0xc82b46ddu));
     }
     if (o->type == kBoolChooser) {
         /* BoolGameStateChooserAsset (FUN_1409c0350 / FUN_1409c03e0): the

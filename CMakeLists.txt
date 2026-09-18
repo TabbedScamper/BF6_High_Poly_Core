@@ -643,6 +643,10 @@ add_executable(ant_runtime_test test/ant_runtime_test.cpp)
 target_link_libraries(ant_runtime_test PRIVATE bf6_core_static)
 target_include_directories(ant_runtime_test PRIVATE src include)
 
+add_executable(ant_stateflow_test test/ant_stateflow_test.cpp)
+target_link_libraries(ant_stateflow_test PRIVATE bf6_core_static)
+target_include_directories(ant_stateflow_test PRIVATE src include)
+
 add_executable(ds_names_probe test/ds_names_probe.cpp)
 target_link_libraries(ds_names_probe PRIVATE bf6_core_static)
 target_include_directories(ds_names_probe PRIVATE src include)

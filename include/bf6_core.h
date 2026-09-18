@@ -5161,6 +5161,16 @@ BF6_API int  bf6_ant_runtime_pose(const bf6_ant_runtime*, float* out, int bone_m
  * then a line "state: <current state node>" when the root is a state
  * machine. Returns the length needed. */
 BF6_API int  bf6_ant_runtime_notes(const bf6_ant_runtime*, char* out, int out_len);
+/* A game state's current value as the graph sees it (the caller's value, a
+ * value the graph's own tags wrote, or the authored default). *ok = 0 when
+ * the state is not evaluable. */
+BF6_API int  bf6_ant_runtime_get_bool(const bf6_ant_runtime*, const char* state, int* ok);
+/* The root state machine's current node asset path ("" when the root is not
+ * a state machine). Returns the length needed. */
+BF6_API int  bf6_ant_runtime_node(const bf6_ant_runtime*, char* out, int out_len);
+/* 1 when the root state machine has reached a transparent (exit) node and its
+ * blend into it has ended - the graph has handed control back to its parent. */
+BF6_API int  bf6_ant_runtime_finished(const bf6_ant_runtime*);
 
 /* The weapon-inspect drag: camera-yaw input -> fb.camerainput.yaw.float, as
  * the soldier logic computes it. Parameters are READ from the installed
@@ -5184,6 +5194,25 @@ typedef struct {
 BF6_API int   bf6_inspect_input_params_read(bf6_ctx*, bf6_inspect_input_params* out, char* err, int err_len);
 BF6_API float bf6_inspect_input_step(const bf6_inspect_input_params*, bf6_inspect_input_state*,
                                      int inspecting, float raw, int from_mouse);
+
+/* The inspect roll's phase: fb.camerainput.yaw.float -> 1p.aimleftright.phased.float,
+ * the 1P pre-update expression's sub-program (a multiply, a clamp and a
+ * SpringDampenFloat). Every constant is READ from the installed expression
+ * program by following the instruction that writes 1p.aimleftright back to
+ * its inputs; the kernels are transcribed from the executable and match the
+ * game's own VM bit-exactly under emulation (research spec_expression 7).
+ * `dt_ticks` is the frame time in 1/60 s ticks. */
+typedef struct {
+    float scale;                      /* yaw multiplier */
+    float clamp_lo, clamp_hi;         /* target clamp */
+    float stiffness, damping, max_step;
+    float lo, hi;                     /* spring range */
+    int32_t reset_input, wrap;        /* spring flags (constants in the program) */
+} bf6_inspect_aim_params;
+typedef struct { float pos, vel; int32_t init; } bf6_inspect_aim_state;
+BF6_API int   bf6_inspect_aim_params_read(bf6_ctx*, bf6_inspect_aim_params* out, char* err, int err_len);
+BF6_API float bf6_inspect_aim_step(const bf6_inspect_aim_params*, bf6_inspect_aim_state*,
+                                   float yaw, float dt_ticks);
 
 /* ------------------------------------------------------- renderbones ----- */
 /* THE PROCEDURAL BONES ABOVE THE RIG.

@@ -48,6 +48,11 @@ struct Ctrl {
     virtual void set_time(Runtime& rt, float t) = 0;
     virtual void set_phase(Runtime& rt, float p) = 0;
     virtual void restart(Runtime& rt) { set_time(rt, 0.f); }
+    /* QueryInterface(0x317458a7): the controller whose tags (and time block)
+     * answer branch-window queries. Null = the interface is not answered. */
+    virtual Ctrl* tag_leaf() { return nullptr; }
+    /* The BranchOutPointTags a tag leaf carries (clip tag set, 0x70b22fd5). */
+    virtual const std::vector<const Obj*>* branch_tags() const { return nullptr; }
     float scaled_length() const { return length * phase_range; }   /* slot 0x88 */
     /* FUN_140613ec0 */
     float normalise(float p) const {
@@ -108,6 +113,23 @@ double numv(const bf6::EbxValue* v)
 bool boolv(const bf6::EbxValue* v) { return v && v->kind == bf6::EbxValue::Kind::Bool && v->b; }
 }  // namespace
 
+constexpr const char* kT_BranchOutPointTag = "dc937b29-db69-2ed4-b629-27d5ddbd86ba";
+
+/* Every tag of a tag-collection set (TagCollectionSet 0x2146a35a -> each
+ * collection's 0x605f79af list), in authored order. */
+void tag_set_tags(Runtime& rt, const Obj* set, std::vector<const Obj*>& out)
+{
+    if (!set) return;
+    const bf6::EbxValue* cs = set->f(0x2146a35au);
+    if (!cs) return;
+    for (const auto& cr : cs->items) {
+        const Obj* coll = rt.g.resolve(&cr, set);
+        const bf6::EbxValue* ts = coll ? coll->f(0x605f79afu) : nullptr;
+        if (!ts) continue;
+        for (const auto& tr : ts->items) if (const Obj* t = rt.g.resolve(&tr, coll)) out.push_back(t);
+    }
+}
+
 /* --------------------------------------------------------------- clip */
 
 struct ClipCtrl : Ctrl {
@@ -122,6 +144,16 @@ struct ClipCtrl : Ctrl {
     float anim_len = 0.f;      /* anim +0x34 */
     int   anim_last = 0;       /* anim +0x38 (N) */
     bool  cyclic = false;      /* anim +0x6c */
+    std::vector<const Obj*> btags;   /* BranchOutPointTags of the clip's tag set */
+
+    void collect_branch_tags(Runtime& rt, const Obj* a) {
+        std::vector<const Obj*> all;
+        tag_set_tags(rt, rt.g.resolve(a->f(0x70b22fd5u), a), all);
+        for (const Obj* t : all) if (t->type == kT_BranchOutPointTag) btags.push_back(t);
+    }
+    /* ClipController QI 0x317458a7 -> obj+0x58 (tag queries), spec_clip_phase */
+    Ctrl* tag_leaf() override { return this; }
+    const std::vector<const Obj*>* branch_tags() const override { return &btags; }
 
     void init(Runtime& rt, const Obj* a) {
         asset = a;
@@ -141,6 +173,7 @@ struct ClipCtrl : Ctrl {
         if (a->f(0xf1caef81u) && a->f(0xf1caef81u)->kind != bf6::EbxValue::Kind::Null)
             rt.note("clip second animation (+0x48) merge omitted (operator OPEN): " + a->path);
         src = rt.clip(a->path);
+        collect_branch_tags(rt, a);
         /* ctor FUN_14081ef70: ceilf(len / rate) */
         duration = (anim_len > 0.f && rate != 0.f) ? std::ceil(anim_len / rate) : 1.f;
         length = duration;
@@ -290,42 +323,138 @@ constexpr const char* kT_CdbChooser = "534025c7-d78e-a2eb-4a58-144714439738";
 constexpr const char* kT_CdbWrapper = "ef37bda2-e5a0-6dfa-1c60-91a033859a7d";
 constexpr const char* kT_SigPolicy  = "7f33ed8d-73d6-8951-ba5e-f3e83c50ab23";
 
-/* A cross-fade between two live controllers. Only BezierBlendAsset is read
- * (research spec: duration +0x28 0xef693827 in ticks, elapsed += dt clamped
- * to duration (FUN_1407a0880), remaining = duration - elapsed
- * (FUN_1407a0800), weight = piecewise-linear lookup of the 0xf6ec5494
- * samples at progress * count, the last segment running to 1.0). Both sides
- * advance by the same dt.
+constexpr const char* kT_BlendCurve = "7a5304da-cb41-c72b-b137-16a8cef71355";
+constexpr float kEps = 1.52587890625e-05f;        /* 0x149317fc0 */
+
+/* BlendCurve weight tables, 21 floats per type at 0x149b7a710 (FUN_1407a19b0):
+ * the OUTGOING pose's weight, 1 -> 0. Type 3 (Linear) is 1 - x. */
+constexpr float kBlendCurve[3][21] = {
+    { 1.f, .996917307f, .987688363f, .972369909f, .95105654f, .923879504f, .891006529f, .852640152f,
+      .809017003f, .760405958f, .707106769f, .649448037f, .587785244f, .522498548f, .453990489f,
+      .382683426f, .309017003f, .233445361f, .156434461f, .0784590989f, 0.f },
+    { 1.f, .973402977f, .960834265f, .942675829f, .916827321f, .880797088f, .832018375f, .768524766f,
+      .689974487f, .598687649f, .5f, .401312351f, .310025513f, .231475219f, .16798161f, .119202919f,
+      .0831726938f, .0573241748f, .0391657241f, .0265969932f, 0.f },
+    { 1.f, .921540916f, .843565524f, .766554654f, .690982997f, .617316544f, .546009481f, .477501422f,
+      .412214756f, .350551963f, .292893231f, .239594027f, .190983012f, .147359833f, .108993478f,
+      .076120466f, .0489434823f, .0276300795f, .0123116588f, .00308266608f, 0.f } };
+
+/* A cross-fade between an incoming and an outgoing controller (research
+ * spec_stateflow 2b-2c). Durations and elapsed are ticks.
  *
- * The pose operator that mixes the two sides is not yet read from the
- * executable; local-space nlerp/lerp is used and NAMED in the runtime notes. */
+ *   BezierBlend (FUN_1407a0880): the samples 0xf6ec5494 are the INCOMING
+ *     weight at x = i/N, 1.0 implied at x = 1; the outgoing side is updated
+ *     only while the remaining time before this step exceeds eps, and is not
+ *     released by the blend.
+ *   BlendCurve (FUN_1407a12b0): the curve is the OUTGOING weight; at or below
+ *     0.01 the outgoing side is released. Sync scales both sides' steps so
+ *     they cover the same fraction of a length lerped by the weight.
+ *
+ * Both record the pose job FUN_1407a4b70: the Blend kernel FUN_140845cb0
+ * with the new pose first and the old pose second, weighted by the old
+ * pose's weight - blend(new, old, w_old), pose_blend's operand order. */
 struct TransitionCtrl : Ctrl {
-    std::unique_ptr<Ctrl> target, source;
+    enum Kind { Bezier, Curve } kind = Bezier;
+    std::unique_ptr<Ctrl> target;    /* incoming, owned (choosers) */
+    Ctrl* in = nullptr;              /* incoming, owned elsewhere (a state-flow node's child) */
+    std::unique_ptr<Ctrl> source;    /* outgoing */
     float duration = 0.f, elapsed = 0.f;
-    std::vector<float> samples;
-    float weight() const {
-        if (duration <= 0.f || samples.empty()) return 1.f;
-        const float p = std::fmin(elapsed / duration, 1.f);
-        const float x = p * (float)samples.size();
-        const size_t i = (size_t)std::floor(x);
-        if (i >= samples.size()) return 1.f;
-        const float a = samples[i];
-        const float b = i + 1 < samples.size() ? samples[i + 1] : 1.f;
-        return a + (b - a) * (x - (float)i);
+    std::vector<float> samples;      /* Bezier */
+    int curve_type = 0;              /* BlendCurve 0x19a14537 */
+    bool sync = false;               /* BlendCurve 0xd0007236 */
+
+    Ctrl* inc() const { return target ? target.get() : in; }
+    float progress(float e) const {
+        if (duration > 0.f) return std::fmin(std::fmax(e / duration, 0.f), 1.f);
+        return e < 0.f ? 0.f : 1.f;
+    }
+    static float curve(int type, float x) {
+        if (type == 3) return 1.f - x;
+        if (type < 0 || type > 2) return 1.f - x;
+        const int i = (int)(x * 20.f);
+        if (i >= 20) return 0.f;
+        const float f = std::fmin(std::fmax(x * 20.f - (float)i, 0.f), 1.f);
+        return (1.f - f) * kBlendCurve[type][i] + f * kBlendCurve[type][i + 1];
+    }
+    float bezier(float x) const {
+        const int N = (int)samples.size();
+        if (N == 0) return 1.f;
+        const float g = x * (float)N;
+        const int i = (int)g;
+        if (i >= N) return 1.f;
+        const float hi = i < N - 1 ? samples[(size_t)i + 1] : 1.f;
+        const float f = std::fmin(std::fmax(g - (float)i, 0.f), 1.f);
+        return (1.f - f) * samples[(size_t)i] + f * hi;
     }
     float blend_remaining() const { return duration - elapsed; }   /* vtable +0xb8 */
-    void update(Runtime& rt, float dt, Pose& out) override {
-        elapsed = std::fmin(elapsed + dt, duration);
-        Pose tp;
-        source->update(rt, dt, out);
-        target->update(rt, dt, tp);
-        rt.note("transition pose operator: local-space nlerp (engine operator not yet read)");
-        pose_blend(out, tp, weight(), nullptr);
-        phase = target->phase; time = target->time; length = target->length; remaining = target->remaining;
+    void copy_timing() {
+        Ctrl* c = inc();
+        if (!c) return;
+        phase = c->phase; time = c->time; length = c->length; remaining = c->remaining;
+        phase_range = c->phase_range; looping = c->looping; wrapped = c->wrapped;
     }
-    void set_time(Runtime& rt, float t) override { target->set_time(rt, t); }
-    void set_phase(Runtime& rt, float p) override { target->set_phase(rt, p); }
+    void update(Runtime& rt, float dt, Pose& out) override {
+        Ctrl* c = inc();
+        if (!c) { out = rt.bind; return; }
+        const float rem0 = duration - elapsed;
+        elapsed = std::fmin(std::fmax(elapsed + dt, 0.f), std::fmax(duration, 0.f));
+        const float x = progress(elapsed);
+        if (kind == Bezier) {
+            c->update(rt, dt, out);
+            if (rem0 > kEps && source) {
+                Pose po;
+                source->update(rt, dt, po);
+                pose_blend(out, po, 1.f - bezier(x), nullptr);
+            }
+        } else {
+            const float w = curve(curve_type, x);
+            if (w <= 0.01f || !source) {
+                c->update(rt, dt, out);
+                source.reset();
+            } else {
+                Pose po;
+                if (!sync) { c->update(rt, dt, out); source->update(rt, dt, po); }
+                else {
+                    const float Ln = c->length, Lo = source->length;
+                    const float L = (Lo - Ln) * w + Ln;
+                    const float s = L > kEps ? dt / L : 0.f;
+                    c->update(rt, s * Ln, out);
+                    source->update(rt, s * Lo, po);
+                }
+                pose_blend(out, po, w, nullptr);
+            }
+        }
+        copy_timing();
+    }
+    void set_time(Runtime& rt, float t) override { if (inc()) inc()->set_time(rt, t); copy_timing(); }
+    void set_phase(Runtime& rt, float p) override { if (inc()) inc()->set_phase(rt, p); copy_timing(); }
+    Ctrl* tag_leaf() override { return inc() ? inc()->tag_leaf() : nullptr; }
 };
+
+/* A blend for `asset`, or null when the kind is not read (named in notes).
+ * Duration 0xef693827 (ticks); `override_ticks` >= 0 replaces it. */
+std::unique_ptr<TransitionCtrl> make_blend(Runtime& rt, const Obj* blend, float override_ticks = -1.f)
+{
+    if (!blend) return nullptr;
+    auto t = std::make_unique<TransitionCtrl>();
+    t->asset = blend;
+    t->duration = override_ticks >= 0.f ? override_ticks : (float)numv(blend->f(0xef693827u));
+    if (blend->type == kT_Bezier) {
+        t->kind = TransitionCtrl::Bezier;
+        if (const bf6::EbxValue* s = blend->f(0xf6ec5494u))
+            for (const auto& it : s->items) t->samples.push_back((float)numv(&it));
+    } else if (blend->type == kT_BlendCurve) {
+        t->kind = TransitionCtrl::Curve;
+        t->curve_type = (int)numv(blend->f(0x19a14537u));
+        t->sync = boolv(blend->f(0xd0007236u));
+    } else {
+        rt.note("blend kind not implemented, switched without blending: " + blend->type + " (" + blend->path + ")");
+        return nullptr;
+    }
+    if (numv(blend->f(0x0935f04au)) != 0.0)
+        rt.note("blend rotation term 0x0935f04a (p2) not implemented: " + blend->path);
+    return t;
+}
 
 /* Build a transition from `blend` (null = hard switch). Returns `to` itself
  * when there is no blend or it is of a kind not yet read. */
@@ -333,18 +462,11 @@ std::unique_ptr<Ctrl> make_transition(Runtime& rt, const Obj* blend, std::unique
                                       std::unique_ptr<Ctrl> from)
 {
     if (!blend || !from) return to;
-    if (blend->type != kT_Bezier) {
-        rt.note("blend kind not implemented, switched without blending: " + blend->type + " (" + blend->path + ")");
-        return to;
-    }
-    auto t = std::make_unique<TransitionCtrl>();
-    t->duration = (float)numv(blend->f(0xef693827u));
-    if (const bf6::EbxValue* s = blend->f(0xf6ec5494u))
-        for (const auto& it : s->items) t->samples.push_back((float)numv(&it));
-    t->asset = blend;
-    t->phase = to->phase; t->time = to->time; t->length = to->length; t->remaining = to->remaining;
+    auto t = make_blend(rt, blend);
+    if (!t) return to;
     t->target = std::move(to);
     t->source = std::move(from);
+    t->copy_timing();
     return t;
 }
 
@@ -806,6 +928,7 @@ struct SuperLayersCtrl : Ctrl {
         else {
             rt.note("super-layers base crossfade curve not read (linear over +0x78 ticks)");
             auto t = std::make_unique<TransitionCtrl>();
+            t->kind = TransitionCtrl::Curve; t->curve_type = 3;
             t->duration = srcf(rt, asset, 0xc2ad7611u, 0x26b662f5u);
             t->target = std::move(nc); t->source = std::move(base);
             base = std::move(t);
@@ -900,12 +1023,567 @@ struct SuperLayersCtrl : Ctrl {
         Ctrl* src = base.get();
         if (sync >= 0 && sync < (int)layers.size() && !layers[(size_t)sync].inst.empty())
             src = layers[(size_t)sync].inst.front().ctrl.get();
+        /* FUN_140720810 tail: +0x18..+0x24 only; the flags word is not copied */
         if (src) { phase = src->phase; time = src->time; length = src->length; remaining = src->remaining; }
         first = false;
     }
     void set_time(Runtime& rt, float t) override { if (base) base->set_time(rt, t); }
     void set_phase(Runtime& rt, float p) override { if (base) base->set_phase(rt, p); }
+    /* FUN_140720f80: an interface SuperLayers does not answer itself is
+     * forwarded to the sync layer's newest instance (layer asset +0x7c index,
+     * only while that layer has instances), else to the base. */
+    Ctrl* tag_leaf() override {
+        if (sync >= 0 && sync < (int)layers.size() && !layers[(size_t)sync].inst.empty())
+            return layers[(size_t)sync].inst.front().ctrl->tag_leaf();
+        return base ? base->tag_leaf() : nullptr;
+    }
 };
+
+/* ---------------------------------------------------------- state flow */
+
+constexpr const char* kT_StateFlow   = "7947dd2a-67a1-5f67-fae7-fcc39ba32551";
+constexpr const char* kT_SFNode      = "3725ff4d-d4ae-8a0b-da12-8017ab38da5c";
+constexpr const char* kT_BoolGSTag   = "5b52f4b1-7679-5f5a-7f45-2b67ee1c7f84";
+constexpr float kHuge = 3.4028235e38f;   /* DAT_149319c64, the "never ends" tag window end */
+
+/* A tag set evaluated against a running time (research spec_stateflow 3:
+ * DefaultTagCollection, per-tag state FUN_1408cdff0, APPLY FUN_1408ccac0,
+ * LEAVE FUN_1408cc210). Node tag sets run on node time with length BIG.
+ * BoolGameStateTagAsset is the tag kind implemented (Save FUN_1407e3760,
+ * Apply FUN_1407e37d0, Reset FUN_1407e3870); others are named in notes. */
+struct TagSet {
+    struct T { const Obj* a = nullptr; uint8_t s = 0; int16_t c = 0; bool store = false; bool ever = false; };
+    std::vector<T> tags;
+    float prev = 0.f, now = 0.f, length = kNeverEnds;
+    bool jumped = true;          /* Restart (FUN_1408cc170) sets it; the first evaluation sees it */
+    bool looped = false;
+
+    void build(Runtime& rt, const Obj* set) {
+        std::vector<const Obj*> all;
+        tag_set_tags(rt, set, all);
+        for (const Obj* a : all) {
+            if (a->type == kT_BranchOutPointTag) continue;          /* windows, read by the transition test */
+            if (a->type != kT_BoolGSTag) { rt.note("tag kind not implemented: " + a->type + " (" + a->path + ")"); continue; }
+            T t; t.a = a; tags.push_back(t);
+        }
+    }
+    static float start_of(const Obj* a) {                      /* getter vtbl+0x60 */
+        const int f = (int)numv(a->f(0x9becce6eu));
+        return (f & 0x80) ? 0.f : (float)numv(a->f(0x46e2e98au));
+    }
+    /* FUN_1408cdff0 for tag i: s = previous state, returns the new state. */
+    uint8_t step(Runtime& rt, T& t) {
+        const Obj* a = t.a;
+        const int f = (int)numv(a->f(0x9becce6eu));
+        const uint8_t s = t.s;
+        uint8_t n = 0;
+        bool cond = true;
+        if (const Obj* cs = rt.g.resolve(a->f(0xe1084d98u), a)) { bool ok = false; cond = rt.st.as_bool(rt.g, cs, ok); }
+        if (!cond) { if ((s & 6) == 2) n = 4; return n; }
+        if (f & 0x80) { if ((s & 3) == 0) n |= 1; n |= 2; return n; }
+        const bool norm = (f & 0x40) != 0;
+        const float L = norm ? 1.f : length;
+        const float T0 = norm ? (length > 0.f ? now / length : 0.f) : now;
+        const float Tp = norm ? (length > 0.f ? prev / length : 0.f) : prev;
+        float S;
+        if ((f & 7) == 1) { rt.note("tag start mode 1 (collection start time) not implemented: " + a->path); S = 0.f; }
+        else if ((f & 7) == 2) return 0;
+        else S = start_of(a);
+        if (L < S) return 0;
+        const float E = ((f & 0x38) == 0x10) ? kHuge : S + (float)numv(a->f(0x7e4474c2u));
+        if (E < 0.f) return 0;
+        const int d = (int)numv(a->f(0xdcc360f4u));
+        auto check = [&]() -> uint8_t {
+            const bool near = std::fabs(S - T0) <= kEps && std::fabs(E - S) <= kEps;
+            const bool inside = (S <= T0 || ((s & 2) && (f & 0x38) == 0x10)) && T0 <= E;
+            if (inside || near) {
+                if (!(s & 2) && !(n & 1) && d != 0) { t.c = (int16_t)d; return n; }
+                n |= 2; if ((s & 3) == 0) n |= 1;
+            } else if ((s & 2) && !(s & 4) && !(n & 2) && !(n & 1)) n |= 4;
+            return n;
+        };
+        if (t.c > 0) { --t.c; if (t.c == 0) { n |= 3; return n; } return n; }
+        bool to_check;
+        if ((s & 3) != 0) to_check = true;
+        else if (jumped) to_check = S < Tp ? true : T0 <= E;
+        else if (!looped) to_check = S <= Tp ? true : T0 <= E;
+        else if (S <= Tp) to_check = T0 <= E;
+        else to_check = false;
+        if (to_check) return check();
+        if (d != 0) { t.c = (int16_t)d; return n; }            /* window jumped over: begins after the delay */
+        n |= 3; return n;
+    }
+    void save(Runtime& rt, T& t) {
+        const int mode = (int)numv(t.a->f(0xc755b26cu));
+        if (mode == 0) return;
+        const Obj* gs = rt.g.resolve(t.a->f(0x6b01e323u), t.a);
+        bool ok = false; t.store = gs ? rt.st.as_bool(rt.g, gs, ok) : false;
+    }
+    void apply(Runtime& rt, T& t) {
+        const int mode = (int)numv(t.a->f(0xc755b26cu));
+        const Obj* gs = rt.g.resolve(t.a->f(0x6b01e323u), t.a);
+        if (!gs) return;
+        if (mode == 1) rt.st.set_bool(gs->path, boolv(t.a->f(0x8cf424e7u)));
+        else if (mode == 2) rt.st.set_bool(gs->path, !t.store);
+    }
+    void reset(Runtime& rt, T& t) {
+        const int mode = (int)numv(t.a->f(0xc755b26cu));
+        const int rs = (int)numv(t.a->f(0xfeac4b79u));
+        const Obj* gs = rt.g.resolve(t.a->f(0x6b01e323u), t.a);
+        if (mode == 0 || rs == 0 || !gs) return;
+        if (rs == 1) rt.st.clear(gs->path);                     /* the state's authored default */
+        else rt.st.set_bool(gs->path, t.store);
+    }
+    void evaluate(Runtime& rt, float time) {
+        prev = now; now = time;
+        for (auto& t : tags) t.s = step(rt, t);
+        jumped = false;
+        /* APPLY: every ENDED tag resets, then BEGAN saves and ACTIVE applies */
+        for (auto& t : tags) if (t.s & 4) reset(rt, t);
+        for (auto& t : tags) {
+            if (t.s & 1) save(rt, t);
+            if (t.s & 2) { apply(rt, t); t.ever = true; }
+        }
+    }
+    void leave(Runtime& rt) {
+        for (auto& t : tags) {
+            if (t.s & 2) reset(rt, t);
+            else if (!t.ever && ((int)numv(t.a->f(0x9becce6eu)) & 7) == 2) { save(rt, t); apply(rt, t); }
+            t.s = 0;
+        }
+    }
+};
+
+/* The node's child when the node is a transparent/exit node (kind 2): the
+ * engine's TransparentController passes the PARENT's pose through. A root
+ * state flow has no parent pose, so this outputs an all-invalid pose (a
+ * blend into it keeps the other side). */
+struct TransparentCtrl : Ctrl {
+    void update(Runtime& rt, float, Pose& out) override { out = rt.bind; std::fill(out.vq.begin(), out.vq.end(), 0); std::fill(out.vt.begin(), out.vt.end(), 0); }
+    void set_time(Runtime&, float t) override { time = t; }
+    void set_phase(Runtime&, float p) override { phase = p; }
+};
+
+struct StateFlowCtrl;
+
+/* One branch slot of the transition evaluator (SFC+0x138 + n*16): the
+ * earliest matching window's tag, its time-until, and whether the branch
+ * applies to this state flow. */
+struct BranchSlot { const Obj* tag = nullptr; float win = kNeverEnds; int applicable = 2; bool computed = false; };
+
+/* StateFlowNodeController (ctor FUN_14099d680 / FUN_14099d870, init
+ * FUN_14099dcd0, update FUN_14099e8f0, enter FUN_1409a0cf0, exit
+ * FUN_1409a0bf0) with the transition test that runs on it (FUN_14099f0f0 ->
+ * FUN_140999ab0 / FUN_140999d00 / FUN_14099a0a0 / FUN_14099aef0 /
+ * FUN_14099a7a0). */
+struct NodeCtrl : Ctrl {
+    struct Entry {
+        const Obj* to = nullptr;          /* 0x88b009f9 */
+        const Obj* tr = nullptr;          /* 0x7159d693 TransitionAsset */
+        std::vector<int> must_true;       /* 0x00e4aefc */
+        std::vector<int> must_false;      /* 0x9336b9d9 */
+        bool gate_list = false;           /* 0xf7ac97ae */
+        int gate = 0xff, gate_next = 0xff, cont = 0xff, next = 0xff, timing = 0;
+    };
+    StateFlowCtrl* sf = nullptr;
+    int kind = 0;                         /* 0xcaad5086 */
+    std::unique_ptr<Ctrl> child;
+    std::unique_ptr<TransitionCtrl> fade; /* node+0x98: in = child, source = the old node */
+    TagSet tags;                          /* 0x70b22fd5, on node time */
+    std::unique_ptr<TagSet> fade_tags;    /* the transition's tag set, live with the fade */
+    float node_time = 0.f;                /* +0xa8 */
+    bool first_pending = true;            /* +0xb2 */
+    bool active = false;                  /* +0xb3 / +0xb4 */
+    std::vector<Entry> entries;           /* 0xfa9c5e77 */
+    std::vector<const Obj*> watched;      /* 0x438ebff1 */
+    std::vector<const Obj*> branches;     /* 0x8e477845 */
+    std::vector<uint8_t> entry_state;     /* SFC+0xe20 per entry, zeroed on enter */
+    /* result of the last test */
+    int chosen = 0xff;
+    const Obj* out_tag = nullptr;         /* the BranchOutPointTag whose window opened it */
+
+    void init(Runtime& rt, StateFlowCtrl* owner, const Obj* a);
+    void enter(Runtime& rt);
+    void exit(Runtime& rt);
+    float time_to_transition(Runtime& rt, float dt);
+    bool timing(Runtime& rt, int i, Ctrl* leaf, float tNow, float rem, float len, float dt,
+                std::vector<float>& window, BranchSlot* slots);
+    void copy_timing() {
+        if (!child) return;
+        phase = child->phase; time = child->time; length = child->length; remaining = child->remaining;
+        phase_range = child->phase_range; looping = child->looping; wrapped = child->wrapped;
+    }
+    void update(Runtime& rt, float dt, Pose& out) override;
+    void set_time(Runtime& rt, float t) override { if (child) child->set_time(rt, t); copy_timing(); }
+    void set_phase(Runtime& rt, float p) override { if (child) child->set_phase(rt, p); copy_timing(); }
+    Ctrl* tag_leaf() override { return nullptr; }
+};
+
+
+struct StateFlowCtrl : Ctrl {
+    std::unique_ptr<NodeCtrl> node;
+    const Obj* default_blend = nullptr;   /* 0x7c8aa9d8 */
+    int depth = 3;                        /* 0xc15edaf2 */
+    uint32_t id = 0;                      /* 0xde6f63b3 */
+    bool stopped = false;                 /* +0xa1 */
+    bool start_pending = false;           /* +0xa8 */
+    bool evaluates = true;                /* +0xa6: false inside a fading-out subtree */
+    bool finished = false;                /* reported to the parent: current node kind 2, no fade */
+
+    void init(Runtime& rt, const Obj* a) {
+        asset = a;
+        default_blend = rt.g.resolve(a->f(0x7c8aa9d8u), a);
+        depth = (int)numv(a->f(0xc15edaf2u));
+        id = (uint32_t)numv(a->f(0xde6f63b3u));
+        const bf6::EbxValue* mi = a->f(0x0360f8dau);
+        if (mi && mi->kind != bf6::EbxValue::Kind::Null) rt.note("state-flow mirror input not implemented: " + a->path);
+        const bf6::EbxValue* mod = a->f(0x857c9b4du);
+        if (mod && mod->kind != bf6::EbxValue::Kind::Null) rt.note("state-flow modifier not implemented: " + a->path);
+        const bf6::EbxValue* rs = a->f(0x8e44821au);
+        if (rs && !rs->items.empty()) rt.note("state-flow resume table not implemented: " + a->path);
+        if (boolv(a->f(0x8089c8e1u))) rt.note("state-flow gate/PTM manager not implemented: " + a->path);
+        restart(rt);
+    }
+    /* FUN_14099c300 */
+    void restart(Runtime& rt) override {
+        if (node) node->exit(rt);
+        const Obj* start = rt.g.resolve(asset->f(0x5fa260eeu), asset);
+        if (!start) { stopped = true; node.reset(); return; }
+        stopped = false;
+        node = std::make_unique<NodeCtrl>();
+        node->init(rt, this, start);
+        start_pending = true;
+        copy_timing();
+    }
+    void copy_timing() {
+        if (!node) return;
+        phase = node->phase; time = node->time; length = node->length; remaining = node->remaining;
+        phase_range = node->phase_range; looping = node->looping; wrapped = node->wrapped;
+        const bf6::EbxValue* ts = node->asset ? node->asset->f(0x1750ec21u) : nullptr;
+        if (ts && !ts->items.empty()) remaining = kNeverEnds;
+    }
+    void fire(Runtime& rt);
+    void update(Runtime& rt, float dt, Pose& out) override {
+        if (start_pending && !stopped) {
+            start_pending = false;
+            if (node && node->kind == 1) {
+                const float t = node->time_to_transition(rt, 0.f);
+                if (t > kEps) stopped = true; else fire(rt);
+            }
+        }
+        if (stopped || !node) {
+            rt.note("stopped state flow outputs the reference pose (FUN_1407a7e20, meaning OPEN): " + asset->path);
+            out = rt.bind;
+            return;
+        }
+        int fires = 0;
+        while (dt >= 0.f) {
+            const float t = node->time_to_transition(rt, dt);
+            if (dt <= t) break;
+            if (t > 0.f && std::fabs(t) > kEps) { Pose tmp; node->update(rt, t, tmp); dt -= t; }
+            fire(rt);
+            if (++fires >= 26) {
+                rt.note("Suspiciously high number of transitions per frame (engine stops the state flow): " + asset->path);
+                stopped = true;
+                break;
+            }
+        }
+        node->update(rt, dt, out);
+        copy_timing();
+        finished = node->kind == 2 && !node->fade;
+    }
+    void set_time(Runtime& rt, float t) override { if (node) node->set_time(rt, t); copy_timing(); }
+    void set_phase(Runtime& rt, float p) override { if (node) node->set_phase(rt, p); copy_timing(); }
+};
+
+void NodeCtrl::init(Runtime& rt, StateFlowCtrl* owner, const Obj* a)
+{
+    asset = a; sf = owner;
+    kind = (int)numv(a->f(0xcaad5086u));
+    if (const bf6::EbxValue* ws = a->f(0x438ebff1u)) for (const auto& w : ws->items) watched.push_back(rt.g.resolve(&w, a));
+    if (const bf6::EbxValue* bs = a->f(0x8e477845u)) for (const auto& b : bs->items) branches.push_back(rt.g.resolve(&b, a));
+    if (const bf6::EbxValue* cs = a->f(0xfa9c5e77u))
+        for (const auto& c : cs->items) {
+            Entry e;
+            e.to = rt.g.resolve(c.field(0x88b009f9u), a);
+            e.tr = rt.g.resolve(c.field(0x7159d693u), a);
+            if (const bf6::EbxValue* v = c.field(0x00e4aefcu)) for (const auto& x : v->items) e.must_true.push_back((int)numv(&x));
+            if (const bf6::EbxValue* v = c.field(0x9336b9d9u)) for (const auto& x : v->items) e.must_false.push_back((int)numv(&x));
+            e.gate_list = boolv(c.field(0xf7ac97aeu));
+            e.gate = (int)numv(c.field(0xafddb84du));
+            e.gate_next = (int)numv(c.field(0xb4bd1b16u));
+            e.cont = (int)numv(c.field(0xabe772afu));
+            e.next = (int)numv(c.field(0x6b9ac316u));
+            e.timing = (int)numv(c.field(0xc09fdc38u));
+            entries.push_back(e);
+        }
+    const bf6::EbxValue* mod = a->f(0x8f198e8eu);
+    if (mod && mod->kind != bf6::EbxValue::Kind::Null) rt.note("state-flow node modifier not implemented: " + a->path);
+    const bf6::EbxValue* gi = a->f(0x8e36d24au);
+    if (gi && gi->kind != bf6::EbxValue::Kind::Null) rt.note("state-flow gate transitions info not implemented: " + a->path);
+    /* FUN_14099dcd0: time 0, +0xb2 set, child created (FUN_1409a1180) */
+    node_time = 0.f; first_pending = true; active = false;
+    if (kind == 2) {
+        child = std::make_unique<TransparentCtrl>();
+        rt.note("transparent node: the engine passes the parent's pose through; a root state flow has none");
+    } else if (const Obj* ca = rt.g.resolve(a->f(0x0171c26du), a)) {
+        child = rt.make(ca);
+    }
+    if (!child) { auto m = std::make_unique<TransparentCtrl>(); child = std::move(m); }
+    tags.build(rt, rt.g.resolve(a->f(0x70b22fd5u), a));
+    copy_timing();
+    if (owner && owner->evaluates) enter(rt);
+}
+
+/* FUN_1409a0cf0 */
+void NodeCtrl::enter(Runtime& rt)
+{
+    active = true;
+    const bf6::EbxValue* set = asset->f(0xb80c39a4u);
+    const bf6::EbxValue* cnt = asset->f(0x4a482187u);
+    const size_t n = cnt ? cnt->items.size() : 0;
+    for (size_t i = 0; set && i < n && i < set->items.size(); ++i)
+        if (const Obj* b = rt.g.resolve(&set->items[i], asset)) rt.st.set_bool(b->path, true);
+    entry_state.assign(entries.size(), 0);
+    if (kind == 3) rt.note("gate (PTM) node registration not implemented: " + asset->path);
+}
+
+/* FUN_1409a0bf0 */
+void NodeCtrl::exit(Runtime& rt)
+{
+    if (!active) return;
+    active = false;
+    const bf6::EbxValue* set = asset->f(0xb80c39a4u);
+    const bf6::EbxValue* cnt = asset->f(0x4a482187u);
+    const size_t n = cnt ? cnt->items.size() : 0;
+    for (size_t i = 0; set && i < n && i < set->items.size(); ++i)
+        if (const Obj* b = rt.g.resolve(&set->items[i], asset)) rt.st.set_bool(b->path, false);
+    /* LEAVE (FUN_1408cc210): its call site on node exit is not traced
+     * (spec OPEN 1); the node's tags are left here, when the node stops
+     * evaluating them. */
+    tags.leave(rt);
+    if (auto* nested = dynamic_cast<StateFlowCtrl*>(child.get())) { if (nested->node) nested->node->exit(rt); }
+}
+
+/* FUN_14099a7a0: the time until entry i may fire, into window[i]; true when
+ * it fires inside this frame's dt. */
+bool NodeCtrl::timing(Runtime& rt, int i, Ctrl* leaf, float tNow, float rem, float len, float dt,
+                      std::vector<float>& window, BranchSlot* slots)
+{
+    const Entry& e = entries[(size_t)i];
+    const int m = e.timing;
+    if (m == 1) {
+        window[(size_t)i] = rem == kNeverEnds ? kNeverEnds : rem - (float)(int32_t)numv(e.tr ? e.tr->f(0xa27bf0d8u) : nullptr);
+    } else if (m == 2) {
+        window[(size_t)i] = first_pending ? kNeverEnds : 0.f;
+    } else if (m >= 0 && m < (int)branches.size() + 1 && m < 64) {
+        BranchSlot& bs = slots[m];
+        if (!bs.computed) {
+            bs.computed = true;
+            if (bs.applicable == 2) {
+                const Obj* br = m < (int)branches.size() ? branches[(size_t)m] : nullptr;
+                if (!br) { bs.applicable = 0; rt.note("branch slot with no branch asset: " + asset->path); }
+                else {
+                    const int32_t bid = (int32_t)numv(br->f(0x4b3c2c4bu));
+                    const bool any = boolv(br->f(0xe666946bu));
+                    const bool nested = dynamic_cast<StateFlowCtrl*>(child.get()) != nullptr;
+                    bs.applicable = (!any && bid != (int32_t)sf->id && (bid != 0 || nested)) ? 0 : 1;
+                }
+            }
+            if (bs.applicable == 1) {
+                float best = kNeverEnds;
+                const Obj* best_tag = nullptr;
+                const std::vector<const Obj*>* bt = leaf ? leaf->branch_tags() : nullptr;
+                if (!leaf) rt.note("branch window needs the child's tag query (0x317458a7), not answered: " + asset->path);
+                if (bt) for (const Obj* tg : *bt) {
+                    const Obj* tb = rt.g.resolve(tg->f(0xd2cd9e3fu), tg);
+                    if (!tb || m >= (int)branches.size() || tb != branches[(size_t)m]) continue;
+                    if (entry_state[(size_t)i] == 0) entry_state[(size_t)i] = 1;
+                    const int f = (int)numv(tg->f(0x9becce6eu));
+                    if (numv(tg->f(0x571974adu)) != 0.0 || numv(tg->f(0x9dacc63bu)) != 0.0 || numv(tg->f(0x4f9d1a6cu)) != 0.0)
+                        rt.note("branch-tag window adjustments (weighted by the branch value) not applied: " + tg->path);
+                    if (wrapped) { rt.note("branch window on a wrapped child (node +0xa4 path) not implemented: " + asset->path); continue; }
+                    float S = TagSet::start_of(tg), W = (float)numv(tg->f(0x7e4474c2u));
+                    if (f & 0x40) { S *= len; W *= len; }
+                    float w;
+                    const float d = S - tNow;
+                    if (d <= 0.f) w = ((W + S) - tNow < 0.f) ? kNeverEnds : 0.f;
+                    else w = d;
+                    if (w < best) { best = w; best_tag = tg; }
+                }
+                bs.win = best; bs.tag = best_tag;
+            }
+        }
+        window[(size_t)i] = bs.win;
+    } else {
+        rt.note("transition timing index outside the branch list: " + asset->path);
+        window[(size_t)i] = kNeverEnds;
+    }
+    const float w = window[(size_t)i];
+    return w < kNeverEnds && w <= dt;
+}
+
+/* FUN_14099f0f0 -> FUN_140999ab0 -> FUN_140999d00 (top level): the time
+ * until the first transition fires, kNeverEnds for none; `chosen` and
+ * `out_tag` describe it. */
+float NodeCtrl::time_to_transition(Runtime& rt, float dt)
+{
+    chosen = 0xff; out_tag = nullptr;
+    if (!sf || !(sf->evaluates || kind == 1) || sf->stopped || entries.empty()) return kNeverEnds;
+    Ctrl* leaf = child ? child->tag_leaf() : nullptr;
+    const Ctrl* tb = leaf ? leaf : static_cast<const Ctrl*>(this);
+    const float tNow = tb->time;
+    float rem = remaining;
+    if (rem != kNeverEnds) rem = tb->remaining;
+    const float len = tb->length;
+    std::vector<int8_t> cond(watched.size(), 2);
+    std::vector<float> window(entries.size(), kNeverEnds);
+    BranchSlot slots[64];
+    slots[0].win = 0.f; slots[0].computed = true;            /* SFC+0x228 = 0, +0x22d = 1 */
+    auto conds = [&](const std::vector<int>& idx, bool want) {
+        for (int k : idx) {
+            if (k < 0 || k >= (int)cond.size()) return false;
+            if (cond[(size_t)k] == 2) {
+                bool ok = false;
+                const bool v = rt.st.as_bool(rt.g, watched[(size_t)k], ok);
+                cond[(size_t)k] = v ? 1 : 0;
+            }
+            if ((cond[(size_t)k] != 0) != want) return false;
+        }
+        return true;
+    };
+    float best = kNeverEnds;
+    int result = 0xff;
+    for (int i = 0; i < (int)entries.size() && i != 0xff; i = entries[(size_t)i].next) {
+        const Entry& e = entries[(size_t)i];
+        if (entry_state.size() != entries.size()) entry_state.assign(entries.size(), 0);
+        bool pass = true;
+        if (entry_state[(size_t)i] != 4) pass = conds(e.must_true, true) && conds(e.must_false, false);
+        int r = 0xff;
+        if (pass) {
+            if (e.gate != 0xff) rt.note("gated transition (gate manager) not implemented: " + asset->path);
+            else if (e.cont != 0xff) rt.note("transition continuation through a transparent node not implemented: " + asset->path);
+            else { timing(rt, i, leaf, tNow, rem, len, dt, window, slots); r = i; }
+        }
+        if (r != 0xff && window[(size_t)i] < best) {
+            best = window[(size_t)i]; result = r;
+            if (std::fabs(best) <= kEps) break;
+        }
+        if (e.next == 0xff || e.next >= (int)entries.size()) break;
+    }
+    if (result == 0xff) return kNeverEnds;
+    chosen = result;
+    const int m = entries[(size_t)result].timing;
+    if (m > 2 && m < 64) out_tag = slots[m].tag;
+    return best;
+}
+
+/* FUN_14099e8f0 */
+void NodeCtrl::update(Runtime& rt, float dt, Pose& out)
+{
+    first_pending = false;
+    node_time += dt;
+    if (!fade) {
+        child->update(rt, dt, out);
+    } else {
+        const float r = fade->blend_remaining();
+        if (dt < r) {
+            fade->update(rt, dt, out);
+            if (fade_tags && active) fade_tags->evaluate(rt, node_time);
+        } else {
+            fade->update(rt, r, out);
+            if (fade_tags) {
+                if (active) fade_tags->evaluate(rt, node_time - (dt - r));
+                /* dropped with the blend; LEAVE's call site is not traced (spec OPEN 1) */
+                fade_tags->leave(rt);
+                fade_tags.reset();
+            }
+            fade.reset();                                       /* releases the old node chain (FUN_14099f020) */
+            if (dt - r >= kEps) child->update(rt, dt - r, out);
+        }
+    }
+    copy_timing();
+    if (active) tags.evaluate(rt, node_time);
+}
+
+/* FUN_14099f400 + FUN_14099d870 + FUN_1409a04e0 */
+void StateFlowCtrl::fire(Runtime& rt)
+{
+    if (!node || node->chosen == 0xff) return;
+    NodeCtrl::Entry e = node->entries[(size_t)node->chosen];
+    const Obj* T = e.tr;
+    const Obj* to = e.to ? e.to : (T ? rt.g.resolve(T->f(0x7decae88u), T) : nullptr);
+    if (!to) { rt.note("transition with no target node: " + node->asset->path); node->chosen = 0xff; return; }
+    if (T) {
+        const bf6::EbxValue* c = T->f(0xa80bcb57u);
+        if (c && !c->items.empty()) rt.note("transition trigger consumption (interface 0x28185be6) not implemented: " + T->path);
+    }
+    /* blend selection, FUN_1409998c0 */
+    const Obj* blend = T ? rt.g.resolve(T->f(0x4ffcff88u), T) : nullptr;
+    if (!blend && node->out_tag) blend = rt.g.resolve(node->out_tag->f(0x9bffb09eu), node->out_tag);
+    if (!blend) blend = default_blend;
+    const Obj* out_tag = node->out_tag;
+
+    std::unique_ptr<NodeCtrl> old = std::move(node);
+    old->exit(rt);
+    auto nn = std::make_unique<NodeCtrl>();
+    nn->init(rt, this, to);
+    /* the cross-fade, FUN_1409a14a0 */
+    std::unique_ptr<TransitionCtrl> f;
+    if (blend) f = make_blend(rt, blend);
+    else {
+        f = std::make_unique<TransitionCtrl>();       /* no blend asset: BlendCurve type 0, 8 ticks */
+        f->kind = TransitionCtrl::Curve; f->curve_type = 0; f->duration = 8.f;
+    }
+    const float src_phase = old->phase;
+    const bool old_loops = old->looping;
+    if (f) {
+        f->in = nn->child.get();
+        f->source = std::move(old);
+        f->copy_timing();
+        nn->fade = std::move(f);
+        if (T) if (const Obj* ts = rt.g.resolve(T->f(0x70b22fd5u), T)) {
+            nn->fade_tags = std::make_unique<TagSet>();
+            nn->fade_tags->build(rt, ts);
+        }
+        /* FUN_1409a0a10: keep at most `depth` nested in-flight fades */
+        NodeCtrl* n = nn.get();
+        for (int k = 0; n && n->fade && k < depth; ++k) n = dynamic_cast<NodeCtrl*>(n->fade->source.get());
+        if (n && n->fade) { n->fade.reset(); n->fade_tags.reset(); }
+    }
+    /* start position, FUN_1409a04e0 */
+    if (T) {
+        const bf6::EbxValue* tob = T->f(0xb8f33128u);
+        const bool any = ((int)numv(T->f(0x5645e663u)) & 2) != 0;
+        if ((tob && tob->kind != bf6::EbxValue::Kind::Null) || any)
+            rt.note("transition in-point entry (to-branch 0xb8f33128) not implemented: " + T->path);
+        float v = (float)numv(T->f(0x263be7e5u));
+        if (const Obj* va = rt.g.resolve(T->f(0x514691f6u), T)) { bool ok = false; v = rt.st.as_float(rt.g, va, ok); }
+        const int m = (int)numv(T->f(0x882f89cbu));
+        const float ot = out_tag ? (float)numv(out_tag->f(0x263be7e5u)) : 0.f;
+        nn->copy_timing();
+        switch (m) {
+        case 0:
+            if (v <= kEps && (!out_tag || ot <= kEps)) { if (nn->looping && old_loops) nn->set_phase(rt, nn->normalise(src_phase)); }
+            else nn->set_phase(rt, nn->normalise(v > kEps ? v : ot));
+            break;
+        case 1: nn->set_phase(rt, nn->normalise(v + src_phase)); break;
+        case 2: nn->set_phase(rt, nn->normalise(v)); break;
+        case 6: if (out_tag) nn->set_phase(rt, nn->normalise(ot)); break;
+        case 7: {
+            const float L = nn->length > 0.f ? nn->length : 1.f;
+            nn->set_phase(rt, nn->normalise(std::fmax(0.f, (float)numv(T->f(0x7b3c1705u))) / L));
+            break;
+        }
+        case 5: break;
+        default: rt.note("transition start mode " + std::to_string(m) + " not implemented: " + T->path);
+        }
+    }
+    const bf6::EbxValue* ew = to->f(0xe15fd79du);
+    if (ew && numv(ew) != 0.0) rt.note("node entry enum write (0x903c52d5) not implemented: " + to->path);
+    node = std::move(nn);
+    if (auto* fw = node->fade.get()) fw->copy_timing();
+}
 
 /* Other controller types are added here as their specs land. Until then an
  * unknown type is NAMED in notes and yields the bind pose, so a partially
@@ -922,6 +1600,7 @@ std::unique_ptr<Ctrl> Runtime::make(const Obj* a)
     if (a->type == kT_Clip) { auto c = std::make_unique<ClipCtrl>(); c->init(*this, a); return c; }
     if (a->type == kT_Phase) { auto c = std::make_unique<PhaseCtrl>(); c->init(*this, a); return c; }
     if (a->type == kT_SuperLayers) { auto c = std::make_unique<SuperLayersCtrl>(); c->init(*this, a); return c; }
+    if (a->type == kT_StateFlow) { auto c = std::make_unique<StateFlowCtrl>(); c->init(*this, a); return c; }
     if (a->type == kT_CdbAsset) {
         /* a ContextDatabaseAsset where a controller is expected: its entry */
         const Obj* e = resolve_ctrl_asset(*this, a);
@@ -1047,6 +1726,38 @@ int bf6_ant_runtime_notes(const bf6_ant_runtime* r, char* out, int out_len)
     std::string s;
     for (const auto& n : h->rt->notes) s += n + "\n";
     for (const auto& u : h->rt->st.unknown()) s += "game state not evaluable: " + u + "\n";
+    if (const auto* sf = dynamic_cast<const bf6ant::StateFlowCtrl*>(h->root.get()))
+        s += std::string("state: ") + (sf->node && sf->node->asset ? sf->node->asset->path : std::string("(none)")) + "\n";
     if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
     return (int)s.size() + 1;
+}
+
+int bf6_ant_runtime_get_bool(const bf6_ant_runtime* r, const char* state, int* ok)
+{
+    if (ok) *ok = 0;
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    if (!h || !state) return 0;
+    bf6ant::Runtime& rt = *h->rt;
+    bool k = false;
+    const bool v = rt.st.as_bool(rt.g, rt.g.root(state), k);
+    if (ok) *ok = k ? 1 : 0;
+    return v ? 1 : 0;
+}
+
+int bf6_ant_runtime_node(const bf6_ant_runtime* r, char* out, int out_len)
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    std::string s;
+    if (h) if (const auto* sf = dynamic_cast<const bf6ant::StateFlowCtrl*>(h->root.get()))
+        if (sf->node && sf->node->asset) s = sf->node->asset->path;
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)s.size() + 1;
+}
+
+int bf6_ant_runtime_finished(const bf6_ant_runtime* r)
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    if (!h) return 0;
+    const auto* sf = dynamic_cast<const bf6ant::StateFlowCtrl*>(h->root.get());
+    return sf && sf->finished ? 1 : 0;
 }

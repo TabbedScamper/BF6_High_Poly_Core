@@ -89,6 +89,198 @@ int bf6_inspect_input_params_read(bf6_ctx* c, bf6_inspect_input_params* p, char*
     return 1;
 }
 
+/* ------------------------------------------------ the roll's phase ---- */
+
+namespace {
+constexpr const char* kPreupdateOp = "animations/glacier/global/expressions/1p.preupdate.expsop";
+
+/* Kernel name hash: ~CRC32, MSB-first, poly 0x04C11DB7, init ~0 (the table
+ * at 0x148644ff0; checked against the program's "Or" = 0xeabfec6f). */
+uint32_t ex_kernel_hash(const char* s)
+{
+    static uint32_t T[256];
+    static bool built = false;
+    if (!built) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i << 24;
+            for (int k = 0; k < 8; ++k) c = (c & 0x80000000u) ? (c << 1) ^ 0x04C11DB7u : c << 1;
+            T[i] = c;
+        }
+        built = true;
+    }
+    uint32_t c = 0xffffffffu;
+    for (; *s; ++s) c = (c << 8) ^ T[((c >> 24) ^ (uint8_t)*s) & 0xff];
+    return ~c;
+}
+
+struct ExOp { uint32_t pc = 0, op = 0, fn = 0; std::vector<std::pair<uint32_t, uint32_t>> ins, outs; };
+
+/* The EX program image (research spec_expression 2) and a walk over its
+ * reachable instructions, decoding the forms the roll's sub-program uses. */
+struct ExProg {
+    std::vector<uint8_t> b;
+    uint32_t cbase = 0, code = 0, clen = 0;
+    std::map<uint32_t, uint32_t> rel;        /* pc -> kernel hash (table C) */
+    uint32_t u32(size_t o) const { uint32_t v = 0; if (o + 4 <= b.size()) std::memcpy(&v, &b[o], 4); return v; }
+    uint16_t u16(size_t o) const { uint16_t v = 0; if (o + 2 <= b.size()) std::memcpy(&v, &b[o], 2); return v; }
+    bool open() {
+        if (b.size() < 0x50) return false;
+        cbase = ((uint32_t)(u16(0x3e) + u16(0x40) + u16(0x42)) * 4 + 0x5f) & ~0xfu;
+        code = (u32(0x24) + 3 + cbase) & ~3u;
+        clen = u32(0x2c) * 4;
+        const uint32_t n38 = u16(0x38), n3a = u16(0x3a), n3c = u16(0x3c);
+        const size_t relC = (size_t)code + clen + 8u * (n38 + n3a);
+        if (relC + 8ull * n3c > b.size()) return false;
+        for (uint32_t i = 0; i < n3c; ++i) rel[u32(relC + 8 * i + 4)] = u32(relC + 8 * i);
+        return true;
+    }
+    float kf(uint32_t off) const { float f = 0; if ((size_t)cbase + off + 4 <= b.size()) std::memcpy(&f, &b[cbase + off], 4); return f; }
+    uint8_t kb(uint32_t off) const { return (size_t)cbase + off < b.size() ? b[cbase + off] : 0; }
+    std::pair<uint32_t, uint32_t> opnd(size_t o) const { return { u32(o), u32(o + 4) }; }
+    bool decode(uint32_t pc, ExOp& d, uint32_t& next, std::vector<uint32_t>& targets) const {
+        const size_t o = (size_t)code + pc;
+        if (o + 4 > b.size()) return false;
+        const uint32_t w = u32(o);
+        d = ExOp{}; d.pc = pc; d.op = w & 0xff; next = w >> 8;
+        auto it = rel.find(pc);
+        d.fn = it == rel.end() ? 0 : it->second;
+        const uint32_t op = d.op;
+        if (op <= 0x13) { for (uint32_t i = 0; i <= op; ++i) d.ins.push_back(opnd(o + 0xc + 8 * i)); }
+        else if (op >= 0x14 && op <= 0x1d) {
+            static const int m[10][2] = { {1,1},{1,2},{1,3},{1,4},{2,0},{2,1},{3,0},{3,1},{4,0},{4,1} };
+            const int ni = m[op - 0x14][0], no = m[op - 0x14][1];
+            for (int i = 0; i < ni; ++i) d.ins.push_back(opnd(o + 0xc + 8 * (size_t)i));
+            for (int i = 0; i < no; ++i) d.outs.push_back(opnd(o + 0xc + 8 * (size_t)(ni + i)));
+        } else if (op == 0x23) {
+            const uint32_t ni = u32(o + 0xc);
+            size_t p = o + 0x10;
+            for (uint32_t i = 0; i < ni && i < 64; ++i, p += 8) d.ins.push_back(opnd(p));
+            const uint32_t no = u32(p); p += 4;
+            for (uint32_t i = 0; i < no && i < 64; ++i, p += 8) d.outs.push_back(opnd(p));
+        } else if (op == 0x26) targets.push_back(u32(o + 0xc));
+        else if (op == 0x28) { const uint32_t n = u32(o + 0xc); for (uint32_t i = 0; i < n && i < 4096; ++i) targets.push_back(u32(o + 0x10 + 4 * (size_t)(n + i))); }
+        else if (op == 0x29 || op == 0x2a) targets.push_back(u32(o + 4));
+        return true;
+    }
+    std::vector<ExOp> walk() const {
+        std::vector<ExOp> out;
+        std::vector<uint32_t> todo{0};
+        std::set<uint32_t> seen;
+        while (!todo.empty()) {
+            const uint32_t pc = todo.back(); todo.pop_back();
+            if (pc >= clen || !seen.insert(pc).second) continue;
+            ExOp d; uint32_t next = 0; std::vector<uint32_t> tg;
+            if (!decode(pc, d, next, tg)) continue;
+            out.push_back(d);
+            if (d.op == 0x2b || d.op == 0x2c) continue;
+            for (uint32_t t : tg) todo.push_back(t);
+            todo.push_back(next);
+        }
+        return out;
+    }
+};
+}  // namespace
+
+int bf6_inspect_aim_params_read(bf6_ctx* c, bf6_inspect_aim_params* p, char* err, int err_len)
+{
+    auto fail = [&](const char* why) {
+        if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why);
+        return 0;
+    };
+    if (!c || !p) return fail("missing argument");
+    *p = bf6_inspect_aim_params{};
+    bf6ant::Graph g(c);
+    const bf6ant::Obj* op = g.root(kPreupdateOp);
+    if (!op) return fail("1P pre-update expression op not in the mount");
+    const bf6ant::Obj* ex = g.resolve(op->f(0x20280736u), op);
+    if (!ex) return fail("expression op has no program asset");
+    ExProg P;
+    if (const bf6::EbxValue* img = ex->f(0x5db2cfc4u))
+        for (const auto& r : img->items)
+            for (uint32_t h : { 0x3901db14u, 0x42fc0f5eu, 0x32a99b9cu, 0x7c8062f2u }) {
+                const uint32_t v = (uint32_t)ii_iv(r.field(h));
+                for (int k = 0; k < 4; ++k) P.b.push_back((uint8_t)(v >> (8 * k)));
+            }
+    if (!P.open()) return fail("expression program image unreadable");
+    /* input slots of the two game states */
+    const bf6::EbxValue* in = ex->f(0x202e54f7u);
+    const bf6::EbxValue* sl = ex->f(0x246d8578u);
+    if (!in || !sl) return fail("expression inputs missing");
+    std::pair<uint32_t, uint32_t> aim{~0u, ~0u}, yaw{~0u, ~0u};
+    auto ends = [](const std::string& s, const char* t) { const size_t n = std::strlen(t); return s.size() >= n && s.compare(s.size() - n, n, t) == 0; };
+    for (size_t i = 0; i < in->items.size() && 2 * i + 1 < sl->items.size(); ++i) {
+        const bf6ant::Obj* o = g.resolve(&in->items[i], ex);
+        if (!o) continue;
+        const std::pair<uint32_t, uint32_t> s{ (uint32_t)ii_iv(&sl->items[2 * i]), (uint32_t)ii_iv(&sl->items[2 * i + 1]) };
+        if (ends(o->path, "1p.aimleftright.phased.float")) aim = s;
+        else if (ends(o->path, "fb.camerainput.yaw.float")) yaw = s;
+    }
+    if (aim.first == ~0u || yaw.first == ~0u) return fail("aimleftright / camera-yaw inputs not in the program");
+    const std::pair<uint32_t, uint32_t> dt_slot{ (uint32_t)ii_iv(ex->f(0x5d4fe63fu)), (uint32_t)ii_iv(ex->f(0xd4c91e35u)) };
+    const auto ops = P.walk();
+    const uint32_t hW = ex_kernel_hash("IFloatWriter"), hR = ex_kernel_hash("IFloatReader"),
+                   hS = ex_kernel_hash("SpringDampenFloat"), hC = ex_kernel_hash("ClampFloat"),
+                   hM = ex_kernel_hash("MultiplyFloatFloatFloat");
+    auto find = [&](uint32_t fn, auto pred) -> const ExOp* { for (const auto& d : ops) if (d.fn == fn && pred(d)) return &d; return nullptr; };
+    const ExOp* w = find(hW, [&](const ExOp& d) { return d.op == 0x1a && d.ins.size() == 3 && d.ins[2] == aim; });
+    if (!w) return fail("no IFloatWriter for 1p.aimleftright");
+    const ExOp* s = find(hS, [&](const ExOp& d) { return d.op == 0x23 && d.ins.size() == 9 && !d.outs.empty() && d.outs[0] == w->ins[0]; });
+    if (!s) return fail("aimleftright is not written from a SpringDampenFloat");
+    const ExOp* cl = find(hC, [&](const ExOp& d) { return d.op == 0x3 && d.ins.size() == 4 && d.ins[3] == s->ins[0]; });
+    if (!cl) return fail("spring target is not a ClampFloat");
+    const ExOp* mu = find(hM, [&](const ExOp& d) { return d.op == 0x2 && d.ins.size() == 3 && d.ins[2] == cl->ins[0]; });
+    if (!mu) return fail("clamp input is not a MultiplyFloatFloatFloat");
+    int kside = -1;
+    for (int k = 0; k < 2; ++k)
+        if (find(hR, [&](const ExOp& d) { return d.op == 0x19 && d.ins.size() == 2 && d.outs.size() == 1 && d.outs[0] == mu->ins[(size_t)k] && d.ins[1] == yaw; }))
+            kside = 1 - k;
+    if (kside < 0) return fail("multiply does not read fb.camerainput.yaw");
+    auto isK = [](const std::pair<uint32_t, uint32_t>& o) { return o.first == 0; };
+    if (!isK(mu->ins[(size_t)kside]) || !isK(cl->ins[1]) || !isK(cl->ins[2]))
+        return fail("multiply/clamp operands are not constants");
+    for (int i : { 1, 2, 3, 5, 6, 7, 8 }) if (!isK(s->ins[(size_t)i])) return fail("spring parameters are not constants");
+    if (s->ins[4] != dt_slot) return fail("spring dt is not the program's tick slot");
+    p->scale = P.kf(mu->ins[(size_t)kside].second);
+    p->clamp_lo = P.kf(cl->ins[1].second);
+    p->clamp_hi = P.kf(cl->ins[2].second);
+    p->stiffness = P.kf(s->ins[1].second);
+    p->damping = P.kf(s->ins[2].second);
+    p->max_step = P.kf(s->ins[3].second);
+    p->lo = P.kf(s->ins[5].second);
+    p->hi = P.kf(s->ins[6].second);
+    p->reset_input = P.kb(s->ins[7].second) ? 1 : 0;
+    p->wrap = P.kb(s->ins[8].second) ? 1 : 0;
+    if (p->wrap) return fail("spring wrap mode is on; its branch (FUN_1405dc0b0) is not transcribed");
+    return 1;
+}
+
+float bf6_inspect_aim_step(const bf6_inspect_aim_params* p, bf6_inspect_aim_state* s, float yaw, float dt)
+{
+    if (!p || !s) return 0.f;
+    /* MultiplyFloatFloatFloat, ClampFloat (max then min) */
+    const float target = std::fmin(std::fmax(yaw * p->scale, p->clamp_lo), p->clamp_hi);
+    /* SpringDampenFloat, 0x1405dc4c0 + FUN_1405dc110 (x lane) */
+    if (!s->init || p->reset_input) { s->pos = target; s->vel = 0.f; s->init = 1; }
+    if (!(dt > 1.52587890625e-05f || dt < -1.52587890625e-05f)) return s->pos;
+    const bool ranged = std::fabs(p->hi - p->lo) > 1.1920928955078125e-07f;
+    const float tc = ranged ? std::fmin(p->hi, std::fmax(p->lo, target)) : target;
+    const float h = dt * 0.01666666753590107f;
+    const float k = (h * p->stiffness) * h;
+    const float sq = std::sqrt(k);
+    const float a = std::fmax(1.f - k, 0.f);
+    const float b = std::fmax(1.f - (p->damping + p->damping) * sq, 0.f);
+    const float pos = s->pos, vel = s->vel;
+    const float d = pos - tc;
+    const float bv = b * vel;
+    const float vel_new = ((a - 1.f) * d) / h + bv;
+    float delta = ((a * d + h * bv) + tc) - pos;
+    delta = std::fmin(p->max_step, std::fmax(-1.f * p->max_step, delta));
+    float np = delta + pos;
+    if (ranged) np = std::fmin(p->hi, std::fmax(p->lo, np));
+    s->pos = np; s->vel = vel_new;
+    return np;
+}
+
 float bf6_inspect_input_step(const bf6_inspect_input_params* p, bf6_inspect_input_state* s,
                              int inspecting, float raw, int from_mouse)
 {

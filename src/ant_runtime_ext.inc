@@ -1114,6 +1114,7 @@ struct TagSet {
         bool to_check;
         if ((s & 3) != 0) to_check = true;
         else if (jumped) to_check = S < Tp ? true : T0 <= E;
+        else if ((f & 7) == 1) to_check = true;
         else if (!looped) to_check = S <= Tp ? true : T0 <= E;
         else if (S <= Tp) to_check = T0 <= E;
         else to_check = false;

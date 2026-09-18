@@ -74,8 +74,34 @@ struct bf6_rime_binding_cache {
     std::vector<bf6_rime_string_argument> string_arguments;
 };
 
+// One reference inside a material grid cell, stored compactly. The type and
+// instance guids repeat across tens of thousands of references, so they are
+// interned and the cell holds indices; the public struct's fixed char arrays
+// would cost megabytes per level to hold what a caller reads one cell at a time.
+struct bf6_matgrid_item {
+    uint32_t kind = 0;
+    int32_t  type_idx = 0;
+    int32_t  inst_idx = 0;
+};
+
+// A level's decoded relation grid, keyed by level: a query names a level, the
+// partition costs seconds to parse, and every query after the first is a lookup.
+struct bf6_matgrid_cache {
+    std::string level;
+    std::string partition;
+    int         side = 0;
+    int         declared = 0;         // what the root declares; NOT the side
+    std::vector<int32_t> row_of;      // global material id -> this level's row, -1 unmapped
+    std::vector<std::string> type_guids;
+    std::vector<std::string> inst_guids;
+    std::map<uint64_t, std::vector<bf6_matgrid_item>> cells;
+    size_t relations = 0;
+    int    fallback_ids = 0;   // ids the level does not ship: they point at row 0
+};
+
 struct bf6_ctx {
     bf6::Source      src;
+    bf6_matgrid_cache matgrid;
     // Executable the type schema was read from; empty when chosen automatically.
     std::string      types_exe;
     std::map<int, std::vector<bf6::TerrainShaderBindingRecord>> surface_schemas;
@@ -3225,10 +3251,17 @@ int bf6_water_spectrum_h0(const bf6_water_sim_v2* sim,
     return required;
 }
 
-int bf6_level_water(bf6_ctx* c, const char* level, bf6_water* out, int out_max)
-{
-	if (!c || !level || !*level) return 0;
+/* WHERE A LEVEL'S WATER IS AUTHORED - the ONE rule, used by every water
+ * reader. It used to live inside bf6_level_water, which meant callers that
+ * wanted the water's StateKey or its shader bindings wrote the search again and
+ * got it subtly wrong: searching only under the level directory is right for
+ * every level that authors its own water and finds nothing on mp_portal_ocean,
+ * whose water is a placed prefab. Two readers disagreeing about whether a level
+ * has water is a decision living in the callers instead of here. */
+struct BF6_WaterSource { std::string part; std::string placed_in; bf6::Mat34 xf; bool placed; };
 
+static std::string BF6_WaterLevelDir(bf6_ctx* c, const char* level)
+{
 	// The level directory, off the walk's own root - the narrowest prefix that
     // reaches both the water entity and the depot that materials it. Aftermath
     // declares water in _layers_content/water while the record lives in
@@ -3244,10 +3277,23 @@ int bf6_level_water(bf6_ctx* c, const char* level, bf6_water* out, int out_max)
 		// Lightweight water-lab route: mount the named level and locate its
 		// authored directory without constructing the placement/object graph.
 		std::string mount_err;
-		if (!ensure_mounted(c, level, mount_err) || !ensure_types(c, mount_err)) return 0;
+		if (!ensure_mounted(c, level, mount_err) || !ensure_types(c, mount_err)) return std::string();
 		lvl = BF6_IsolatedLevelDir(c, level);
-		if (lvl.empty()) return 0;
 	}
+	return lvl;
+}
+
+/* Fills rather than returns: this translation unit is one extern "C" block, so
+ * a static helper here may not return a C++ class by value. */
+static void BF6_WaterSources(bf6_ctx* c, const char* level,
+                             std::vector<BF6_WaterSource>& sources,
+                             std::string* level_dir = nullptr)
+{
+    sources.clear();
+    if (!c || !level || !*level) return;
+    const std::string lvl = BF6_WaterLevelDir(c, level);
+    if (level_dir) *level_dir = lvl;
+    if (lvl.empty()) return;
 
     // Find the partition that declares the water: the two authored homes
     // first, then anything under the level whose name says water, then the
@@ -3277,12 +3323,47 @@ int bf6_level_water(bf6_ctx* c, const char* level, bf6_water* out, int out_max)
     }
     // No authored partition: the level may PLACE its water (Portal Ocean).
     // Each site is the blueprint partition plus the reference's transform.
-    struct WaterSource { std::string part; bf6::Mat34 xf; bool placed; };
-    std::vector<WaterSource> sources;
-    if (!part.empty()) sources.push_back({ part, bf6::mat_identity(), false });
+    if (!part.empty()) sources.push_back({ part, std::string(), bf6::mat_identity(), false });
     else
         for (const bf6_ctx::WaterSite& site : BF6_WaterSites(c, lvl))
-            sources.push_back({ site.part, site.xf, true });
+            sources.push_back({ site.part, site.placed_in, site.xf, true });
+}
+
+int bf6_level_water_sources(bf6_ctx* c, const char* level,
+                            bf6_water_source* out, int out_max)
+{
+    if (!c || !level || !*level) return 0;
+    std::vector<BF6_WaterSource> sources;
+    BF6_WaterSources(c, level, sources);
+    if (!out) return (int)sources.size();
+    int n = 0;
+    for (const BF6_WaterSource& s : sources) {
+        if (n >= out_max) break;
+        bf6_water_source& r = out[n];
+        std::memset(&r, 0, sizeof(r));
+        std::snprintf(r.partition, sizeof(r.partition), "%s", s.part.c_str());
+        std::snprintf(r.placed_in, sizeof(r.placed_in), "%s", s.placed_in.c_str());
+        r.placed = s.placed ? 1 : 0;
+        /* Row-major, the same 3x4 the rest of the ABI uses: rows 0-2 are the
+         * right/up/forward axes, row 3 the translation. */
+        for (int row = 0; row < 4; ++row) {
+            r.transform[row * 3 + 0] = s.xf.m[row].x;
+            r.transform[row * 3 + 1] = s.xf.m[row].y;
+            r.transform[row * 3 + 2] = s.xf.m[row].z;
+        }
+        ++n;
+    }
+    return n;
+}
+
+int bf6_level_water(bf6_ctx* c, const char* level, bf6_water* out, int out_max)
+{
+	if (!c || !level || !*level) return 0;
+    std::string lvl;
+    std::vector<BF6_WaterSource> sources;
+    BF6_WaterSources(c, level, sources, &lvl);
+    if (lvl.empty()) return 0;
+    typedef BF6_WaterSource WaterSource;
     if (sources.empty()) return 0;
 
     int total = 0;
@@ -4815,6 +4896,10 @@ void bf6_free(bf6_ctx* c, void* handle) {
 // The mount's own name tables and raw bytes. Same reason as the two above, and
 // Public definitions inherit the header's C linkage.
 #include "raw_ext.inc"
+// The soldier's authored movement values, read from the player's own install
+// rather than baked into a constants block. Sits after raw_ext.inc because it
+// mounts through those helpers.
+#include "soldier_movement.inc"
 #include "expression_ext.inc"
 #include "expression_registry_ext.inc"
 #include "ebxdump_ext.inc"
@@ -4830,6 +4915,10 @@ void bf6_free(bf6_ctx* c, void* handle) {
 #include "scatter_ext.inc"
 #include "swarm_ext.inc"
 #include "telemetry_ext.inc"
+#include "reflection_ext.inc"
+#include "matgrid_ext.inc"
+#include "sound_ext.inc"
+#include "fxlook_ext.inc"
 #include "spawn_ext.inc"
 #include "vshape_ext.inc"
 #include "gamemode_ext.inc"

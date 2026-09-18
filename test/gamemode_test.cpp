@@ -187,10 +187,8 @@ int main(int argc, char** argv)
             for (const auto& kv : link_words) lw.push_back({ kv.second, kv.first });
             std::sort(lw.begin(), lw.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
             for (size_t i = 0; i < lw.size() && i < 14; i++) std::printf("      %-44s %d\n", lw[i].second.c_str(), lw[i].first);
-            std::printf("      teams:"); for (const auto& kv : gem_teams) std::printf(" %d x%d", kv.first, kv.second); std::printf("
-");
-            std::printf("      values:"); for (const auto& kv : gem_values) std::printf(" %d x%d", kv.first, kv.second); std::printf("
-");
+            std::printf("      teams:"); for (const auto& kv : gem_teams) std::printf(" %d x%d", kv.first, kv.second); std::printf("\n");
+            std::printf("      values:"); for (const auto& kv : gem_values) std::printf(" %d x%d", kv.first, kv.second); std::printf("\n");
             ck("every gem carries a transform of its own", gem_own_xf == gem_rows);
             ck("no gem link is NULL (a gem must read as a gem)", link_words.count("(null!)") == 0);
         }
@@ -268,8 +266,7 @@ int main(int argc, char** argv)
         if (isolated_ref_hits >= 0) {
             std::printf("   hand-built vehicle spots, nearest gem (m):");
             for (float d : ref_best) { std::printf(" %.0f", d); if (d < 15.f) isolated_ref_hits++; }
-            std::printf("
-");
+            std::printf("\n");
             char buf[160];
             std::snprintf(buf, sizeof(buf), "oracle MP_Isolated gems: %d of 34 hand-built vehicle spots have a gem within 15 m (need 20)", isolated_ref_hits);
             ck(buf, isolated_ref_hits >= 20);

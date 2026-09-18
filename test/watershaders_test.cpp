@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "bf6_core.h"
 #include "ebx.h"
 #include "source.h"
 #include "types.h"
@@ -119,12 +120,37 @@ int main(int argc, char** argv)
     const uint32_t kStateKeyField = 0x2E15621F;
     uint64_t water_key = 0;
     {
-        std::vector<std::string> cands = { lvl_dir + "/default",
-                                           lvl_dir + "/_layers_content/water" };
-        for (const auto& kv : src.ebx())
-            if (kv.first.compare(0, lvl_dir.size(), lvl_dir) == 0 &&
-                kv.first.find("water") != std::string::npos)
-                cands.push_back(kv.first);
+        /* ASK THE CORE WHERE THE WATER IS, rather than searching the level
+         * directory here. That search is right for every level that authors its
+         * own water and finds nothing on mp_portal_ocean, whose water is the
+         * placed prefab gmpf_water - so this reported "no water key" for a
+         * level with an 8192 m ocean. bf6_level_water_sources is the same rule
+         * bf6_level_water uses, so the two answers cannot drift apart. */
+        std::vector<std::string> cands;
+        {
+            char cerr[256] = {0};
+            bf6_ctx* cc = bf6_open(argv[1], cerr, (int)sizeof(cerr));
+            if (cc) {
+                const int ns = bf6_level_water_sources(cc, level.c_str(), nullptr, 0);
+                if (ns > 0) {
+                    std::vector<bf6_water_source> rows((size_t)ns);
+                    const int gotn = bf6_level_water_sources(cc, level.c_str(),
+                                                             rows.data(), ns);
+                    for (int i = 0; i < gotn; ++i) cands.push_back(rows[(size_t)i].partition);
+                }
+                bf6_close(cc);
+            }
+        }
+        // Fallback to the old local search, so a core that cannot answer leaves
+        // this test no worse off than before.
+        if (cands.empty()) {
+            cands.push_back(lvl_dir + "/default");
+            cands.push_back(lvl_dir + "/_layers_content/water");
+            for (const auto& kv : src.ebx())
+                if (kv.first.compare(0, lvl_dir.size(), lvl_dir) == 0 &&
+                    kv.first.find("water") != std::string::npos)
+                    cands.push_back(kv.first);
+        }
         for (const std::string& cand : cands) {
             if (!src.ebx().count(cand)) continue;
             std::vector<uint8_t> raw = src.get_ebx(cand, err);

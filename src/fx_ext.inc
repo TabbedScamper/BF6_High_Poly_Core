@@ -109,6 +109,8 @@ int bf6_level_fx(bf6_ctx* c, const char* level, bf6_fx_layer* out, int out_max,
                 r.atlas_res   = L.atlas.res_name.empty() ? nullptr : L.atlas.res_name.c_str();
                 r.atlas_chunk = L.atlas.chunk_guid.empty() ? nullptr : L.atlas.chunk_guid.c_str();
                 r.atlas_from_override = L.atlas_from_override ? 1 : 0;
+                r.mesh = L.mesh.empty() ? nullptr : L.mesh.c_str();
+                r.mesh_is_placeholder = L.mesh_is_placeholder ? 1 : 0;
                 r.atlas_cols    = L.atlas.cols;
                 r.atlas_frames  = L.atlas.frames;
                 r.atlas_left_right = L.atlas.left_right ? 1 : 0;

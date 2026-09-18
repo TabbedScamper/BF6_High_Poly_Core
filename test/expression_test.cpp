@@ -21,6 +21,36 @@ int main(int argc, char** argv)
     const char* filter = argc > 2 ? argv[2] : "ui/";
     const bool verbose_operators = argc > 3 &&
         std::strcmp(argv[3], "--operators") == 0;
+    /* An EXECUTABLE PATH as argv[3] enables the arity rule for record kind
+     * 0x23: length = 24 + the operator's reflected parameter_count * 8. Without
+     * it the tiler searches 24..232 in 8-byte steps and calls a graph inexactly
+     * tiled whenever more than one tiling fits. Optional on purpose: the
+     * figures with and without are both worth having, and the default path is
+     * deliberately unchanged. */
+    const char* arity_exe = (argc > 3 && !verbose_operators) ? argv[3] : nullptr;
+    bf6::expression::ArityMap arity;
+    if (arity_exe) {
+        const int n0 = bf6_expression_reflected_operators(arity_exe, nullptr, 0, nullptr, 0);
+        if (n0 > 0) {
+            std::vector<bf6_expression_reflected_operator> refl((size_t)n0);
+            char rerr[256] = {};
+            const int gotr = bf6_expression_reflected_operators(arity_exe, refl.data(), n0,
+                                                                rerr, (int)sizeof(rerr));
+            for (int i = 0; i < gotr; ++i)
+                arity[refl[(size_t)i].key] = refl[(size_t)i].parameter_count;
+        }
+        std::printf("  operator arities read from the executable: %zu\n", arity.size());
+    }
+    /* "--learn" as argv[4] adds a SECOND pass. The executable reflects 3,109
+     * operators but not all of them: 108 distinct keys used by kind-0x23
+     * records are absent, and they are what leaves graphs ambiguous. A key the
+     * exe does not carry may still appear in a graph that tiles uniquely, where
+     * its length is proven - so pass one learns those, and pass two uses them.
+     *
+     * The LIBRARY still consumes no table: the map is built by this caller and
+     * handed in, which is the promise bf6_expression_inspect makes. Off by
+     * default so the plain figure stays comparable. */
+    const bool learn = argc > 4 && std::strcmp(argv[4], "--learn") == 0;
     if (filter && std::strcmp(filter, "--all") == 0) filter = "";
     char err[1024] = {};
     bf6_ctx* ctx = bf6_open(game, err, (int)sizeof(err));
@@ -32,7 +62,44 @@ int main(int argc, char** argv)
     const int count = bf6_list_res(ctx, nullptr, nullptr, 0);
     std::vector<bf6_asset> assets((size_t)std::max(count, 0));
     const int got = bf6_list_res(ctx, nullptr, assets.data(), count);
+
+    /* PASS ONE of --learn: every kind-0x23 length that a uniquely tiled graph
+     * proves, for a key the executable did not reflect. Only keys with a single
+     * consistent length are taken - a key seen at several lengths is variadic
+     * and guessing one would be worse than leaving it searched. */
+    if (learn) {
+        std::map<uint32_t, std::set<uint32_t>> proven;
+        for (int i = 0; i < got; ++i) {
+            const bf6_asset& a = assets[(size_t)i];
+            if (a.type != kExpressionType || !a.name) continue;
+            if (filter && *filter && !std::strstr(a.name, filter)) continue;
+            const uint8_t* raw = nullptr;
+            const int64_t n = bf6_read_raw(ctx, BF6_RAW_RES, a.name, &raw);
+            if (n <= 0 || !raw) continue;
+            bf6::expression::Graph g;
+            std::string why;
+            if (!bf6::expression::parse(raw, (size_t)n, g, why,
+                                        arity.empty() ? nullptr : &arity)) continue;
+            if (!g.exact_record_tiling) continue;
+            for (const bf6::expression::Record& r : g.records)
+                if (r.kind == 0x23 && r.operator_key &&
+                    arity.find(r.operator_key) == arity.end())
+                    proven[r.operator_key].insert(r.byte_length);
+        }
+        size_t learned = 0;
+        for (const auto& p : proven) {
+            if (p.second.size() != 1) continue;
+            const uint32_t len = *p.second.begin();
+            if (len < 24 || len > 232 || ((len - 24) % 8)) continue;
+            arity[p.first] = (uint16_t)((len - 24) / 8);
+            ++learned;
+        }
+        std::printf("  learned %zu operator length(s) from uniquely tiled graphs\n", learned);
+    }
     size_t selected = 0, parsed = 0, tiled = 0, records = 0;
+    size_t no_tiling = 0, ambiguous = 0;
+    size_t pins_rejected = 0;
+    std::vector<std::string> pin_names;
     size_t prefix_controls = 0, prefix_rejected = 0;
     size_t fixup_controls = 0, fixup_rejected = 0;
     std::vector<std::string> failures;
@@ -56,11 +123,19 @@ int main(int argc, char** argv)
         }
         bf6::expression::Graph graph;
         std::string why;
-        if (!bf6::expression::parse(raw, (size_t)n, graph, why)) {
+        if (!bf6::expression::parse(raw, (size_t)n, graph, why,
+                                    arity.empty() ? nullptr : &arity)) {
             failures.push_back(std::string(a.name) + ": " + why);
             continue;
         }
         ++parsed;
+        /* Counted here, not inside the untiled branch: a rejected pin often
+         * still tiles after the retry, and that case is the most interesting
+         * one - the arity was wrong and the search recovered. */
+        if (graph.arity_pin_rejected) {
+            ++pins_rejected;
+            if (pin_names.size() < 12) pin_names.push_back(a.name);
+        }
         tiled += graph.exact_record_tiling ? 1u : 0u;
         records += graph.records.size();
         for (const bf6::expression::Fixup& fixup : graph.fixups) {
@@ -73,6 +148,7 @@ int main(int argc, char** argv)
                 if (record.operator_key)
                     key_arities[record.operator_key].insert(record.operands.size());
         if (!graph.exact_record_tiling) {
+            if (graph.tiling_ways == 0) ++no_tiling; else ++ambiguous;
             if (untiled_names.size() < 12) untiled_names.push_back(a.name);
             for (const bf6::expression::Record& record : graph.records) {
                 if (record.kind != 0x23 && record.kind != 0x28 &&
@@ -125,6 +201,19 @@ int main(int argc, char** argv)
     std::printf("  real parsed: %zu / %zu\n", parsed, selected);
     std::printf("  exact proven-kind tilings: %zu / %zu\n", tiled, parsed);
     std::printf("  materialized records: %zu\n", records);
+    /* Two opposite failures with two opposite fixes: no tiling at all means a
+     * length is wrong or missing; ambiguity means a constraint is missing. */
+    std::printf("  untiled: %zu with NO tiling, %zu AMBIGUOUS\n", no_tiling, ambiguous);
+    /* A pin that contradicted its graph means the operator takes a DIFFERENT
+     * number of arguments here than everywhere it was learned from - so it is
+     * variadic and the single-length evidence was incomplete. Named rather than
+     * silently recovered from, because each one is a real gap in the model. */
+    if (pins_rejected) {
+        std::printf("  arity pins contradicted the graph and were dropped: %zu\n",
+                    pins_rejected);
+        for (const std::string& n2 : pin_names)
+            std::printf("    PIN REJECTED %s\n", n2.c_str());
+    }
     if (!untiled_kinds.empty()) {
         std::printf("  unmeasured kinds in untiled graphs:");
         for (const auto& row : untiled_kinds)

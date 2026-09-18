@@ -22,6 +22,9 @@
 #include <vector>
 #include <map>
 
+#include <algorithm>
+
+#include "bf6_core.h"
 #include "depot.h"
 #include "ebx.h"
 #include "source.h"
@@ -176,10 +179,33 @@ int main(int argc, char** argv)
         }
 
         // ---- B: the water surface's depot record, every parameter ----------
+        /* WHICH PARTITIONS TO LOOK IN. Restricting to the level directory is
+         * right for every level that authors its own water and finds nothing on
+         * mp_portal_ocean, whose water is the placed prefab gmpf_water - so this
+         * printed no WSE line at all for a level with an 8192 m ocean. The core
+         * owns the rule (bf6_level_water_sources); an empty answer falls back to
+         * the level-directory sweep so nothing is lost when it cannot answer. */
+        std::vector<std::string> water_parts;
+        {
+            char cerr[256] = {0};
+            bf6_ctx* cc = bf6_open(argv[1], cerr, (int)sizeof(cerr));
+            if (cc) {
+                const int ns = bf6_level_water_sources(cc, level.c_str(), nullptr, 0);
+                if (ns > 0) {
+                    std::vector<bf6_water_source> rows((size_t)ns);
+                    const int gotn = bf6_level_water_sources(cc, level.c_str(),
+                                                             rows.data(), ns);
+                    for (int i = 0; i < gotn; ++i) water_parts.push_back(rows[(size_t)i].partition);
+                }
+                bf6_close(cc);
+            }
+        }
         std::vector<uint64_t> keys;
         for (const auto& kv : src.ebx()) {
             const std::string& n = kv.first;
-            if (n.compare(0, lvl_dir.size(), lvl_dir) != 0) continue;
+            const bool named_source =
+                std::find(water_parts.begin(), water_parts.end(), n) != water_parts.end();
+            if (!named_source && n.compare(0, lvl_dir.size(), lvl_dir) != 0) continue;
             std::vector<uint8_t> raw = src.get_ebx(n, err);
             if (raw.empty()) continue;
             Ebx e(types);

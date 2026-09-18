@@ -183,7 +183,26 @@ bool Terrain::find_block(const std::vector<uint8_t>& res, int want,
         }
         o += 5 + (size_t)sz;
     }
-    err = "no heights block in this terrain resource";
+    /* NAME THE BLOCK THAT IS ACTUALLY MISSING. This said "no heights block"
+     * whatever was asked for, so a level with a perfectly good block 0 and no
+     * water surface reported a ground-terrain failure - which sent a reader of
+     * mp_portal_ocean looking for a broken terrain parser instead of learning
+     * that the level simply has no water surface block. A level without one is
+     * NOT malformed: mp_aftermath, shipped long before Portal Ocean, has no
+     * block 2 either. */
+    {
+        char m[160];
+        const char* what = want == 0 ? "heights (0)"
+                         : want == 2 ? "water surface (2)"
+                                     : nullptr;
+        if (what)
+            std::snprintf(m, sizeof(m),
+                          "this terrain resource has no %s block", what);
+        else
+            std::snprintf(m, sizeof(m),
+                          "this terrain resource has no block %d", want);
+        err = m;
+    }
     return false;
 }
 

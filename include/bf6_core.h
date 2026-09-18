@@ -1003,6 +1003,16 @@ typedef struct {
      * override, 255 template - a reader that implements only the template path
      * resolves 255 of 2,577 and calls the rest textureless. */
     int32_t     atlas_from_override;
+    /* MESH-PARTICLE GEOMETRY. NULL for the families that draw a sheet instead.
+     * Missiles, UAVs, aircraft vapour, birds and debris are meshes, not
+     * billboards, and drew nothing at all until this was read.
+     *
+     * This is the graph TEMPLATE's mesh. Effects substitute their own over it
+     * the same way they override the atlas, and that substitution is not
+     * decoded yet, so `mesh_is_placeholder` flags the graphs whose template
+     * mesh is the 3-vertex stand-in the game itself expects to be replaced. */
+    const char* mesh;
+    int32_t     mesh_is_placeholder;
     int32_t     atlas_cols;     /* AUTHORED, never from the filename           */
     int32_t     atlas_frames;   /* total frames; t_..._7x144_d authors 49       */
     int32_t     atlas_left_right;
@@ -1064,6 +1074,196 @@ typedef struct {
 BF6_API int bf6_level_fx(bf6_ctx*, const char* level,
                          bf6_fx_layer* out, int out_max,
                          bf6_fx_stats* stats, char* err, int err_len);
+
+/* ONE LAYER'S LOOK, resolved from its parameter table.
+ *
+ * `bf6_fx_layer::params` is the template's defaults with the layer's overrides
+ * applied, addressed by `pid` - the djb2-xor of the parameter's name. A
+ * consumer that wanted the opacity curve would have to carry its own pid
+ * constants, and the moment Godot and Unreal each carry their own copy they can
+ * disagree about what an effect looks like. So the pids live here, once, and
+ * both engines ask for the resolved values.
+ *
+ * Every field is the AUTHORED value or the `absent` default beside it; nothing
+ * is invented. `has_*` bits say which the layer actually stated, so a consumer
+ * can tell "authored 0" from "not authored".
+ *
+ * Usage counts across the shipped emitter overrides, for a sense of what
+ * matters: RotationOverLife 8,814, SizeX 5,416, LocalLightScale 4,759,
+ * SunLightScale 5,873, OpacityOverLife 22,358, BaseSize 22,704, Drag 30,351. */
+typedef struct {
+/* @gen:fxlook_struct */
+    float base_size;                  /* BaseSize 0xBD355AD5, 22,704 overrides - the sprite quad edge */
+    float base_size_bias;             /* BaseSizeBias 0xBB40784C, 3,034 overrides */
+    float size_x;                     /* SizeX 0x0DCF4958, 5,416 overrides - .x of a Vec2 */
+    float size_y;                     /* SizeY 0x0DCF4959, 4,949 overrides - .x of a Vec2 */
+    float size_z;                     /* SizeZ 0x0DCF495A, 5,340 overrides - .x of a Vec2 */
+    float spawn_size[2];              /* SpawnSize 0x8A1C76DB, 6,424 overrides - mesh particle scale */
+    float size_over_life[4];          /* SizeOverLife 0x0AFB1F08, 118 overrides - cubic in normalised age */
+    float size_curve[4];              /* SizeCurve 0x8B256B37, 5,898 overrides - cubic in normalised age */
+    float size_y_mult;                /* SizeYMult 0x8C70A459, 4,872 overrides */
+    float scale[3];                   /* Scale 0x0DC8309D, 2,453 overrides */
+    float scale_x_mult;               /* ScaleXMult 0x539877A5, 916 overrides */
+    float scale_z_mult;               /* ScaleZMult 0x537688A7, 915 overrides */
+    float pivot_y;                    /* PivotY 0xC9846F88, 5,131 overrides - moves the card's origin off centre */
+    float opacity;                    /* Opacity 0x39F20FDC, 24,145 overrides */
+    float opacity_mult;               /* OpacityMult 0x01C5CADC */
+    float opacity_over_life[4];       /* OpacityOverLife 0x3D1607D4, 22,358 overrides - cubic in normalised age */
+    float color[3];                   /* Color 0x0CA8C5F8 - linear */
+    float color_mult[3];              /* ColorMult 0x1EE568B8 */
+    float color0[3];                  /* Color0 0xA1C184C8, 16,276 overrides - gradient start, linear */
+    float color1[3];                  /* Color1 0xA1C184C9, 12,742 overrides - gradient end, linear */
+    float random_color_min[3];        /* RandomColorMin 0xE5C35109, 13,683 overrides - per-particle tint range, linear */
+    float random_color_max[3];        /* RandomColorMax 0xE5C35217, 13,883 overrides */
+    float intensity;                  /* Intensity 0xE4AABCEA, 1,435 overrides */
+    float temperature;                /* Temperature 0x84477F09, 1,485 overrides - blackbody tint for fire */
+    int   ramp;                       /* Ramp 0x7C896E0B, 2,596 overrides */
+    float alpha_cull;                 /* AlphaCullThreshold 0x1487F4B0 */
+    float rotation_speed;             /* RotationSpeed 0x2FD2E956, 27,938 overrides */
+    float rotation_speed_bias;        /* RotationSpeedBias 0x47553DCF, 4,167 overrides */
+    float rotation_over_life[4];      /* RotationOverLife 0x0C8950D9, 8,814 overrides - cubic in normalised age */
+    float spawn_rotation_min[3];      /* SpawnRotationMin 0x80860520, 1,331 overrides - radians */
+    float spawn_rotation_max[3];      /* SpawnRotationMax 0x8086043E, 1,652 overrides - radians */
+    float spawn_rotation_speed;       /* SpawnRotationSpeed 0xBB9A5E6D, 6,851 overrides */
+    float spawn_rotation_speed_mult[2];/* SpawnRotationSpeedMult 0xA56991AD, 1,258 overrides */
+    float spawn_rotation_speed_min_mult;/* SpawnRotationSpeedMinMult 0x4C7F1E67, 1,022 overrides */
+    float spawn_speed;                /* SpawnSpeed 0xCDB76C39, 28,486 overrides */
+    float spawn_speed_mult[2];        /* SpawnSpeedMult 0x77706079, 6,091 overrides - min/max multiplier */
+    float spawn_speed_min_mult;       /* SpawnSpeedMinMult 0xF5BFFA33, 15,502 overrides */
+    float spawn_speed_bias;           /* SpawnSpeedBias 0x77711EE0, 1,170 overrides */
+    float spawn_speed_curve[4];       /* SpawnSpeedCurve 0x65A739AE, 2,884 overrides - cubic in normalised age */
+    float speed_mult;                 /* SpeedMult 0x3DAD1982, 3,903 overrides */
+    float drag;                       /* Drag 0x7C7FD695, 30,351 overrides */
+    float drag_min_mult;              /* DragMinMult 0x5A7B475F, 21,326 overrides - low end of the drag range */
+    float drag_over_life[4];          /* DragOverLife 0x2339F49D, 11,602 overrides - cubic in normalised age */
+    float gravity;                    /* Gravity 0xC46720E3, 12,616 overrides */
+    float buoyancy;                   /* Buoyancy 0x4E4BFB91, 15,173 overrides - what makes smoke RISE, not spawn speed */
+    float buoyancy_over_life[4];      /* BuoyancyOverLife 0x384AF999, 7,341 overrides - cubic in normalised age */
+    float wind_strength;              /* WindStrength 0xE0A01AD4, 28,123 overrides */
+    float random_force;               /* RandomForce 0x441BEE03, 18,590 overrides - the turbulence a plume curls with */
+    float random_force_over_life[4];  /* RandomForceOverLife 0x3858A30B, 2,346 overrides - cubic */
+    float local_force[3];             /* LocalForce 0xEFC8A035, 4,457 overrides - a constant directed push */
+    float local_force_over_life[4];   /* LocalForceOverLife 0x12079D3D, 3,167 overrides - cubic */
+    float direction_from_origin;      /* DirectionFromEmitterOrigin 0x27319714, 3,468 overrides - 1 = radial burst */
+    float restitution;                /* Restitution 0x8906E021, 7,340 overrides - bounce, collision only */
+    float restitution_variance;       /* RestitutionVariance 0xB663BD04, 1,097 overrides */
+    float friction;                   /* Friction 0x12405B67, 6,890 overrides - collision only */
+    float friction_variance;          /* FrictionVariance 0x773DD7C2, 1,012 overrides */
+    float spawn_position[3];          /* SpawnPosition 0xFECEFDE7, 5,893 overrides - offset from the emitter */
+    float spawn_scale[3];             /* SpawnScale 0xCDAE4A26, 2,013 overrides - the spawn box's extents */
+    float inner_radius;               /* InnerRadius 0xC6BBC2C3, 1,598 overrides */
+    float outer_radius;               /* OuterRadius 0xCD102164, 5,836 overrides */
+    float start_zenith_angle;         /* StartZenithAngle 0x3107BE60, 1,021 overrides - cone, radians */
+    float end_zenith_angle;           /* EndZenithAngle 0xDC56DBCF, 1,316 overrides - cone, radians */
+    float sun_light_scale;            /* SunLightScale 0xF36E7E8B, 5,873 overrides */
+    float local_light_scale;          /* LocalLightScale 0x209877EE, 4,759 overrides */
+    float ambient_light_scale;        /* AmbientLightScale 0x1558A27B, 1,876 overrides */
+    float received_shadow_scale;      /* ReceivedShadowScale 0xEB0563F4 */
+    float cloud_shadow_scale;         /* CloudShadowScale 0xFF6899EA */
+    float gnomon_backlight;           /* GnomonBacklight 0xCC64D81A, 17,083 overrides */
+    float vertex_backlight;           /* VertexBacklight 0xC0246618, 16,856 overrides */
+    float backlight_contrast;         /* BacklightPixelContrast 0x8454003A, 17,345 overrides - how sharp the backlit rim is */
+    float shadow_radius_mult;         /* ShadowRadiusMult 0x973336DB, 1,021 overrides */
+    int   light_mult_type;            /* LightMultType 0x1F0B9D63 - 0 sun 1 local 2 both */
+    int   gnomon_rig_index;           /* GnomonLightRigIndex 0x27F4CED3 */
+    float camera_bias;                /* CameraBias 0xBFF3F865, 12,256 overrides - pulls the card toward the camera */
+    float inv_z_fade;                 /* InvZFadeMultiplier 0x141FF6C3, 8,714 overrides - the soft-particle fade */
+    int   disable_frame_blend;        /* DisableFrameBlend 0x45056B2D */
+    int   use_right_tile;             /* UseRightTile 0xCB4FC2D2 */
+    int   mirror;                     /* Mirror 0x9CFC66BC, 6,162 overrides */
+    float flip_u_probability;         /* FlipUProbability 0x694CE72E, 5,137 overrides - 0..1 chance per particle */
+    float flip_v_probability;         /* FlipVProbability 0x9FD600CD, 14,561 overrides - 0..1 chance per particle */
+    int   based_on_lifetime;          /* BasedOnLifetime 0xA05DCC66, 6,130 overrides - flipbook clocked by age, not by rate */
+    int   local_space;                /* LocalSpace 0xF11A114C - particles follow the emitter */
+/* @end:fxlook_struct */
+    /* WHICH FIELDS THE LAYER ACTUALLY STATED, one bit per field above in
+     * declaration order. Two words because the struct passed 64 fields; use
+     * bf6_fx_look_authored rather than indexing this by hand. */
+    unsigned long long has[2];
+} bf6_fx_look;
+
+/* Bit positions in bf6_fx_look::has, so a caller can ask "was this authored".
+ * Ordered as the struct is. */
+enum {
+/* @gen:fxlook_enum */
+    BF6_FXLOOK_BASE_SIZE = 0, BF6_FXLOOK_BASE_SIZE_BIAS, BF6_FXLOOK_SIZE_X,
+    BF6_FXLOOK_SIZE_Y, BF6_FXLOOK_SIZE_Z, BF6_FXLOOK_SPAWN_SIZE,
+    BF6_FXLOOK_SIZE_OVER_LIFE, BF6_FXLOOK_SIZE_CURVE,
+    BF6_FXLOOK_SIZE_Y_MULT, BF6_FXLOOK_SCALE, BF6_FXLOOK_SCALE_X_MULT,
+    BF6_FXLOOK_SCALE_Z_MULT, BF6_FXLOOK_PIVOT_Y, BF6_FXLOOK_OPACITY,
+    BF6_FXLOOK_OPACITY_MULT, BF6_FXLOOK_OPACITY_OVER_LIFE, BF6_FXLOOK_COLOR,
+    BF6_FXLOOK_COLOR_MULT, BF6_FXLOOK_COLOR0, BF6_FXLOOK_COLOR1,
+    BF6_FXLOOK_RANDOM_COLOR_MIN, BF6_FXLOOK_RANDOM_COLOR_MAX,
+    BF6_FXLOOK_INTENSITY, BF6_FXLOOK_TEMPERATURE, BF6_FXLOOK_RAMP,
+    BF6_FXLOOK_ALPHA_CULL, BF6_FXLOOK_ROTATION_SPEED,
+    BF6_FXLOOK_ROTATION_SPEED_BIAS, BF6_FXLOOK_ROTATION_OVER_LIFE,
+    BF6_FXLOOK_SPAWN_ROTATION_MIN, BF6_FXLOOK_SPAWN_ROTATION_MAX,
+    BF6_FXLOOK_SPAWN_ROTATION_SPEED, BF6_FXLOOK_SPAWN_ROTATION_SPEED_MULT,
+    BF6_FXLOOK_SPAWN_ROTATION_SPEED_MIN_MULT, BF6_FXLOOK_SPAWN_SPEED,
+    BF6_FXLOOK_SPAWN_SPEED_MULT, BF6_FXLOOK_SPAWN_SPEED_MIN_MULT,
+    BF6_FXLOOK_SPAWN_SPEED_BIAS, BF6_FXLOOK_SPAWN_SPEED_CURVE,
+    BF6_FXLOOK_SPEED_MULT, BF6_FXLOOK_DRAG, BF6_FXLOOK_DRAG_MIN_MULT,
+    BF6_FXLOOK_DRAG_OVER_LIFE, BF6_FXLOOK_GRAVITY, BF6_FXLOOK_BUOYANCY,
+    BF6_FXLOOK_BUOYANCY_OVER_LIFE, BF6_FXLOOK_WIND, BF6_FXLOOK_RANDOM_FORCE,
+    BF6_FXLOOK_RANDOM_FORCE_OVER_LIFE, BF6_FXLOOK_LOCAL_FORCE,
+    BF6_FXLOOK_LOCAL_FORCE_OVER_LIFE, BF6_FXLOOK_DIRECTION_FROM_ORIGIN,
+    BF6_FXLOOK_RESTITUTION, BF6_FXLOOK_RESTITUTION_VARIANCE,
+    BF6_FXLOOK_FRICTION, BF6_FXLOOK_FRICTION_VARIANCE,
+    BF6_FXLOOK_SPAWN_POSITION, BF6_FXLOOK_SPAWN_SCALE,
+    BF6_FXLOOK_INNER_RADIUS, BF6_FXLOOK_OUTER_RADIUS,
+    BF6_FXLOOK_START_ZENITH, BF6_FXLOOK_END_ZENITH, BF6_FXLOOK_SUN_LIGHT,
+    BF6_FXLOOK_LOCAL_LIGHT, BF6_FXLOOK_AMBIENT_LIGHT,
+    BF6_FXLOOK_RECEIVED_SHADOW, BF6_FXLOOK_CLOUD_SHADOW,
+    BF6_FXLOOK_GNOMON_BACKLIGHT, BF6_FXLOOK_VERTEX_BACKLIGHT,
+    BF6_FXLOOK_BACKLIGHT_CONTRAST, BF6_FXLOOK_SHADOW_RADIUS_MULT,
+    BF6_FXLOOK_LIGHT_MULT_TYPE, BF6_FXLOOK_GNOMON_RIG,
+    BF6_FXLOOK_CAMERA_BIAS, BF6_FXLOOK_INV_Z_FADE, BF6_FXLOOK_FRAME_BLEND,
+    BF6_FXLOOK_RIGHT_TILE, BF6_FXLOOK_MIRROR, BF6_FXLOOK_FLIP_U,
+    BF6_FXLOOK_FLIP_V, BF6_FXLOOK_BASED_ON_LIFETIME, BF6_FXLOOK_LOCAL_SPACE,
+    BF6_FXLOOK_COUNT
+/* @end:fxlook_enum */
+};
+
+/* Resolve one layer. Returns the number of fields the layer actually authored.
+ * `layer` must come from bf6_level_fx and its params must still be valid. */
+BF6_API int bf6_fx_layer_look(const bf6_fx_layer* layer, bf6_fx_look* out);
+/* Did the layer STATE this field? `field` is a BF6_FXLOOK_* value. The answer
+ * matters because an unstated field keeps its zero: "no drag" and "drag
+ * unknown" are different looks, and reading the second as the first is how a
+ * missing value turns into a confident wrong one. */
+BF6_API int bf6_fx_look_authored(const bf6_fx_look* look, int field);
+/* The field's name, in enum order, for consumers that address fields by name.
+ * Here so that nobody keeps a second copy of the order; see the note in
+ * fxlook_ext.inc for what happened the one time somebody did. */
+BF6_API const char* bf6_fx_look_field_name(int field);
+/* One field's value as up to four floats; returns its arity (1..4) or 0. An
+ * integer field comes back as one float, and bf6_fx_look_field_is_int says so.
+ * Together with bf6_fx_look_field_name these let a consumer serialise the whole
+ * look without naming a single field - which is the only way the payload cannot
+ * end up describing fewer fields than the `has` mask claims. */
+BF6_API int bf6_fx_look_field_value(const bf6_fx_look* look, int field, float* out4);
+BF6_API int bf6_fx_look_field_is_int(int field);
+
+/* THE EMITTER BUDGET, decided once for both editors.
+ *
+ * Drawing one emitter per spawn point per layer is what makes an effect look
+ * like the game's rather than like one generic puff, and it is also what makes
+ * the count explode: MP_Isolated wants 2,343 and Granite TechCampus around
+ * 23,000, each a live particle system. A preview has to trim, and the trim has
+ * to be the SAME trim in Godot and Unreal or the two stop being comparable -
+ * which is the whole reason this lives here and not in either plugin.
+ *
+ * bf6_fx_budget_keep answers "does candidate `index` of `total` survive a cap
+ * of `budget`". It is an even stride, not a truncation: keeping the first N in
+ * file order keeps one corner of the map and empties the rest, because file
+ * order is spatially clustered. The stride keeps exactly `budget` of them,
+ * spread across the whole list, and depends on nothing but the three numbers,
+ * so both editors compute the identical set without exchanging anything.
+ *
+ * bf6_fx_budget_default is the cap itself, here rather than in each plugin for
+ * the same reason. Pass a budget of 0 or less to mean "use the default". */
+BF6_API int bf6_fx_budget_default(void);
+BF6_API int bf6_fx_budget_keep(int index, int total, int budget);
 
 /* Where one effect is placed. Fills out_xf with count*12 floats (rows right,
  * up, forward, translation) and returns the count. */
@@ -1247,6 +1447,42 @@ typedef struct {
  * bf6_level_water_feature reports the prefab's properties. */
 BF6_API int bf6_level_water(bf6_ctx*, const char* level, bf6_water* out, int out_max);
 
+/* ------------------------------------------------ where the water is AUTHORED
+ *
+ * WHICH PARTITIONS HOLD THIS LEVEL'S WATER ENTITY, by the same rule
+ * bf6_level_water uses: the level's own directory when it authors water, else
+ * the blueprints of the water prefabs it places.
+ *
+ * This exists because that rule kept being re-implemented. Readers wanting the
+ * water's StateKey, its shader bindings or its constants each searched
+ * "partitions under the level directory whose name contains water" - correct
+ * for every level that authors its own, and finding NOTHING on mp_portal_ocean,
+ * whose water is the placed prefab gmpf_water. The result was readers printing
+ * "no water StateKey on this level" for a level that plainly has an 8192 m
+ * ocean. The search being a line of each caller rather than one core decision
+ * is what let the two answers disagree.
+ *
+ * partition  the EBX partition holding the water entity: the level's own, or a
+ *            placed prefab's blueprint (game/glacierportal/portalprefabs/
+ *            water/gmpf_water).
+ * placed_in  the level partition holding the reference; empty when authored.
+ * placed     0 when the level authors the water, 1 when it places a prefab. A
+ *            placed entity's transform is in the PREFAB's space, and transform
+ *            is the reference's world transform to compose with it. Identity
+ *            when placed is 0, so a caller that ignores it stays correct for
+ *            every authored level.
+ *
+ * Same count/fill convention as bf6_level_water: out = NULL counts. */
+typedef struct {
+    char    partition[192];
+    char    placed_in[192];
+    int32_t placed;
+    float   transform[12];
+} bf6_water_source;
+
+BF6_API int bf6_level_water_sources(bf6_ctx*, const char* level,
+                                    bf6_water_source* out, int out_max);
+
 /* The ocean simulation's INPUTS - the authored sea state. The wave field
  * itself is a runtime GPU simulation and nothing on disk holds it; these are
  * the numbers that drive it, read from WaterOceanSimulationEntityData in the
@@ -1391,6 +1627,42 @@ BF6_API int bf6_level_ocean_sea_state(bf6_ctx*, const char* level,
 BF6_API int bf6_level_water_sims_effective(bf6_ctx*, const char* level, int isolated,
                                            bf6_water_sim_v2* out, int out_max,
                                            bf6_ocean_sea_state* sea_out);
+
+/* THE SAME CASCADES WITH THE SEA DIALLED, which is what makes a live water
+ * preview possible.
+ *
+ * Portal Ocean is the ONE map whose water a script can drive, and it drives
+ * exactly these: BeaufortScale, WaveAmplitude and WaterHeight (plus Enabled).
+ * This mirrors that set and nothing more, deliberately: a preview that can only
+ * show the authored force cannot be held against a game running force 6, and a
+ * preview that can invent parameters the game has no way to set would be
+ * showing a sea that cannot exist.
+ *
+ * Each field applies only when its `has_` flag is set; everything else stays as
+ * the level authored it. Overriding the force re-evaluates the whole ocean
+ * curve collection at that force, so wind speed for every cascade - and
+ * therefore the spectrum both engines build - follows exactly as it does when
+ * the game plays the value.
+ *
+ * `water_height` is passed through rather than applied: it moves the surface,
+ * which is the consumer's transform, not a property of the simulation.
+ *
+ * Same count/fill convention as bf6_level_water_sims_effective, and calling it
+ * with an all-zero override is identical to calling that function. */
+typedef struct {
+    int   has_beaufort;      /* re-evaluate the ocean curves at `beaufort`     */
+    float beaufort;          /* force, the domain the curves are authored over */
+    int   has_wave_amplitude;
+    float wave_amplitude;    /* applied to the cascades the prefab routes to   */
+    int   has_water_height;
+    float water_height;      /* passed through in `height_out`, not simulated  */
+} bf6_water_override;
+
+BF6_API int bf6_level_water_sims_override(bf6_ctx*, const char* level, int isolated,
+                                          const bf6_water_override* ov,
+                                          bf6_water_sim_v2* out, int out_max,
+                                          bf6_ocean_sea_state* sea_out,
+                                          float* height_out);
 
 /* ---------------------------------------------------------- water draw tree
  *
@@ -1622,8 +1894,65 @@ BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fi
  * RightHand); the whole is moved so the point between the feet is at x/z 0
  * and the lowest body vertex at y 0.
  * Record: the bf6_loadout_weapon layout, with "detail" beside "error" and
- * "anchors" empty. A non-empty error means no soldier. */
+ * "anchors" empty. A non-empty error means no soldier.
+ *
+ * "skinned":"1" HANDS BACK A RIG INSTEAD OF A POSED MESH, for an engine that
+ * means to animate the soldier rather than stand it in one frame. A posed
+ * vertex cannot be re-posed, so this is opt-in and changes the geometry: with
+ * it, each section's positions and normals are the BIND pose and the section
+ * carries "influences" (4 or 8), "skin_bones" and "skin_weights" (body offsets,
+ * influences * vertex_count each, lane-aligned, ids ALREADY resolved through
+ * the 0x8000 rule so no consumer repeats it), and "renderbones", that mesh's
+ * own bones appended above the rig. The record gains "rig_bones" and "rig",
+ * the shared base rig every section starts from. A skin index below
+ * "rig_bones" names a "rig" entry; at or above it, entry (index - rig_bones)
+ * of that SECTION's "renderbones" - the appendix differs per mesh, which is
+ * why it is not one list.
+ * Rig and renderbone entries are {"name","parent","local","inverse","posed"}:
+ * "local" is the parent-relative bind rest, "inverse" the inverted bind model
+ * pose a skin binds with, and "posed" the same parent-relative slot carrying
+ * the sampled idle frame, so the skinned soldier can be shown standing as the
+ * static one does. A renderbone's "parent" indexes the composed rig, so it
+ * takes the same shift as a skin index. All three are 3x4 row-major, as every
+ * transform here is. Model transforms are not shipped: build them from
+ * "parent" and "local"/"posed".
+ *
+ * The GEOMETRY IS NOT MOVED in this mode - it stays in rig space, the only
+ * space the skinning palette accepts, so the feet-on-the-origin placement
+ * comes back as "root":[x,y,z] for the engine to apply to the skeleton
+ * instead. Translating the vertices would look right at bind pose, where the
+ * palette is the identity, and tear the soldier apart under any other pose.
+ * The weapon has no skin binding, so it is left in the drawn right hand's own
+ * frame and its sections carry "attach_bone", the rig bone to hang them off;
+ * attached there the rifle rides the animation. Every other section's
+ * "attach_bone" is -1. In the default (posed) mode the geometry is placed as
+ * before and "attach_bone" is always -1. */
 BF6_API int64_t bf6_loadout_soldier(bf6_ctx*, const char* request_json, const char* portal_enums, uint8_t** out);
+
+/* THE WHOLE IDLE CLIP behind bf6_loadout_soldier's "posed", as bone tracks: one
+ * parent-relative transform per driven bone per frame, ready to become an
+ * engine animation over the rig that record hands out. "posed" is frame 0 of
+ * this, so a soldier built from the rig and then driven by these tracks starts
+ * exactly where the static one stands.
+ *
+ * request JSON {"role"} (default assault), naming the same front-end standing
+ * idle bf6_loadout_soldier poses with - whichever variant the mount carries.
+ * Record: u32 'BLWA', u32 1, u32 json bytes, JSON (space padded to 4), then the
+ * float body, as the BLWP records are laid out. JSON {"clip" (the resolved
+ * path), "error", "frames", "bones", "tracks":[{"bone","track"}]}: "bone"
+ * indexes the soldier record's shared "rig", and "track" is a body offset to
+ * frames * 12 floats, BONE-MAJOR - one bone's whole track is contiguous, since
+ * that is how an engine builds a track. Each 12 is a 3x4 row-major
+ * parent-relative transform, the same convention and the same slot as the rig's
+ * "local" and "posed". Bones the clip does not drive are absent and stay at
+ * rest. A non-empty error means no clip.
+ *
+ * THE RELOC PAYLOAD CARRIES NO FRAME RATE - "frames" is a count of authored
+ * samples, not a duration - but the rate is not a free choice either: all four
+ * ClipPlayer owners that select these clips author Fps=60 in the current
+ * install, which is what the menu viewer plays them at. Use 60 unless you have
+ * measured otherwise. */
+BF6_API int64_t bf6_loadout_soldier_clip(bf6_ctx*, const char* request_json, uint8_t** out);
 
 /* ---------------------------------------------------------- map checks
  *
@@ -1883,6 +2212,64 @@ typedef int (*bf6_walk_ray_fn)(void* user, const double* from, const double* to,
 BF6_API void bf6_walk_step(bf6_walk_state*, const bf6_walk_input*, bf6_walk_ray_fn ray, void* user);
 /* The same step against a ray scene. */
 BF6_API void bf6_walk_step_scene(bf6_walk_state*, const bf6_walk_input*, bf6_ray_scene*);
+
+/* THE WALKER'S NUMBERS, as many of them as the game actually states.
+ *
+ * BF6 authors MULTIPLIERS AND THRESHOLDS and keeps base behaviours in its
+ * motion machine and animation set, so this is a mixture and the comments say
+ * which is which. Reading it is what stops the authored half being a second,
+ * drifting copy of the game's data inside this library.
+ *
+ * Metres, seconds, degrees. */
+typedef struct {
+    /* MEASURED FROM THE GAME'S OWN LOCOMOTION CYCLES, not authored anywhere.
+     *
+     * No GameRemixer partition states an absolute walk or sprint speed, which
+     * for a while read as "the number is missing". It is not: BF6's locomotion
+     * is motion-matched, so a gait's speed IS its animation - the character
+     * moves because the root moves. bf6_walk_tuning_read samples each gait's
+     * cycle and divides root displacement by duration. On the current install
+     * that measures 2.39 crouched, 4.00 forward and 6.86 sprinting.
+     *
+     * Every one of those scales with the 60 fps the clips are assumed to play
+     * at; the payload does not carry a rate. Without an install these fall back
+     * to the host engine's character defaults. */
+    float crouch_speed, walk_speed, run_speed;
+    float jump_speed, gravity, accel_ground, accel_air, radius, crouch_drop;
+    /* AUTHORED, read from common/gameplay/soldier/grx_glacier_soldier. */
+    float step_height;                  /* StepHeight, 0.32 on the current install */
+    float jump_horizontal_cap;          /* Jump_HorizontalVelocityCap             */
+    float jump_min_speed_for_impulse;   /* Jump_MinSpeedForHorizontalImpulse      */
+    float jump_strafe_speed;            /* Jump_StrafeSpeed                       */
+    float landing_penalty_strength;     /* Jump_LandingPenalty_Strength           */
+    float landing_penalty_floor;        /* Jump_LandingPenalty_MinScaleClamp      */
+    float landing_recovery_per_second;  /* Jump_LandingRecovery_IncreasePerSecond */
+    /* AUTHORED, and carried for engines that implement the mechanic. This
+     * walker has no slide and no vault, so it reads these and does nothing with
+     * them rather than pretending otherwise. */
+    float slide_needed_velocity, slide_cooldown, slide_impulse;
+    float vault_max_height;
+    /* AUTHORED as a player OPTION, from Common/GameSetup/Options/Render/
+     * OptionFieldOfView: a default and the range the player moves inside.
+     * VERTICAL degrees, which is what a Godot Camera3D and an Unreal camera
+     * with a vertical-fit aspect both take. */
+    float fov_vertical, fov_vertical_min, fov_vertical_max;
+} bf6_walk_tuning;
+
+/* The fallbacks, with no install involved: engine defaults for what BF6 does
+ * not state, and the values decoded from the current install for what it does. */
+BF6_API void bf6_walk_tuning_defaults(bf6_walk_tuning*);
+/* Fill from the player's own install, falling back per value. Returns how many
+ * values were read; 0 means everything is a default. Mounts as needed. */
+BF6_API int bf6_walk_tuning_read(bf6_ctx*, bf6_walk_tuning*);
+
+/* The step, with the numbers supplied. NULL tuning means the defaults, which is
+ * exactly what bf6_walk_step and bf6_walk_step_scene pass - so an existing
+ * caller keeps working and gets the authored step height either way. */
+BF6_API void bf6_walk_step_tuned(bf6_walk_state*, const bf6_walk_input*,
+                                 const bf6_walk_tuning*, bf6_walk_ray_fn ray, void* user);
+BF6_API void bf6_walk_step_scene_tuned(bf6_walk_state*, const bf6_walk_input*,
+                                       const bf6_walk_tuning*, bf6_ray_scene*);
 
 /* ---------------------------------------------------------- water, part 2
  *
@@ -5674,6 +6061,248 @@ typedef struct {
 } bf6_telemetry_enum;
 
 BF6_API bf6_telemetry_enum* bf6_telemetry_enum_read(bf6_ctx*, const char* ebx_name);
+
+/* REFLECTION VOLUMES: the authored local IBL boxes and their baked cubemaps.
+ *
+ * A level's specular reflections come from boxes an artist placed, each with a
+ * baked texture. An engine with only the sky to reflect previews interiors grey
+ * and draws metal as plastic, which is what both editors do today.
+ *
+ * The transform is a FULL BASIS - right, up, forward, translation - and the
+ * basis lengths ARE the box half-extents, so there is no separate size field:
+ * solve a point in that basis and |x|,|y|,|z| <= 1 is inside it.
+ *
+ * `texture` is the baked reflection partition as the import names it, never a
+ * name rebuilt from a convention: most resolve under
+ * <area>/reflectionvolumetexture/<layer>/<guid>-tex and some under
+ * <level>/lighting/lrv/<guid>-tex, so guessing the first shape would silently
+ * drop the second.
+ *
+ * Count-then-fill, like the other level readers: pass out = NULL for the count.
+ * Measured on mp_isolated: 35 volumes in the level's lighting layer. */
+typedef struct {
+    float right[3];       /* basis; its length is the half-extent on that axis */
+    float up[3];
+    float forward[3];
+    float translation[3]; /* world metres */
+    char  texture[256];   /* baked reflection texture partition */
+    char  partition[256]; /* where the volume is authored */
+    char  guid[40];       /* the volume instance's own guid */
+    /* THE LEVEL-WIDE FALLBACK, not a local probe. Measured on mp_isolated: one
+     * volume is 10000 x 8000 x 10000 m while the other 34 run 2 m to 230 m, so
+     * the outdoor catch-all is thousands of times larger by volume than any
+     * local box. A consumer that places it as an ordinary probe gets one huge
+     * low-quality capture that overrides the sky everywhere, which is worse
+     * than not placing it: both editors already have the level's own sky
+     * driving ambient, which is what this volume is for.
+     *
+     * Set when the box volume is at least 100x the median box volume. Flagged
+     * here rather than thresholded in each editor so the two cannot disagree
+     * about which volume is the fallback. */
+    unsigned char is_global;
+} bf6_reflection_probe;
+
+BF6_API int bf6_level_reflection_probes(bf6_ctx*, const char* level,
+                                        bf6_reflection_probe* out, int out_max,
+                                        char* err, int err_len);
+
+/* PLACED SPATIAL SOUND EMITTERS: the level's ambient bed.
+ *
+ * Neither editor read a sound emitter of any kind, which left every rebuild
+ * silent while the game's world is full of authored sound. These are the
+ * placeable ones (DiceSoundSpatialEntityData): present on 25 of 28 levels,
+ * about 100 on a busy map - mp_aftermath 102, mp_abbasid 93 - and the sea,
+ * wind, fires and machinery a place is recognised by.
+ *
+ * NOT the whole of "audio", deliberately. A level also ships a
+ * `<level>_soundshapegrid` whose thousands of instances are grid cells with no
+ * transform and no sound: an acoustics lookup structure, not sources. Reading
+ * those as emitters would place thousands of silent markers.
+ *
+ * `sound` is the sound CONFIG partition, WITHOUT the .ebx the import table
+ * spells it with, so it can be handed straight to bf6_ui_sound_decode - which
+ * accepts a config and returns PCM, so a consumer can place the emitter and
+ * actually play what the game plays there. Verified on mp_isolated: 3 of 3
+ * assets decode at 48 kHz.
+ *
+ * Count-then-fill, like the other level readers: pass out = NULL for the count. */
+typedef struct {
+    float xform[12];      /* world, 3x4 row-major, GAME space (Y up, metres) */
+    char  sound[256];     /* sound config partition, ready for bf6_ui_sound_decode */
+    float amplitude;      /* Amplitude on the emitter; 1.0 on every one sampled */
+    unsigned char play_on_creation;   /* PlayOnCreation */
+    unsigned int  flags;  /* the entity's Flags word, NOT an id                */
+    /* FROM THE SOUND CONFIG THE EMITTER POINTS AT, read here so the two
+     * editors cannot invent different falloffs. The emitter itself carries no
+     * radius, and a consumer that made one up would stop matching the game the
+     * moment it guessed. Both are 0 when the config could not be read. */
+    float radius;         /* config Radius   (5cda5a37) */
+    float loudness;       /* config Loudness (b0fad94d) */
+    char  partition[256]; /* where the emitter is authored                    */
+} bf6_sound_emitter;
+
+BF6_API int bf6_level_sound_emitters(bf6_ctx*, const char* level,
+                                     bf6_sound_emitter* out, int out_max,
+                                     char* err, int err_len);
+
+/* MATERIAL RELATION GRID: what happens when material A meets material B.
+ *
+ * Every impact asks this. A round hits a surface and the game picks a sound, an
+ * effect, a decal, a footprint, a penetration rule from a square matrix the
+ * level authors over the game's material ids. The query is PER PAIR because the
+ * matrix is the level's material count squared - around 200,000 cells - and a
+ * caller wants the one cell it just collided. The level is parsed once and
+ * cached, so the first call pays for the decode.
+ *
+ * MATERIAL IDS ARE GLOBAL, ROWS ARE PER LEVEL. The id map is 785 entries on
+ * every level measured, so an id means the same thing game-wide, and each level
+ * gives the materials it ships a row of its own. The map is INJECTIVE apart
+ * from one fallback: no two ids share a nonzero row, while the ids the level
+ * does not ship all point at row 0, the default material. Pass global ids and
+ * let this do the row lookup; a caller that carried row indices between levels
+ * would read the wrong material.
+ *
+ * THE PAIR IS ORDERED and is not symmetrised. Occupancy is symmetric except for
+ * exactly four authored one-way pairs per level, and folding the transpose in
+ * would invent relations on precisely those four.
+ *
+ * `type` is the relation's leaf TYPE guid, which is the subsystem that responds.
+ * It is a guid and not a name because the shipped reflection carries a name
+ * hash that is not derivable from the name; naming is a caller-side join. For
+ * reference, on mp_subsurface: 21888a08 (AudioLegacyGameplay) 20,001 refs -
+ * sound is the densest relation in the game - then 310bdc0d
+ * MaterialRelationEffectData 17,831, 8762ec89 MaterialRelationDecalData 6,027,
+ * 26ee2707 MaterialRelationTriggarableEffectData 4,177.
+ *
+ * Count-then-fill: pass out = NULL for the count. Returns -1 on error. */
+typedef struct {
+    unsigned int kind;    /* the per-entry selector stored beside the reference */
+    char type[40];        /* relation leaf type guid: WHICH subsystem responds */
+    char guid[40];        /* the relation instance's own guid */
+    /* What the responding subsystem IS, decided here so both editors label a
+     * relation the same way instead of each inventing its own mapping. "" when
+     * the type is not one of the 30 seen across the level fleet. */
+    char category[16];    /* audio, effect, decal, footprint, fire, vehicle, ... */
+    char name[48];        /* leaf type name where one exists, else "" */
+} bf6_material_relation;
+
+typedef struct {
+    int  side;            /* the level's own material count; the real grid side */
+    int  declared_dim;    /* what the root declares (128 everywhere): NOT the side */
+    int  id_map_len;      /* 785 on every level measured: the global id space */
+    int  occupied_cells;
+    int  relations;
+    int  relation_types;
+    /* Ids this level does not ship. They point at row 0, the DEFAULT material,
+     * which is how the data says "fall back"; they are not materials sharing a
+     * row. Counting them as real rows makes hundreds of materials report the
+     * default's relations as their own. */
+    int  fallback_ids;
+    char partition[256];
+} bf6_material_grid_stats;
+
+BF6_API int bf6_material_grid_info(bf6_ctx*, const char* level,
+                                   bf6_material_grid_stats* out,
+                                   char* err, int err_len);
+
+/* Row this level gives a global material id, or -2 when the level does not ship
+ * it (a real answer, not an error): the data points such an id at row 0, the
+ * default material, and a caller that wants the fallback behaviour asks about
+ * material 0 explicitly rather than being handed the default's relations as
+ * though they belonged to the material it asked about. -1 with err set is a
+ * failure. */
+BF6_API int bf6_material_row(bf6_ctx*, const char* level, int material_id,
+                             char* err, int err_len);
+
+BF6_API int bf6_material_relations(bf6_ctx*, const char* level,
+                                   int material_a, int material_b,
+                                   bf6_material_relation* out, int out_max,
+                                   char* err, int err_len);
+
+/* THE LINK FROM A PLACED OBJECT TO THE GRID: unpack a collision instance's
+ * `bf6_phys_inst::material_packed` into the material ids it carries.
+ *
+ * Without this an editor cannot use the grid at all, because it has objects and
+ * the grid wants material ids. The layout is MEASURED, not assumed: across
+ * 10,513 collision instances on mp_subsurface the field takes 150 distinct
+ * values whose varying bits are exactly 0-7, 8-17 and 20-29, with bits 18-19
+ * and 30-31 always zero. Two 10-bit lanes with a reserved gap is the shape of
+ * an id space that needs 10 bits, and 785 ids need 10 bits. Both lanes land
+ * inside 0..784 on every instance measured, where a lane holding arbitrary
+ * 10-bit data would fall in that window 76.7 percent of the time.
+ *
+ * THE LANES ARE NOT INTERCHANGEABLE, and the difference is measured, not
+ * assumed. Averaged over every distinct packed value on mp_subsurface, lane `a`
+ * materials have 164 partner materials and 303 relations each, spread across
+ * audio, effects, decals and shooter; lane `b` materials have 5.6 partners and
+ * 5.9 relations, almost entirely audio. So `a` is the SURFACE material - the
+ * one that decides the impact effect and the decal - and `b` is a secondary,
+ * audio-dominated id. A consumer that wants one material wants `a`.
+ * Consistent with that, `a` is constant across every shape of 163 of 243
+ * multi-shape resources, as one model's surface should be.
+ *
+ * Bit 7 of `flags` is set on every instance measured; bits 0 and 3 vary. */
+typedef struct {
+    int material_a;      /* bits 8-17:  THE SURFACE MATERIAL. Use this one. */
+    int material_b;      /* bits 20-29: secondary id, rows are almost all audio */
+    unsigned int flags;  /* bits 0-7 */
+    int reserved_clear;  /* 1 when bits 18-19 and 30-31 are zero as measured;
+                            0 means this payload does not match the layout and
+                            the lanes above should not be trusted */
+} bf6_surface_material;
+
+BF6_API void bf6_material_unpack(unsigned int packed, bf6_surface_material* out);
+
+/* WHAT ONE SURFACE DOES, against every other surface on the level.
+ *
+ * This is the call an editor actually wants. A pair query needs two materials
+ * and an editor usually has ONE - the object the user just clicked - so the
+ * useful answer is that material's whole ROW: how many other materials it has
+ * authored relations with, and what those relations are.
+ *
+ * Asking the pair query with a single object's two lanes instead returns almost
+ * nothing (5 of 150 packed values on mp_subsurface), because the grid is about
+ * a surface meeting ANOTHER surface, not about an object meeting itself.
+ *
+ * `by_category` is indexed by bf6_material_category_name(i), so a UI can list
+ * categories without hard-coding names that must then agree between engines.
+ * Counts cover the row only, and the row is ordered (material, other). */
+#define BF6_MATERIAL_CATEGORIES 20
+
+typedef struct {
+    int partners;    /* other materials with at least one authored relation */
+    int relations;   /* total relations across the row */
+    int by_category[BF6_MATERIAL_CATEGORIES];
+} bf6_material_profile;
+
+/* Category name for an index, or NULL past the end. Stable ordering; index 0 is
+ * the uncategorised bucket so a new game type never silently vanishes. */
+BF6_API const char* bf6_material_category_name(int index);
+
+BF6_API int bf6_material_profile_get(bf6_ctx*, const char* level, int material_id,
+                                     bf6_material_profile* out,
+                                     char* err, int err_len);
+
+/* The level's materials, busiest first: which surfaces the level actually
+ * authors behaviour for. This exists so the two editors show the SAME list in
+ * the same order from one decision, rather than each sorting the grid its own
+ * way and quietly disagreeing about what a level's main surfaces are.
+ *
+ * Ordered by relation count descending, then by material id ascending so the
+ * order is stable between runs. Only materials the level ships appear; the ones
+ * that fall back to the default are not surfaces of this level.
+ *
+ * Count-then-fill: pass out = NULL for the count. */
+typedef struct {
+    int material;    /* global material id */
+    int row;         /* its row on this level */
+    int partners;    /* other materials it has authored relations with */
+    int relations;   /* total relations across its row */
+} bf6_material_rank;
+
+BF6_API int bf6_material_busiest(bf6_ctx*, const char* level,
+                                 bf6_material_rank* out, int out_max,
+                                 char* err, int err_len);
 
 /* POSE-SPACE DEFORMATION: which facial poses displace which vertices, and by
  * how much. This is what makes an expression, on top of the skinned pose.

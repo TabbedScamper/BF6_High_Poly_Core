@@ -43,6 +43,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -210,6 +211,7 @@ struct GraphInfo {
     bool        ok = false;
     std::string path;                       // eg_* partition, no .ebx
     std::string atlas;                      // GlobalSorting[0], no .ebx
+    std::string mesh;                       // EmitterMesh import, no .ebx
     std::string spawn_mode;
     bool   has_spawn_rate = false;
     float  spawn_rate = 0.f;
@@ -338,6 +340,7 @@ const GraphInfo& FxDecoder::graph(const std::string& path)
         F_EG_GLOBALSORTING, F_EG_PARAMS, F_EG_PARTICLELIFE, F_EG_EMITTERLIFE,
         F_EG_MAXSPAWNDIST, F_EG_MINSPAWNDIST, F_EG_GPUCULLDIST, F_EG_PREROLLTIME,
         F_EG_DRAWLAYER, F_EG_DRAWPASS, F_EG_SORTMODE, F_EG_GS_PARTICLETYPE,
+        F_EG_MESH,
         F_MINSCREENAREA, F_GPUCULLRADIUS
     };
     static const std::vector<uint32_t> want_spawn = { F_SPAWNRATE, F_PARTICLEMAX };
@@ -358,6 +361,42 @@ const GraphInfo& FxDecoder::graph(const std::string& path)
                         if (arr->kind == EbxValue::Kind::Array && !arr->items.empty())
                             gi.atlas = ref_name(&arr->items[0]);
 
+            /* Same diagnostic as the layer one below, for the TEMPLATE side:
+             * a template partition can hold more than one EmitterGraph and
+             * this loop keeps the LAST, so "which instance did this come
+             * from" is a question worth being able to answer. */
+            /* Read once: this sits inside a loop over every layer in every
+         * effect, and getenv is not free at that rate. */
+        static const char* const dump = std::getenv("BF6_FX_DUMP_GRAPH_FIELDS");
+        if (dump)
+                if (*dump==0 || path.find(dump) != std::string::npos) {
+                    std::fprintf(stderr, "== graph instance %zu of %s: life=%g\n",
+                                 i, path.c_str(), qs_float(d.field(F_EG_PARTICLELIFE)));
+                    /* EVERY IMPORT THE TEMPLATE REACHES. Mesh-particle graphs
+                     * draw geometry we cannot presently find; if the template
+                     * is what names the mesh, and the layer's id array only
+                     * selects among them, this is what shows it. */
+                    const EbxValue all = e.read_instance(i, nullptr);
+                    for (const auto& kv : all.fields) {
+                        const std::string r = ref_name(&kv.second);
+                        if (!r.empty())
+                            std::fprintf(stderr, "   import 0x%08X -> %s\n", kv.first, r.c_str());
+                        if (kv.second.kind == EbxValue::Kind::Array)
+                            for (size_t q = 0; q < kv.second.items.size() && q < 8; q++) {
+                                const std::string ir = ref_name(&kv.second.items[q]);
+                                if (!ir.empty())
+                                    std::fprintf(stderr, "   import 0x%08X[%zu] -> %s\n",
+                                                 kv.first, q, ir.c_str());
+                                for (const auto& sub : kv.second.items[q].fields) {
+                                    const std::string sr = ref_name(&sub.second);
+                                    if (!sr.empty())
+                                        std::fprintf(stderr, "   import 0x%08X[%zu].0x%08X -> %s\n",
+                                                     kv.first, q, sub.first, sr.c_str());
+                                }
+                            }
+                    }
+                }
+            gi.mesh               = ref_name(d.field(F_EG_MESH));
             gi.particle_life      = qs_float(d.field(F_EG_PARTICLELIFE));
             gi.emitter_life       = qs_float(d.field(F_EG_EMITTERLIFE));
             gi.max_spawn_distance = qs_float(d.field(F_EG_MAXSPAWNDIST));
@@ -376,6 +415,29 @@ const GraphInfo& FxDecoder::graph(const std::string& path)
             const EbxValue d = e.read_instance(i, &want_spawn);
             gi.spawn_mode = (t == g_spawn_con_) ? "SpawnModeContinuous" : "SpawnModeBurst";
             if (d.kind != EbxValue::Kind::Struct) continue;
+            /* DIAGNOSTIC. The rate read below gives 1.0 on 285 of 336
+             * continuous emitters on mp_isolated while their ParticleMaxCount
+             * is 64, which cannot both be true of a dense effect - and the
+             * Godot add-on's older notes say this type's labels are SWAPPED,
+             * the float RATE being the field named InitialParticleCount. This
+             * prints every field the instance really has so the right one can
+             * be identified rather than guessed. */
+            if (const char* dmp = std::getenv("BF6_FX_DUMP_SPAWN_FIELDS")) {
+                if (*dmp == 0 || path.find(dmp) != std::string::npos) {
+                    const EbxValue all = e.read_instance(i, nullptr);
+                    std::fprintf(stderr, "== spawn %s of %s\n",
+                                 gi.spawn_mode.c_str(), path.c_str());
+                    for (const auto& kv : all.fields) {
+                        /* Most of these are QualityScalableFloat/Int, so the
+                         * outer struct's own scalar is always zero and says
+                         * nothing; the value is its .Low member. */
+                        std::fprintf(stderr, "   0x%08X kind=%d qs_f=%g qs_i=%d raw_f=%g raw_i=%lld\n",
+                                     kv.first, (int)kv.second.kind,
+                                     qs_float(&kv.second), qs_int(&kv.second),
+                                     (double)kv.second.f, (long long)kv.second.i);
+                    }
+                }
+            }
             gi.particle_max = qs_int(d.field(F_PARTICLEMAX));
             if (t == g_spawn_con_) {
                 // Burst authors no rate at all - the type does not have the
@@ -497,6 +559,21 @@ bool FxDecoder::decode_effect(const std::string& partition, FxEffect& out, std::
     static const std::vector<uint32_t> want_layer = {
         F_EGE_TRANSFORM, F_EGE_GRAPH, F_EGE_PARAMS, F_EGE_TEX_BINDINGS
     };
+    /* THE PARTICLE LIFE IS THE TEMPLATE'S, AND THAT WAS CHECKED. The sheet is
+     * an override on 2,322 of 3,983 layers, so the obvious suspicion is that
+     * the lifetime is too and that reading the template is why 546 of 665
+     * layers on mp_subsurface report the same 5 s. It is not:
+     *   - F_EG_PARTICLELIFE added to this list matches nothing on any layer.
+     *   - A full field dump of an EmitterGraphEntityData instance (see
+     *     BF6_FX_DUMP_LAYER_FIELDS below) shows no float that could be one.
+     *   - No parameter pid correlates with the known per-graph lifetimes above
+     *     31%, which is noise.
+     *   - The template really does say 5 s: the partition holds exactly one
+     *     EmitterGraph instance and its ParticleLifeSpan.Low is 5.
+     * See findings/fx-particle-life-is-template-only.md. Do not re-add the
+     * layer read without evidence that is not the addon's old fx_motion.json,
+     * which is a FLEET-WIDE aggregate and cannot be compared against one
+     * level's values. */
 
     // COMPONENTS IS NOT THE LAYER LIST, and it is the obvious route to the
     // layers, so the number is kept as a counter rather than left to be
@@ -520,10 +597,97 @@ bool FxDecoder::decode_effect(const std::string& partition, FxEffect& out, std::
         break;
     }
 
+    /* DIAGNOSTIC: what ELSE is in an effect partition?
+     *
+     * mp_subsurface counts 785 EffectEntityData.Components against 665 emitter
+     * layers, so 120 components are some other entity type - and mesh-particle
+     * FX (missiles, UAVs, birds, debris) bind no texture and draw geometry we
+     * cannot presently find. If the mesh is carried by a sibling component
+     * rather than by the layer, this is what shows it. Set
+     * BF6_FX_DUMP_EFFECT_TYPES to a substring of an effect path. */
+    /* Read once: this sits inside a loop over every layer in every
+         * effect, and getenv is not free at that rate. */
+        static const char* const dump = std::getenv("BF6_FX_DUMP_EFFECT_TYPES");
+        if (dump) {
+        if (out.path.find(dump) != std::string::npos) {
+            std::map<std::string, int> by_type;
+            for (size_t i = 0; i < e.instance_count(); i++) {
+                const TypeGuid t = e.instance_type(i);
+                char hex[40];
+                for (int b = 0; b < 16; b++)
+                    std::snprintf(hex + b * 2, 3, "%02x", t[(size_t)b]);
+                by_type[std::string(hex, 32)]++;
+            }
+            std::fprintf(stderr, "== %s: %zu instance(s)\n", out.path.c_str(),
+                         e.instance_count());
+            for (const auto& kv : by_type)
+                std::fprintf(stderr, "   %s x%d\n", kv.first.c_str(), kv.second);
+        }
+    }
+
     for (size_t i = 0; i < e.instance_count(); i++) {
         if (!(e.instance_type(i) == g_layer_)) continue;
         const EbxValue d = e.read_instance(i, &want_layer);
         if (d.kind != EbxValue::Kind::Struct) continue;
+
+        /* DIAGNOSTIC, off unless asked for. Set BF6_FX_DUMP_LAYER_FIELDS to a
+         * substring of a graph path to print every field that graph's layers
+         * really carry, in layout order. It exists because guessing a field
+         * hash and finding nothing proves nothing: the field may be named
+         * differently, or not be on this instance at all, and those want
+         * different fixes. Reading with no want-list is expensive, which is why
+         * it is not on by default. */
+        /* Read once: this sits inside a loop over every layer in every
+         * effect, and getenv is not free at that rate. */
+        static const char* const dump = std::getenv("BF6_FX_DUMP_LAYER_FIELDS");
+        if (dump) {
+            const std::string g = ref_name(d.field(F_EGE_GRAPH));
+            if (!g.empty() && g.find(dump) != std::string::npos) {
+                static std::set<std::string> dumped;
+                if (dumped.insert(g).second) {
+                    const EbxValue all = e.read_instance(i, nullptr);
+                    std::fprintf(stderr, "== layer of %s\n", g.c_str());
+                    for (const auto& kv : all.fields) {
+                        const EbxValue& v = kv.second;
+                        std::fprintf(stderr, "   0x%08X kind=%d f=%g i=%lld",
+                                     kv.first, (int)v.kind, (double)v.f,
+                                     (long long)v.i);
+                        if (v.kind == EbxValue::Kind::Array) {
+                            std::fprintf(stderr, " items=%zu", v.items.size());
+                            /* An ASSET BINDING is what matters here: a mesh
+                             * substituted per layer would look exactly like
+                             * the texture binding does, so print any import
+                             * the array reaches rather than just its size. */
+                            for (size_t k = 0; k < v.items.size() && k < 4; k++) {
+                                const EbxValue& it = v.items[k];
+                                const std::string r = ref_name(&it);
+                                if (!r.empty()) { std::fprintf(stderr, " [%s]", r.c_str()); continue; }
+                                std::fprintf(stderr, " <k%d", (int)it.kind);
+                                if (it.kind == EbxValue::Kind::ResRef)
+                                    std::fprintf(stderr, " res=%llu", (unsigned long long)it.u);
+                                else if (it.kind == EbxValue::Kind::Uint ||
+                                         it.kind == EbxValue::Kind::Int)
+                                    std::fprintf(stderr, " u=%llu i=%lld",
+                                                 (unsigned long long)it.u, (long long)it.i);
+                                for (const auto& sub : it.fields) {
+                                    const std::string sr = ref_name(&sub.second);
+                                    std::fprintf(stderr, " 0x%08X:k%d", sub.first,
+                                                 (int)sub.second.kind);
+                                    if (!sr.empty()) std::fprintf(stderr, "=%s", sr.c_str());
+                                    else if (sub.second.kind == EbxValue::Kind::ResRef)
+                                        std::fprintf(stderr, "=res:%llu",
+                                                     (unsigned long long)sub.second.u);
+                                }
+                                std::fprintf(stderr, ">");
+                            }
+                        } else if (v.kind == EbxValue::Kind::ImportRef) {
+                            std::fprintf(stderr, " -> %s", ref_name(&v).c_str());
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                }
+            }
+        }
 
         FxLayer L;
         L.instance = (int32_t)i;
@@ -540,6 +704,12 @@ bool FxDecoder::decode_effect(const std::string& partition, FxEffect& out, std::
         L.particle_max      = gi.particle_max;
         L.particle_life     = gi.particle_life;
         L.emitter_life      = gi.emitter_life;
+        L.mesh              = gi.mesh;
+        /* The placeholder the propdest and clusteroid graphs import so that
+         * each effect can substitute a real chunk over it. Drawing it would put
+         * a 3-vertex triangle where a wood shard belongs. */
+        L.mesh_is_placeholder = !L.mesh.empty() &&
+            L.mesh.find("defaulttriangle") != std::string::npos;
         L.max_spawn_distance= gi.max_spawn_distance;
         L.min_spawn_distance= gi.min_spawn_distance;
         L.gpu_cull_distance = gi.gpu_cull_distance;

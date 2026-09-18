@@ -3,10 +3,21 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
 namespace bf6 { namespace expression {
+
+/* Operator arity by operator key, as the executable's reflected registry
+ * declares it - bf6_expression_reflected_operators fills exactly this. It is
+ * how kind 0x23's record length becomes known rather than searched for:
+ *
+ *     length = 24 + arity * 8
+ *
+ * NOT an exported corpus table: it is read from the same game the caller is
+ * already reading, which is why it may be used here. Entirely optional. */
+using ArityMap = std::map<uint32_t, uint16_t>;
 
 struct Header {
     uint32_t content_hash = 0;
@@ -85,6 +96,14 @@ struct Graph {
     // True only when the proven per-kind lengths (including a constrained
     // 0x23 solve) cover every byte in the record region exactly. False is an
     // explicit unknown-kind/ambiguous-shape result, never silently promoted.
+    /* Why tiling failed: 0 no tiling exists, 1 unique, 2 or more ambiguous.
+     * "No tiling" means a length is wrong or missing; "ambiguous" means a
+     * constraint is missing. They are opposite problems with opposite fixes. */
+    uint8_t tiling_ways = 0;
+    /* Set when the arity pins produced NO tiling and were dropped for a
+     * search. A non-zero count here means an operator arity is wrong for this
+     * graph - worth surfacing rather than silently recovering from. */
+    uint8_t arity_pin_rejected = 0;
     bool exact_record_tiling = false;
     size_t discovered_record_bytes = 0;
 };
@@ -93,7 +112,8 @@ struct Graph {
  * exported table, the executable, or a live process. It rejects malformed
  * offsets and patch sites and preserves raw values whose meaning is unknown.
  */
-bool parse(const uint8_t* data, size_t size, Graph& out, std::string& error);
+bool parse(const uint8_t* data, size_t size, Graph& out, std::string& error,
+           const ArityMap* arity = nullptr);
 
 bool has_operator_pointer(uint8_t kind);
 

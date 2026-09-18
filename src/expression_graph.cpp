@@ -94,10 +94,35 @@ static bool parse_typed_table(const uint8_t* data, size_t begin, size_t bytes,
 
 // Fixed lengths measured without exception in the published 379-graph
 // independent corpus. Unmeasured kinds deliberately return zero.
+//
+// THE SECOND GROUP BELOW WAS MEASURED DIFFERENTLY, and the difference matters.
+// These eight kinds appear ONLY in graphs that fail to tile, so no proven
+// length existed for them - the usual ground truth was missing. When tiling
+// fails the parser falls back to DISCOVERED record starts (control-flow targets
+// and fixup sites), and a record's reported length becomes the gap to the next
+// discovered start. A gap can span several records where discovery missed one,
+// so it is an upper bound and never an under-estimate; the MINIMUM gap is
+// therefore the candidate length. For every one of these, minimum and median
+// agree across the whole shipped corpus:
+//
+//     kind  samples  min = median
+//     0x14      59       28          0x1F    2316       20
+//     0x16       3       44          0x33      16       24
+//     0x17      38       52          0x37     201        4
+//     0x1A      17       36          0x3C      27       36
+//
+// This is weaker evidence than the arity rule, which comes from the game's own
+// reflection. It is self-checking though: the tiler must reach the region end
+// exactly AND hit every mandatory start, so a wrong length here makes graphs
+// FAIL to tile rather than silently mis-read - and the corpus test's corruption
+// controls must keep rejecting at 100%.
 static uint32_t proven_fixed_length(uint8_t k)
 {
     if (k <= 0x09) return 20u + 8u * (uint32_t)k;
     switch (k) {
+    case 0x14: return 28; case 0x16: return 44; case 0x17: return 52;
+    case 0x1a: return 36; case 0x1f: return 20; case 0x33: return 24;
+    case 0x37: return 4;  case 0x3c: return 36;
     case 0x15: return 36; case 0x18: return 28; case 0x19: return 36;
     case 0x1b: return 44; case 0x1c: return 44; case 0x1d: return 52;
     case 0x1e: return 20; case 0x20: return 20; case 0x21: return 20;
@@ -126,7 +151,12 @@ static void add_control_targets(const uint8_t* region, size_t region_bytes,
     const uint32_t h = u32(region + off);
     const uint8_t k = (uint8_t)(h & 0xffu);
     const uint32_t next = h >> 8;
-    if (next > off && record_target_ok(next, region_bytes)) pending.insert(next);
+    /* A backward target is as much a record start as a forward one, so the old
+     * `next > off` guard was discarding loop edges for no reason. MEASURED AS
+     * NEUTRAL on the shipped corpus - every such target was already reachable
+     * by another path - so this buys no coverage; it is kept only because the
+     * restriction was not correct to begin with. */
+    if (record_target_ok(next, region_bytes)) pending.insert(next);
     if (k == 0x26 && region_bytes - off >= 16) {
         const uint32_t target = u32(region + off + 12);
         if (record_target_ok(target, region_bytes)) pending.insert(target);
@@ -167,12 +197,54 @@ static bool mandatory_starts_ok(size_t off, size_t next,
     return it == mandatory.end() || *it >= next;
 }
 
+/* KIND 0x23's LENGTH IS ITS OPERATOR'S ARITY, and it is not in the record.
+ *
+ * Fitting the length to the record's own fields tops out at 77.8%: the shape
+ * (dword3=0, dword4=0) occurs 6,977 times at 24 bytes and 1,387 times at 32,
+ * and nothing inside the record separates them. Grouping proven lengths by
+ * OPERATOR KEY instead, 601 of 632 keys map to exactly one length - so the
+ * length belongs to the operator, not to the record.
+ *
+ * The executable's reflected registry carries a parameter_count per operator,
+ * and against every proven length it is exact, with no exceptions:
+ *
+ *     arity  0 -> 24    arity 13 -> 128    arity 16 -> 152
+ *     arity 11 -> 112   arity 15 -> 144    arity 17 -> 160
+ *     arity 12 -> 120
+ *
+ *     length = 24 + parameter_count * 8
+ *
+ * A 24-byte header and one 8-byte operand per declared parameter - the same
+ * shape 0x28 has, with the count in the game's own reflection rather than in
+ * the record. READ FROM THE GAME, not fitted to a corpus, which is why using
+ * it does not break the promise that no exported corpus table is a runtime
+ * input.
+ *
+ * Entirely optional: with no arity supplied, or for a key the registry does not
+ * carry, the search below runs exactly as it did before. */
+static uint32_t arity_length(const ArityMap* arity,
+                             const std::map<uint32_t, uint32_t>& key_by_offset,
+                             size_t off)
+{
+    if (!arity || arity->empty()) return 0;
+    const auto k = key_by_offset.find((uint32_t)off);
+    if (k == key_by_offset.end()) return 0;
+    const auto a = arity->find(k->second);
+    if (a == arity->end()) return 0;
+    const uint32_t len = 24u + (uint32_t)a->second * 8u;
+    // Outside the measured envelope this is not the record shape assumed here.
+    return (len >= 24u && len <= 232u && (len % 8u) == 0u) ? len : 0u;
+}
+
 // The exact tiler is intentionally conservative: it uses only lengths whose
 // evidence is published as measured. It never guesses a length for a rare
 // kind. A false result is therefore a named coverage gap, not parse failure.
 static bool tile_records(const uint8_t* region, size_t limit,
                          const std::set<uint32_t>& mandatory,
-                         std::vector<uint32_t>& starts)
+                         std::vector<uint32_t>& starts,
+                         const ArityMap* arity,
+                         const std::map<uint32_t, uint32_t>& key_by_offset,
+                         uint8_t* ways_out = nullptr)
 {
     if (limit == 0) return true;
     std::vector<uint8_t> ways(limit + 1, 0);
@@ -191,7 +263,18 @@ static bool tile_records(const uint8_t* region, size_t limit,
                 ways[off] = ways[next]; choice[off] = (uint32_t)len;
             }
         } else if (kind == 0x23) {
-            // Observed range 24..232, exactly in 8-byte steps.
+            // The operator's own arity settles it where the registry knows the
+            // key; that is one length, so no ambiguity can arise.
+            const uint32_t pinned = arity_length(arity, key_by_offset, off);
+            if (pinned) {
+                const size_t next = off + pinned;
+                if (next <= limit && ways[next] && mandatory_starts_ok(off, next, mandatory)) {
+                    ways[off] = ways[next];
+                    choice[off] = pinned;
+                }
+                continue;
+            }
+            // Otherwise as before: observed range 24..232, in 8-byte steps.
             for (uint32_t len = 24; len <= 232 && off + len <= limit; len += 8) {
                 const size_t next = off + len;
                 if (!ways[next] || !mandatory_starts_ok(off, next, mandatory)) continue;
@@ -207,6 +290,11 @@ static bool tile_records(const uint8_t* region, size_t limit,
             }
         }
     }
+    /* WHY it failed, not just that it did. "No tiling exists" and "several
+     * tilings fit" are opposite problems - the first means a length is wrong or
+     * missing, the second means a constraint is missing - and treating them as
+     * one failure hides which fix is needed. */
+    if (ways_out) *ways_out = ways[0];
     if (ways[0] != 1) return false;
     size_t off = 0;
     while (off < limit) {
@@ -302,7 +390,8 @@ uint32_t proven_record_length(uint8_t kind)
     return proven_fixed_length(kind);
 }
 
-bool parse(const uint8_t* data, size_t size, Graph& out, std::string& error)
+bool parse(const uint8_t* data, size_t size, Graph& out, std::string& error,
+           const ArityMap* arity)
 {
     out = Graph{};
     error.clear();
@@ -459,7 +548,26 @@ bool parse(const uint8_t* data, size_t size, Graph& out, std::string& error)
     mandatory.insert(discovered.begin(), discovered.end());
 
     std::vector<uint32_t> starts;
-    out.exact_record_tiling = tile_records(region, record_bytes, mandatory, starts);
+    out.exact_record_tiling =
+        tile_records(region, record_bytes, mandatory, starts, arity, key_by_offset,
+                     &out.tiling_ways);
+    /* A PIN THAT CONTRADICTS THE GRAPH IS A WRONG PIN, not a broken graph.
+     *
+     * Pinning 0x23 to its operator's arity turns ambiguity into certainty when
+     * the arity is right. When it is WRONG - a variadic operator whose other
+     * appearances all shared one length - it removes the only valid tiling and
+     * the graph reports no tiling at all, which is strictly worse than the
+     * ambiguity it replaced. Five graphs did exactly that.
+     *
+     * So an empty result with pins in play is retried without them. The worst
+     * case is then the un-pinned answer, and pinning can only ever help. */
+    if (!out.exact_record_tiling && out.tiling_ways == 0 && arity && !arity->empty()) {
+        starts.clear();
+        out.arity_pin_rejected = 1;
+        out.exact_record_tiling =
+            tile_records(region, record_bytes, mandatory, starts, nullptr, key_by_offset,
+                         &out.tiling_ways);
+    }
     if (!out.exact_record_tiling) starts = discovered;
     materialize_records(region, record_bytes, starts, key_by_offset,
                         out.records, out.discovered_record_bytes);

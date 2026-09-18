@@ -90,6 +90,13 @@ constexpr uint32_t F_EGE_PARAMS           = 0x4832AD52; /* same hash as the temp
 constexpr uint32_t F_EGE_PIDLOOKUP        = 0x1CFA984B; /* PropertyIdLookupTable     */
 constexpr uint32_t F_EGE_TRANSFORM        = 0xD6351EDE;
 constexpr uint32_t F_EGE_TEX_BINDINGS     = 0x1C1E4B15; /* texture override array    */
+/* EmitterMesh: a plain ImportRef on the GRAPH template to the mesh a
+ * mesh-particle emitter draws. Verified on three graphs: eg_bird_flocking_es
+ * imports meshp_bird_01_mesh, eg_propdest_shard_meshp_geo_box imports the
+ * placeholder triangle, and the billboard graphs carry the field but no import.
+ * The layer does NOT carry it; the per-effect substitution is a separate,
+ * undecoded id array (0xF56940D2, flags 0x0248, an array of plain u32). */
+constexpr uint32_t F_EG_MESH              = 0x68E09280;
 constexpr uint32_t F_EGE_EXPR_OVERRIDES   = 0x6730446A; /* enum/expr override array  */
 
 /* EffectEntityData - the effect root */
@@ -217,6 +224,22 @@ struct FxLayer {
 
     FxAtlas     atlas;                /* empty when the family draws no sheet  */
     bool        atlas_from_override = false;
+
+    /* MESH-PARTICLE GEOMETRY, from the template's EmitterMesh import.
+     *
+     * The families that draw no sheet are not all textureless billboards -
+     * missiles, UAVs, aircraft vapour, birds and every kind of debris draw a
+     * MESH, and until this was read they drew nothing at all (284 creature and
+     * 157 debris_mesh layers on mp_isolated).
+     *
+     * This is the TEMPLATE's mesh. Effects substitute their own on top, exactly
+     * as they do with the atlas, and that substitution is NOT decoded yet - see
+     * findings/fx-mesh-particle-binding-lead. So a debris graph reports the
+     * placeholder it really imports (meshp_defaulttriangle_oat_es_mesh) and
+     * `mesh_is_placeholder` says so, rather than a consumer having to know the
+     * name. */
+    std::string mesh;
+    bool        mesh_is_placeholder = false;
 
     /* spawn, from the template. Every "float" below whose engine type is a
      * QualityScalableFloat is its LOW member; see the note at the top of

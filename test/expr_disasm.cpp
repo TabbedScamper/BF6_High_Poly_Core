@@ -606,7 +606,8 @@ int main(int argc, char** argv)
         std::vector<std::pair<long, uint32_t>> worst;
         FILE* out_tsv = tsv.empty() ? nullptr : std::fopen(tsv.c_str(), "wb");
         if (out_tsv)
-            std::fprintf(out_tsv, "key\tstatus\tname\tarity\tuses\tsignature\texample\n");
+            std::fprintf(out_tsv,
+                         "key\tstatus\tname\tarity\tuses\tsignature\timpl\texample\n");
         for (const auto& kv : use_count) {
             const auto it = by_key.find(kv.first);
             const char* status = "UNRESOLVED";
@@ -625,11 +626,22 @@ int main(int argc, char** argv)
             const auto sg = sig.find(kv.first);
             if (out_tsv) {
                 const auto ar = arity2.find(kv.first);
-                std::fprintf(out_tsv, "0x%08x\t%s\t%s\t%s\t%ld\t%s\t%s\n", kv.first, status,
+                /* The implementation address goes in the row because it is what
+                 * makes an unnamed operator investigable: with an entry point
+                 * it can be EXECUTED under emulation and identified by what it
+                 * computes, which is the only route left for a key no string
+                 * and no reflected descriptor reaches. */
+                const auto im2 = impl.find(kv.first);
+                char implbuf[24] = "";
+                if (im2 != impl.end())
+                    std::snprintf(implbuf, sizeof(implbuf), "0x%llx",
+                                  (unsigned long long)im2->second);
+                std::fprintf(out_tsv, "0x%08x\t%s\t%s\t%s\t%ld\t%s\t%s\t%s\n", kv.first, status,
                              nm.c_str(),
                              ar == arity2.end() ? "" : std::to_string(ar->second).c_str(),
                              kv.second,
                              sg == sig.end() ? "" : sg->second.c_str(),
+                             implbuf,
                              used_in[kv.first].empty() ? "" : used_in[kv.first].begin()->c_str());
             }
         }

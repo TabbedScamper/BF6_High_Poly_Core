@@ -198,13 +198,25 @@ static bool BF6_ReadBeaufortForce(bf6_ctx* c, const std::string& lvl, float& for
 
 /* The sea state for one level directory. Shared by the walked-level call and
  * the isolated route, so both describe a level the same way. */
-static int BF6_SeaStateInDir(bf6_ctx* c, const std::string& lvl, bf6_ocean_sea_state* out)
+/* `force_override`, when given, replaces the force the level authors, and every
+ * curve is evaluated at it instead.
+ *
+ * This is the whole mechanism behind a live sea. Portal Ocean is the one map
+ * whose water a script can drive - BeaufortScale, WaveAmplitude, WaterHeight -
+ * and a preview that can only ever show the authored force cannot be compared
+ * against a game showing force 6. Wind speed for every cascade, and therefore
+ * the entire spectrum, falls out of the curve evaluation below, so overriding
+ * the force here is enough and nothing downstream needs to know. */
+static int BF6_SeaStateInDirAt(bf6_ctx* c, const std::string& lvl,
+                               const float* force_override, bf6_ocean_sea_state* out)
 {
     *out = bf6_ocean_sea_state{};
     out->wind_curve_index = -1;
     if (!c || !c->types || lvl.empty()) return 0;
     float force = 0.f;
-    if (!BF6_ReadBeaufortForce(c, lvl, force)) {
+    if (force_override) {
+        force = *force_override;
+    } else if (!BF6_ReadBeaufortForce(c, lvl, force)) {
         /* PLACED WATER. A level whose water is a Portal water prefab carries the
          * mapping entity inside the prefab, not in its schematics. gmpf_water's
          * mapping authors 6.5, but a PropertyConnection writes the prefab's
@@ -278,6 +290,13 @@ static int BF6_SeaStateInDir(bf6_ctx* c, const std::string& lvl, bf6_ocean_sea_s
     return 1;
 }
 
+/* The level's own sea state: the override path with no override. Every existing
+ * caller keeps the behaviour it had. */
+static int BF6_SeaStateInDir(bf6_ctx* c, const std::string& lvl, bf6_ocean_sea_state* out)
+{
+    return BF6_SeaStateInDirAt(c, lvl, nullptr, out);
+}
+
 extern "C" int bf6_level_ocean_sea_state(bf6_ctx* c, const char* level,
                                          bf6_ocean_sea_state* out)
 {
@@ -311,9 +330,13 @@ extern "C" int bf6_level_ocean_sea_state(bf6_ctx* c, const char* level,
  * The spectrum is then built by bf6_water_spectrum_h0 from these rows. */
 static constexpr int kSeaAmplitudeCurveSlot = 7;
 
-extern "C" int bf6_level_water_sims_effective(bf6_ctx* c, const char* level, int isolated,
-                                              bf6_water_sim_v2* out, int out_max,
-                                              bf6_ocean_sea_state* sea_out)
+/* The one implementation behind both the plain call and the dialled one, so a
+ * live preview and a level's own sea can never disagree about anything except
+ * the values that were deliberately overridden. */
+static int W2_SimsEffective(bf6_ctx* c, const char* level, int isolated,
+                            const bf6_water_override* ov,
+                            bf6_water_sim_v2* out, int out_max,
+                            bf6_ocean_sea_state* sea_out, float* height_out)
 {
     bf6_ocean_sea_state sea{};
     sea.wind_curve_index = -1;
@@ -333,6 +356,18 @@ extern "C" int bf6_level_water_sims_effective(bf6_ctx* c, const char* level, int
             rows.resize((size_t)count);
             count = bf6_level_water_sims(c, level, rows.data(), count);
             bf6_level_ocean_sea_state(c, level, &sea);
+        }
+    }
+    /* THE DIALLED FORCE. Re-read the sea at the caller's force rather than
+     * scaling the wind afterwards: the curves are the game's own mapping from
+     * force to wind, and re-evaluating them is what the game does when a script
+     * writes BeaufortScale. Scaling the result would invent a curve. */
+    if (ov && ov->has_beaufort) {
+        const std::string lvl = W2_LevelDir(c, level, isolated != 0);
+        if (!lvl.empty()) {
+            bf6_ocean_sea_state dialled{};
+            const float f = ov->beaufort;
+            if (BF6_SeaStateInDirAt(c, lvl, &f, &dialled)) sea = dialled;
         }
     }
     if (sea_out) *sea_out = sea;
@@ -358,12 +393,27 @@ extern "C" int bf6_level_water_sims_effective(bf6_ctx* c, const char* level, int
         }
         W2_WaterFeature feature;
         if (placed && W2_ReadWaterFeature(c, lvl, feature)) {
+            /* values[3] is the prefab's WaterHeight; a dialled one replaces it.
+             * Handed back rather than applied: height moves the surface, which
+             * is the consumer's transform, not part of the spectrum. */
+            if (height_out) {
+                if (ov && ov->has_water_height) *height_out = ov->water_height;
+                else if (feature.sources[3] != 0) *height_out = feature.values[3];
+            }
             for (bf6_water_sim_v2& r : rows) {
                 if (wind) r.wind_speed = sea.wind_mps;
-                if (feature.sources[2] != 0 &&
+                const bool routed =
                     std::find(feature.amplitude_targets.begin(), feature.amplitude_targets.end(),
-                              r.source_index) != feature.amplitude_targets.end())
+                              r.source_index) != feature.amplitude_targets.end();
+                /* A dialled amplitude follows the SAME routing the prefab
+                 * authors: gmpf_water writes WaveAmplitude into the 192 m
+                 * cascade only, and a preview that pushed it into all three
+                 * would show a sea the game cannot produce. */
+                if (ov && ov->has_wave_amplitude) {
+                    if (routed) r.wave_amplitude = ov->wave_amplitude;
+                } else if (feature.sources[2] != 0 && routed) {
                     r.wave_amplitude = feature.values[2];
+                }
             }
             if (out && out_max > 0) {
                 const int n = std::min<int>(count, out_max);
@@ -379,10 +429,29 @@ extern "C" int bf6_level_water_sims_effective(bf6_ctx* c, const char* level, int
     for (bf6_water_sim_v2& r : rows) {
         if (wind) r.wind_speed = sea.wind_mps;
         if (amp) r.wave_amplitude = sea.curve_value[kSeaAmplitudeCurveSlot];
+        /* No authored route on this level, so a dialled amplitude goes to every
+         * cascade - there is no routing to respect. */
+        if (ov && ov->has_wave_amplitude) r.wave_amplitude = ov->wave_amplitude;
     }
+    if (height_out && ov && ov->has_water_height) *height_out = ov->water_height;
     if (out && out_max > 0) {
         const int n = std::min<int>(count, out_max);
         for (int i = 0; i < n; ++i) out[i] = rows[(size_t)i];
     }
     return count;
+}
+
+extern "C" int bf6_level_water_sims_effective(bf6_ctx* c, const char* level, int isolated,
+                                              bf6_water_sim_v2* out, int out_max,
+                                              bf6_ocean_sea_state* sea_out)
+{
+    return W2_SimsEffective(c, level, isolated, nullptr, out, out_max, sea_out, nullptr);
+}
+
+extern "C" int bf6_level_water_sims_override(bf6_ctx* c, const char* level, int isolated,
+                                             const bf6_water_override* ov,
+                                             bf6_water_sim_v2* out, int out_max,
+                                             bf6_ocean_sea_state* sea_out, float* height_out)
+{
+    return W2_SimsEffective(c, level, isolated, ov, out, out_max, sea_out, height_out);
 }

@@ -350,16 +350,37 @@ int32_t bf6_ray_scene_trace(bf6_ray_scene* s, const double* from, const double* 
 
 // ------------------------------------------------------------------ walking
 //
-// The Unreal SDK's TickWalk, in metres. Constants follow Unreal's own character
-// defaults - 0.45 m step, ~45 degree slope limit, 0.35 m radius - so a map that
-// walks right in the editor walks right in game.
+// The Unreal SDK's TickWalk, in metres, now taking its numbers from
+// bf6_walk_tuning instead of a constants block.
+//
+// WHAT CHANGED AND WHY IT MATTERS: the step height, the jump's horizontal cap
+// and the landing penalty are AUTHORED BY THE GAME and were previously the host
+// engine's own character defaults. Step height especially - 0.45 against an
+// authored 0.32 - meant kerbs the game makes you jump were being walked over.
+// The SPEEDS are still the engine's, because BF6 does not author an absolute
+// walk or sprint speed anywhere; see bf6_walk_tuning.
 
-void bf6_walk_step(bf6_walk_state* st, const bf6_walk_input* in, bf6_walk_ray_fn ray, void* user)
+void bf6_walk_step_tuned(bf6_walk_state* st, const bf6_walk_input* in,
+                         const bf6_walk_tuning* tuning, bf6_walk_ray_fn ray, void* user)
 {
     if (!st || !in || !ray) return;
-    const double step_up = 0.45, radius = 0.35;
+    bf6_walk_tuning fallback;
+    if (!tuning) { bf6_walk_tuning_defaults(&fallback); tuning = &fallback; }
+    const bf6_walk_tuning& T = *tuning;
+    const double step_up = T.step_height, radius = T.radius;
     const double dt = std::clamp(in->dt, 0.001, 0.1);   // a stall must not fling the walker
-    if (in->jump && st->grounded) { st->vel_up = 4.2; st->grounded = 0; }
+    const bool airborne_at_entry = st->grounded == 0;
+    const double falling = st->vel_up;   // read before gravity, for the landing penalty
+    if (in->jump && st->grounded) {
+        st->vel_up = T.jump_speed;
+        st->grounded = 0;
+        /* A JUMP FROM A STANDSTILL CARRIES NOTHING FORWARD. Below
+         * Jump_MinSpeedForHorizontalImpulse the game gives no horizontal
+         * impulse, which is why a standing jump in BF6 goes straight up rather
+         * than drifting off in whatever direction you were leaning. */
+        const double speed = std::sqrt(st->vel[0] * st->vel[0] + st->vel[2] * st->vel[2]);
+        if (speed < T.jump_min_speed_for_impulse) { st->vel[0] = 0.0; st->vel[2] = 0.0; }
+    }
 
     V3 pos{st->pos[0], st->pos[1], st->pos[2]};
     // THE HEIGHT ACTUALLY STOOD AT, which is not the standing eye while crouched.
@@ -373,9 +394,21 @@ void bf6_walk_step(bf6_walk_state* st, const bf6_walk_input* in, bf6_walk_ray_fn
     if (len(want) > 1.0) want = norm(want);
     // Accelerate toward the wanted direction and coast when input stops, so
     // starting, stopping and turning have weight.
-    const double top = in->crouch ? 1.4 : (in->run ? 6.0 : 2.6);
+    /* THE LANDING PENALTY scales the top speed down after a drop and recovers
+     * over the next couple of seconds, so stepping off something and sprinting
+     * away instantly is not free. Strength, floor and recovery rate are all
+     * authored; the penalty rides in vel[1], which the walker does not
+     * otherwise use and which callers already carry across steps. */
+    if (!airborne_at_entry) st->vel[1] = 1.0;              /* on the ground, no penalty */
+    double penalty = st->vel[1] > 0.0 ? st->vel[1] : 1.0;
+    penalty = std::min(1.0, penalty + T.landing_recovery_per_second * dt);
+
+    const double base_top = in->crouch ? T.crouch_speed : (in->run ? T.run_speed : T.walk_speed);
+    const double top = base_top * penalty;
     const V3 target = mul(want, top);
-    const double accel = st->grounded ? 24.0 : 7.0;   // less control in the air
+    /* AIR CONTROL IS NOT GROUND CONTROL, and in the air it is the authored
+     * Jump_StrafeSpeed rather than a share of the walking acceleration. */
+    const double accel = st->grounded ? T.accel_ground : T.accel_air;
     V3 vel{st->vel[0], 0.0, st->vel[2]};
     V3 delta = sub(target, vel);
     const double dl = len(delta), max_step = accel * dt;
@@ -411,8 +444,19 @@ void bf6_walk_step(bf6_walk_state* st, const bf6_walk_input* in, bf6_walk_ray_fn
 
     // ---- vertical: gravity, ground, and the slope you are allowed to stand on ----
     const bool was_on_floor = st->grounded != 0;   // snapping is only for walkers
-    st->vel_up = std::max(st->vel_up - 9.8 * dt, -30.0);
+    st->vel_up = std::max(st->vel_up - T.gravity * dt, -30.0);
     pos.y += st->vel_up * dt;
+
+    /* JUMP_HORIZONTALVELOCITYCAP. Airborne speed is capped outright, so a
+     * run-up cannot be converted into an arbitrarily long jump. */
+    if (!was_on_floor && T.jump_horizontal_cap > 0.0) {
+        const double speed = std::sqrt(vel.x * vel.x + vel.z * vel.z);
+        if (speed > T.jump_horizontal_cap) {
+            const double k = T.jump_horizontal_cap / speed;
+            vel.x *= k;
+            vel.z *= k;
+        }
+    }
 
     const double eye = in->crouch ? st->eye * 0.58 : st->eye;
     // from the feet as they are now, so standing up searches from above the floor
@@ -427,6 +471,14 @@ void bf6_walk_step(bf6_walk_state* st, const bf6_walk_input* in, bf6_walk_ray_fn
         const bool snap = was_on_floor && st->vel_up <= 0.0 && (pos.y - stand) <= step_up;
         if (walkable && (pos.y <= stand || snap)) {
             pos.y = stand;
+            /* TOUCHDOWN. A hard landing costs speed, scaled by how fast the
+             * fall was and floored by Jump_LandingPenalty_MinScaleClamp so it
+             * never brings the soldier to a stop. Only a real fall counts; a
+             * snap down a stair has no drop speed to speak of. */
+            if (!was_on_floor && falling < 0.0) {
+                const double hurt = (-falling) / T.landing_penalty_strength;
+                penalty = std::max((double)T.landing_penalty_floor, 1.0 - hurt);
+            }
             st->vel_up = 0.0;
             st->grounded = 1;
         } else if (pos.y > stand + 0.02) {
@@ -441,7 +493,17 @@ void bf6_walk_step(bf6_walk_state* st, const bf6_walk_input* in, bf6_walk_ray_fn
         }
     }
     st->pos[0] = pos.x; st->pos[1] = pos.y; st->pos[2] = pos.z;
-    st->vel[0] = vel.x; st->vel[1] = 0.0; st->vel[2] = vel.z;
+    st->vel[0] = vel.x; st->vel[2] = vel.z;
+    /* vel[1] carries the landing penalty between steps. It was documented as
+     * ignored and written as zero; it is now the one piece of walker state
+     * that had nowhere else to live without changing the struct, which callers
+     * compile against. */
+    st->vel[1] = penalty;
+}
+
+void bf6_walk_step(bf6_walk_state* st, const bf6_walk_input* in, bf6_walk_ray_fn ray, void* user)
+{
+    bf6_walk_step_tuned(st, in, nullptr, ray, user);
 }
 
 static int scene_ray(void* user, const double* from, const double* to, double* hit, double* normal)
@@ -456,6 +518,12 @@ static int scene_ray(void* user, const double* from, const double* to, double* h
 void bf6_walk_step_scene(bf6_walk_state* st, const bf6_walk_input* in, bf6_ray_scene* s)
 {
     if (s) bf6_walk_step(st, in, scene_ray, s);
+}
+
+void bf6_walk_step_scene_tuned(bf6_walk_state* st, const bf6_walk_input* in,
+                               const bf6_walk_tuning* tuning, bf6_ray_scene* s)
+{
+    if (s) bf6_walk_step_tuned(st, in, tuning, scene_ray, s);
 }
 
 } // extern "C"

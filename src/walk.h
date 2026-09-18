@@ -82,6 +82,22 @@ public:
 
     const std::vector<WalkRow>& rows() const { return rows_; }
 
+    // WHERE EACH PARTITION WAS ENTERED, one entry per visit.
+    //
+    // rows() carries MESH placements only, so anything else a partition holds -
+    // a reflection volume, say - has no way back to world space: its transform
+    // is authored in the prefab's own frame, and the prefab's placement exists
+    // only inside this recursion. Recording the transform at entry is what lets
+    // a reader compose those without writing a second walker, which would be a
+    // second answer about where prefabs sit.
+    //
+    // A prefab placed several times appears several times here, which is the
+    // point: each placement needs its own copy of whatever the prefab holds.
+    // Off by default so an ordinary level import pays nothing for it.
+    struct PartitionEntry { std::string ref; Mat34 xf; };
+    const std::vector<PartitionEntry>& partition_entries() const { return entries_; }
+    void set_record_entries(bool v) { record_entries_ = v; }
+
     // Partition asset path (lower, no .ebx) -> an opaque scope id. Left empty,
     // every row's scope is "" and the walk behaves as it otherwise would. The
     // caller fills this with the bundles that own a depot.
@@ -117,6 +133,8 @@ private:
     // bounded front-end traversals spend seconds duplicating identical data.
     const std::map<std::string, std::string>*    gi_ = nullptr;
     std::vector<WalkRow>                         rows_;
+    std::vector<PartitionEntry>                  entries_;
+    bool                                         record_entries_ = false;
     std::map<TypeGuid, bool>                     matters_;
     std::string                                  scope_;
     std::string                                  bundle_;

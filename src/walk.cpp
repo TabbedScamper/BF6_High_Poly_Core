@@ -563,6 +563,11 @@ void Walk::walk_ref(const std::string& ref, const Mat34& parent,
     guard.insert(key);
     n_partitions++;
 
+    // The transform this partition was entered at, for readers that must place
+    // something the walk does not itself emit. Recorded AFTER the parse
+    // succeeds, so an entry always names a partition that really opened.
+    if (record_entries_) entries_.push_back(PartitionEntry{name, parent});
+
     // THE SCOPE A PLACEMENT INHERITS, tracked down the recursion.
     //
     // A section's shader state key is looked up in a ShaderBlockDepot, and a

@@ -5057,6 +5057,80 @@ BF6_API int bf6_anim_bindings(bf6_ctx*, const char* clip_ebx,
                               bf6_anim_binding* out, int out_max,
                               bf6_anim_binding_stats* stats);
 
+/* ------------------------------------------------- ANT context database -- */
+/* ANT's per-context lookup: "which entry, for THIS weapon, stance, state" -
+ * which inspect clip, which reload, which pose. A ContextDatabaseAsset
+ * partition carries its keys (game states) and a compiled matcher; this
+ * evaluates that matcher exactly as the game does. Verified against the game's
+ * own machine code on 45,400 contexts over all 1,135 databases the install
+ * ships, 0 mismatches (research: ant-context-database-matcher-decoded).
+ *
+ * Use:
+ *   1. open the database; read its asset keys (game state per key row) and key
+ *      descriptors (where each value goes, and as what);
+ *   2. pack the current game-state values into a zeroed buffer of
+ *      info.value_bytes, per descriptor class:
+ *        0      bool   one byte at value_offset
+ *        1, 2   int    u32 at value_offset; 0xFF.. (all ones, width bytes)
+ *                      means UNSET and matches every entry. A row flagged
+ *                      BITFLAG on a class-3 key stores 1 << value instead.
+ *        3      bitmap raw bytes at value_offset (`second` of them)
+ *        4, 6   float  min(a,b) at value_offset, max(a,b) at `second` - a
+ *                      scalar state writes its value to both
+ *        5, 7   float  value at value_offset, weight at `second` unless
+ *                      `second` is 0xFFFFFFFF
+ *   3. match: returns the picked entry index (bf6_ant_cdb_entry gives its asset
+ *      path), BF6_ANT_CDB_NONE if there are no entries, BF6_ANT_CDB_ERROR on
+ *      bad input. ctx_out (info.slots bytes) and scores_out (info.entries
+ *      bytes) are optional, for tests and diagnostics.
+ *
+ * A database the shipped data never produces - multi-pass, a compare method
+ * outside the nine the game uses, vector-angle keys - is REFUSED at open with
+ * a reason, rather than evaluated by a guess. Mirroring (an asset-level mirror
+ * game state that remaps some key values) is reported in info.has_mirror and
+ * per row as MIRRORABLE, not applied. */
+typedef struct bf6_ant_cdb bf6_ant_cdb;
+
+typedef struct {
+    int32_t entries;         /* candidates, in precedence order */
+    int32_t slots;           /* context slots */
+    int32_t rows_per_block;  /* match rows per 16-entry block */
+    int32_t keys;            /* key descriptors */
+    int32_t asset_keys;      /* key rows on the asset (game states) */
+    int32_t value_bytes;     /* size of the packed values buffer */
+    int32_t has_mirror;      /* the asset names a mirror game state */
+} bf6_ant_cdb_info;
+
+typedef struct {
+    int32_t  key_class;      /* 0..7, see above */
+    int32_t  key_index;      /* which asset key row */
+    int32_t  slot;           /* first context slot */
+    int32_t  first_row;      /* first match row */
+    uint64_t value_offset;   /* in the packed values buffer */
+    uint64_t second;         /* class 0: bit mask; 1-3: byte width;
+                                4-7: second value offset (0xFFFFFFFF = none) */
+    float    lo, hi;         /* float classes: the authored window */
+} bf6_ant_cdb_key;
+
+#define BF6_ANT_CDB_NONE           (-10000000)
+#define BF6_ANT_CDB_ERROR          (-10000001)
+#define BF6_ANT_CDB_ROW_BITFLAG    1   /* store 1 << value on a bitmap key */
+#define BF6_ANT_CDB_ROW_SKIPPED    2   /* not filled from its game state here */
+#define BF6_ANT_CDB_ROW_MIRRORABLE 4   /* has a mirror remap (not applied) */
+
+/* Free with bf6_free. NULL with a reason in `err` on failure. */
+BF6_API bf6_ant_cdb* bf6_ant_cdb_open(bf6_ctx*, const char* context_database_asset,
+                                      char* err, int err_len);
+BF6_API int         bf6_ant_cdb_get_info(const bf6_ant_cdb*, bf6_ant_cdb_info* out);
+BF6_API const char* bf6_ant_cdb_entry(const bf6_ant_cdb*, int index);
+BF6_API int         bf6_ant_cdb_key_at(const bf6_ant_cdb*, int index, bf6_ant_cdb_key* out);
+/* Game-state asset path of one asset key row; descriptor index and ROW flags out. */
+BF6_API const char* bf6_ant_cdb_asset_key(const bf6_ant_cdb*, int row,
+                                          int* descriptor, int* flags);
+BF6_API int         bf6_ant_cdb_match(const bf6_ant_cdb*, const uint8_t* values, int values_len,
+                                      uint8_t* ctx_out, int ctx_max,
+                                      uint8_t* scores_out, int scores_max);
+
 /* ------------------------------------------------------- renderbones ----- */
 /* THE PROCEDURAL BONES ABOVE THE RIG.
  *

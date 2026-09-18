@@ -639,6 +639,10 @@ add_executable(soldier_1p_clip_test test/soldier_1p_clip_test.cpp)
 target_link_libraries(soldier_1p_clip_test PRIVATE bf6_core_static)
 target_include_directories(soldier_1p_clip_test PRIVATE src include)
 
+add_executable(ant_cdb_replay_test test/ant_cdb_replay_test.cpp)
+target_link_libraries(ant_cdb_replay_test PRIVATE bf6_core_static)
+target_include_directories(ant_cdb_replay_test PRIVATE src include)
+
 add_executable(array_elem_slot_probe test/array_elem_slot_probe.cpp)
 target_link_libraries(array_elem_slot_probe PRIVATE bf6_core_static)
 target_include_directories(array_elem_slot_probe PRIVATE src include)

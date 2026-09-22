@@ -1,5 +1,6 @@
 #include "expression_pure_ops.h"
 
+#include <immintrin.h>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -79,6 +80,18 @@ const Spec kSpecs[] = {
     {"MagnitudeFloat3",          1, {kV},     kF},      /* 2 */
     {"NormalizeFloat3",          1, {kV},     kV},      /* 2 */
     {"DistanceFloat3",           2, {kV, kV}, kF},      /* 3 */
+    /* ANGLE AT A PIVOT, transcribed from 0x14249AF00.
+     *
+     * Its body was found by the route that works for a named builtin whose key is
+     * nowhere in the image: the name literal is referenced by a lazy crc32
+     * initializer that returns the operator's descriptor, and that descriptor's
+     * first qword is the implementation. It is a fourth registry, invisible to the
+     * three this library scans because the key field is still zero on disk.
+     *
+     * AngleBetweenFloat(a, b, pivot) is the angle AT the pivot: acos of the dot of
+     * the two normalised pivot-relative directions, the dot clamped to [-1, 1]
+     * first. Three Vec3 in, one float out - the shape of the boat's own record. */
+    {"AngleBetweenFloat",        3, {kV, kV, kV}, kF},  /* 4 */
     {"MultiplyFloat3FloatFloat3",2, {kV, kF}, kV},      /* 3 */
     {"MultiplyFloatFloat3Float3",2, {kF, kV}, kV},      /* 3 */
     {"MultiplyFloat3Float3Float3",2,{kV, kV}, kV},      /* 3 */
@@ -141,9 +154,10 @@ const Spec kSpecs[] = {
      * existing DivideFloat3FloatFloat3 is (Float3, Float) -> Float3), and the VM
      * checks it: a record whose operand count disagrees is refused and named in the
      * run report, so a wrong line here surfaces as a refusal rather than as a
-     * quietly wrong number. ToVec3Float, AngleBetweenFloat and EnumEqualFunc are
-     * deliberately absent: their behaviour cannot be read off the name, and guessing
-     * it is how a wrong number gets in.
+     * quietly wrong number. ToVec3Float and EnumEqualFunc are deliberately absent:
+     * their behaviour cannot be read off the name, and guessing it is how a wrong
+     * number gets in. AngleBetweenFloat was in that list until its body was read
+     * (see below); it is no longer a guess.
      *
      * Float modulo is left to the hardware, which is what the game's own code does;
      * a guard here would invent a value the game never had. */
@@ -152,11 +166,6 @@ const Spec kSpecs[] = {
     {"NotEqualsUInt",            2, {kF, kF}, kB},      /* 3 */
     {"BitwiseAndInt",            2, {kF, kF}, kF},      /* 3 */
     {"NormalizeFloat2",          1, {kF * 2}, kF * 2},  /* 2 */
-    /* The boat normalises a direction in both its steering and its hull chain, and
-     * with nothing serving it the force that came out was refused. The same shape
-     * as NormalizeFloat2 one lane wider, which is all the name says and all that is
-     * used; a zero vector normalises to itself rather than to a NaN, as above. */
-    {"NormalizeFloat3",          1, {kV},     kV},      /* 2 */
     /* THE ONE OPERATOR HERE READ FROM ITS NAME. AverageFloat3 has no reflected
      * descriptor and no entry in the engine-node table, so there is no body to
      * transcribe; what IS measured is its record in the tank's graph - two inputs
@@ -239,7 +248,6 @@ void mul_xform(const float a[4][3], const float b[4][3], float out[4][3]) {
 } // namespace
 
 void PureOps::add(uint32_t key, const std::string& current_exe_name) {
-    if (current_exe_name == "NormalizeFloat3" && std::getenv("BF6_NO_NORMALIZE3")) return;
     if (key && !current_exe_name.empty() && spec_for(current_exe_name))
         names_[key] = current_exe_name;
 }
@@ -319,16 +327,6 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * graph, where it would spread silently. */
         if (m > 0.f) { v[0] /= m; v[1] /= m; }
         Value r; r.bytes.assign(8, 0); std::memcpy(r.bytes.data(), v, 8); r.known = true;
-        out = r;
-        return true;
-    }
-    if (n == "NormalizeFloat3") {
-        float v[3] = {0, 0, 0};
-        if (a[0].bytes.size() < 12) return false;
-        std::memcpy(v, a[0].bytes.data(), 12);
-        const float m = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-        if (m > 0.f) { v[0] /= m; v[1] /= m; v[2] /= m; }
-        Value r; r.bytes.assign(16, 0); std::memcpy(r.bytes.data(), v, 12); r.known = true;
         out = r;
         return true;
     }
@@ -425,6 +423,34 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (m == 0.f) return false;   /* no direction to report */
         const float r[3] = {u[0]/m, u[1]/m, u[2]/m};
         out = put_vec3(r); return true;
+    }
+    if (n == "AngleBetweenFloat") {
+        /* FUN_14249AF00, line for line. The two directions are normalised with
+         * rsqrtps and TWO Newton steps (the refinement appears once on its own and
+         * again inside the final expression), which is not the same number an exact
+         * reciprocal square root gives - so the hardware instruction is used rather
+         * than 1/sqrt, and the angle matches the game's. */
+        float p[3], A[3], b3[3];
+        vec3(a[0], A); vec3(a[1], b3); vec3(a[2], p);
+        const float ua[3] = {p[0] - A[0], p[1] - A[1], p[2] - A[2]};
+        const float ub[3] = {p[0] - b3[0], p[1] - b3[1], p[2] - b3[2]};
+        auto inv_len = [](const float v[3]) {
+            const float s = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+            const float half = s * 0.5f;
+            float y = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(s)));
+            y = (0.5f - y * y * half) * y + y;      /* first Newton step */
+            y = (0.5f - y * y * half) * y + y;      /* and the second */
+            return y;
+        };
+        const float ra = inv_len(ua), rb = inv_len(ub);
+        /* The association and the summation order are the native's: each term is
+         * ((rb * ub[i]) * ra) * ua[i], and the lanes are added y, then x, then z. */
+        auto term = [&](int i) { return ((rb * ub[i]) * ra) * ua[i]; };
+        float d = term(1) + term(0) + term(2);
+        if (d <= -1.0f) d = -1.0f;
+        if (1.0f <= d) d = 1.0f;
+        out = put_f32(std::acos(d));
+        return true;
     }
     if (n == "DistanceFloat3") {
         vec3(a[0], u); vec3(a[1], v);
@@ -648,6 +674,16 @@ const uint32_t kRandom     = 0xDEDE1EF5u; /* engine node FUN_14566B2A0 (+ FUN_14
 const uint32_t kRevLimit   = 0x1C214DBCu; /* thunk 147EE0E80 -> FUN_1443E5210             */
 const uint32_t kClutchGear = 0xAFFD9D93u; /* thunk 147EE1BD0 -> FUN_1443E6CB0             */
 const uint32_t kClutchSlip  = 0x893E29C6u; /* thunk 147EE0CF0 (inline) == FUN_1443E51C0     */
+/* BOOLEAN AND / OR, by key for the same reason AbsoluteFloat is: the name scan does
+ * not resolve these two uniquely, and neither is in any of the three registries this
+ * library reads. Their identity comes from the kernel disassembly recorded in the
+ * research databank (impl/anim_ant/specs/spec_expression.md 5.2): And at 0x1424A6FC0
+ * is `a && b`, Or at 0x1424A7200 is `a || b`, both two-operand forms with n-ary
+ * siblings at their own keys. Every boat branch that decides whether the engine
+ * makes thrust runs through one of them, and an unknown condition there is a
+ * guessed branch and a graph that never reaches its own force. */
+const uint32_t kBoolAnd     = 0x8EB2196Du; /* And  (0x1424A6FC0): a && b */
+const uint32_t kBoolOr      = 0xEABFEC6Fu; /* Or   (0x1424A7200): a || b */
 const uint32_t kAbsFloat    = 0x41BE725Eu; /* AbsoluteFloat: name-registered builtin (0x142268900); the
                                               * name scan does not resolve this key uniquely, so by key */
 const uint32_t kIntNonNeg   = 0xF474EAFDu; /* thunk 147D4E590 == FUN_143B22DF0: x < 0 ? 0 : x (int) */
@@ -735,6 +771,11 @@ bool RecoveredOps::describe(uint32_t key, OperatorSignature& out) {
         /* (rpm, gear ratio, drive wheel speed) -> slip in [0, 1] */
         out.input_widths = {4, 4, 4};
         out.output_width = 4;
+        return true;
+    case kBoolAnd:
+    case kBoolOr:
+        out.input_widths = {1, 1};
+        out.output_width = 1;
         return true;
     case kAbsFloat:
         out.input_widths = {4};
@@ -975,6 +1016,12 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
         }
         out.bytes.assign(4, 0);
         std::memcpy(out.bytes.data(), &y, 4);
+        return true;
+    }
+    case kBoolAnd:
+    case kBoolOr: {
+        const bool a = args[0].bytes[0] != 0, b = args[1].bytes[0] != 0;
+        out.bytes.assign(1, (uint8_t)((key == kBoolAnd ? (a && b) : (a || b)) ? 1 : 0));
         return true;
     }
     case kAbsFloat: {

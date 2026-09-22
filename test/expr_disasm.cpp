@@ -912,9 +912,31 @@ int main(int argc, char** argv)
             std::set<uint32_t> want(key_list.begin(), key_list.end());
             for (const auto& r : rows)
                 if (want.count(r.key)) impl_of[r.key] = r.implementation_va;
-            if (!impl_of.empty())
+            /* All three registries, as the census does: a key the key-first table
+             * does not carry is not an unreadable key, it is a key in one of the
+             * other two, and the address is the whole point of asking. */
+            std::vector<bf6::expression::DescriptorOperator> drows;
+            std::string derr;
+            if (bf6::expression::read_descriptor_operators(exe, drows, derr))
+                for (const auto& r : drows)
+                    if (want.count(r.key) && !impl_of.count(r.key))
+                        impl_of[r.key] = r.implementation_va;
+            std::vector<bf6::expression::MethodOperator> mrows;
+            std::string merr;
+            if (bf6::expression::read_method_operators(exe, key_list, mrows, merr))
+                for (const auto& r : mrows)
+                    if (want.count(r.key) && !impl_of.count(r.key))
+                        impl_of[r.key] = r.implementation_va;
+            if (!impl_of.empty()) {
                 std::printf("the key-first registry gave an implementation for %zu of them\n",
                             impl_of.size());
+                /* Printed, because the address is what a decompile corpus is
+                 * grepped by: a key with no body read is a key nobody has looked
+                 * at yet, and the only way to look is to know where it is. */
+                for (const auto& kv : impl_of)
+                    std::printf("  impl %08X -> 0x%llX\n", kv.first,
+                                (unsigned long long)kv.second);
+            }
         }
     }
 

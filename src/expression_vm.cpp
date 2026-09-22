@@ -631,6 +631,43 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
             const auto next = written_slots.upper_bound(off);
             if (next != written_slots.end()) slot_stride[off] = *next - off;
         }
+
+    /* AN ACCUMULATOR SEED IS ZERO, AND KNOWN.
+     *
+     * A slot that NO record in the graph ever writes can hold only what the slot
+     * buffer starts with, which is zero. Leaving those reads unknown is conservatism
+     * with nothing behind it: there is no producer to have run too late. A boat pays
+     * for it - three of its force sums begin `acc = acc + term` against a slot
+     * nothing writes, and with the seed unknown every sum after it is unknown too.
+     *
+     * Only offsets that are never an OUTPUT are seeded. One that is written
+     * somewhere and simply has not been written yet stays unknown, because that is a
+     * real ordering question rather than an empty one. A wide write that happens to
+     * cover a seeded offset overwrites it in either order, so seeding cannot hide
+     * one. The span runs to the next offset the graph names, which is where the
+     * value ends. */
+    {
+        std::set<uint32_t> named;
+        for (const Record& rec : graph.records)
+            for (const Operand& op : rec.operands)
+                if (op.region == 2) named.insert(op.offset);
+        for (uint32_t off : named) {
+            if (written_slots.count(off)) continue;
+            /* AT MOST A VEC4. A wider never-written span is a STRUCT the graph fills
+             * from somewhere this detection does not see - a wheel config, a contact
+             * - and zeroing one invents a configuration with no radius and no mass,
+             * which is how a boat's acceleration reached 1e13 in two ticks. A value
+             * up to sixteen bytes has nowhere else to come from. */
+            const auto next = named.upper_bound(off);
+            uint32_t width = next == named.end() ? 16u : *next - off;
+            if (width > 16u) continue;
+            if (off + width > slots.bytes.size()) continue;
+            Value zero;
+            zero.bytes.assign(width, 0);
+            zero.known = true;
+            slots.write(off, width, zero);
+        }
+    }
     std::map<uint32_t, unsigned> back_edges;   /* record offset -> times its back-edge ran */
     const unsigned kMaxLoop = 1024;
     /* record offset -> guessed-branch count when the run first reached it: a loop
@@ -1120,6 +1157,28 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 }
                 Value value;
                 if (host->invoke(record.operator_key, args, value)) {
+                    /* THE FIRST NON-FINITE ANSWER is the one worth seeing: everything
+                     * after it is downstream of the same mistake. */
+                    if (std::getenv("BF6_NAN_DEBUG") && value.known &&
+                        value.bytes.size() >= 4) {
+                        for (size_t w = 0; w + 4 <= value.bytes.size(); w += 4) {
+                            float f = 0.0f;
+                            std::memcpy(&f, value.bytes.data() + w, 4);
+                            if ((std::isfinite(f) && std::fabs(f) < 1e7f) || f == 0.0f) continue;
+                            std::fprintf(stderr, "non-finite: rec 0x%X key %08X lane %zu = %g, inputs:",
+                                         record.offset, record.operator_key, w / 4, f);
+                            for (size_t i = 0; i < args.size(); ++i) {
+                                float g = 0.0f;
+                                if (args[i].bytes.size() >= 4)
+                                    std::memcpy(&g, args[i].bytes.data(), 4);
+                                std::fprintf(stderr, " r%u+%u=%g%s", call.inputs[i]->region,
+                                             call.inputs[i]->offset, g,
+                                             args[i].known ? "" : "?");
+                            }
+                            std::fprintf(stderr, "\n");
+                            break;
+                        }
+                    }
                     for (const Value& arg : args)
                         value.tainted = value.tainted || arg.tainted || !arg.known;
                     if (call.output && signature.output_width) {

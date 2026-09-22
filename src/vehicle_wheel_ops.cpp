@@ -51,6 +51,21 @@ const uint32_t kWaterPlane = 0xD257C4ACu;
  * host's surface is one flat height, so the minimum is that height. */
 const uint32_t kWaterHeightAt = 0xED79777Au;
 const float kNoWater = -1024.0f;
+/* FUN_1443E9D10: MOTION DAMPING, both velocities in one call.
+ *
+ * Per axis, in the frame its coefficients are in: the velocity decays by
+ * exp(-10 * dt * k), the decayed vector is clamped to a maximum length, and what
+ * comes out is the ACCELERATION that produces it, (damped - v) / dt. A default
+ * maximum is substituted when the graph passes zero - 100 for the first, 20 for the
+ * second - and a velocity with any non-finite lane makes the whole answer zero.
+ *
+ * WHICH VELOCITY IS WHICH IS THE ONE THING NOT MEASURED HERE. The native takes them
+ * out of the physics context at two offsets; the first is rotated into the
+ * coefficients' frame and rotated back afterwards, the second is not, and the
+ * defaults (100 against 20) read like a speed against a rate. This host hands the
+ * graph both velocities in the body frame already, so that round trip is a no-op and
+ * only the pairing matters. It is stated at the call below rather than buried. */
+const uint32_t kMotionDamping = 0x9EB2D5CEu;
 
 /* SHARED ACROSS CLASSES, transcribed from the shipped code (studies muse_shared,
  * muse_boat). Small, and each one unblocks more than one class. */
@@ -721,6 +736,13 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {16};
         out.output_width = 4;
         return true;
+    case kMotionDamping:
+        /* dt, two per-axis coefficient vectors, two maximum lengths -> two
+         * accelerations; the primary is the second, as the record's last slot */
+        out.input_widths = {4, 16, 16, 4, 4};
+        out.extra_output_widths = {16};
+        out.output_width = 16;
+        return true;
     case kWaterPlane:
         /* half width, length, centre, the body matrix, a layer -> hit flag, plane */
         out.input_widths = {4, 4, 16, 64, 4};
@@ -895,6 +917,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         {kBoatHull, 7},
         {kWaterPlane, 5},
         {kWaterHeightAt, 1},
+        {kMotionDamping, 5},
     };
     for (const auto& m : kMinIn)
         if (m.key == key && a.size() < m.min_in) {
@@ -902,6 +925,69 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kMotionDamping) {
+        /* FUN_1443E9D10 through its kernel FUN_1443E7850, line for line. */
+        const float dt = rf(a[0], 0);
+        if (!(dt > 0.0f)) return false;
+        auto damp = [&](const float v[4], const Value& coeff, float maxlen,
+                        float fallback, std::vector<uint8_t>& dst, uint32_t at) {
+            if (maxlen == 0.0f) maxlen = fallback;
+            for (int i = 0; i < 3; ++i) {
+                uint32_t bits = 0;
+                std::memcpy(&bits, &v[i], 4);
+                if ((bits & 0x7F800000u) == 0x7F800000u) {   /* inf or NaN: all zero */
+                    for (int k = 0; k < 4; ++k) wf(dst, at + (uint32_t)(4 * k), 0.0f);
+                    return;
+                }
+            }
+            const float s = dt * -10.0f;
+            float d[4];
+            for (int i = 0; i < 3; ++i) {
+                const float e = std::exp(s * rf(coeff, (uint32_t)(4 * i)));
+                d[i] = v[i] - v[i] * (1.0f - e);
+            }
+            d[3] = v[3] - v[3] * 0.0f;
+            const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (maxlen < len) {
+                const float k = maxlen / len;
+                for (int i = 0; i < 4; ++i) d[i] *= k;
+            }
+            for (int i = 0; i < 4; ++i) wf(dst, at + (uint32_t)(4 * i), (d[i] - v[i]) / dt);
+        };
+        /* THE PAIRING, and how it was settled. The native's FIRST velocity is the
+         * one it rotates into the coefficients' frame and rotates back afterwards,
+         * which is what a LINEAR velocity needs when the coefficients are per body
+         * axis; the second needs no rotation, which is what an ANGULAR velocity in
+         * the body frame is. The two default clamps, 100 against 20, are sanity
+         * limits either way round and settle nothing.
+         *
+         * What settles it is that the other pairing does not merely look wrong, it
+         * DIVERGES: applied the other way the cb90's speed reaches 2.8e13 in two
+         * ticks and NaN by the third, while this way it accelerates and holds a
+         * steady speed. A wrong pairing feeds each velocity the other's gain, and
+         * the loop with the larger gain runs away. */
+        const float v4[4] = {body_.v[0], body_.v[1], body_.v[2], 0.0f};
+        const float w4[4] = {body_.w[0], body_.w[1], body_.w[2], 0.0f};
+        out.bytes.assign(32, 0);
+        damp(v4, a[1], rf(a[3], 0), 100.0f, out.bytes, 16);   /* extra: linear */
+        damp(w4, a[2], rf(a[4], 0), 20.0f, out.bytes, 0);     /* primary: angular */
+        out.known = true;
+        if (std::getenv("BF6_WHEEL_DEBUG")) {
+            auto o = [&](uint32_t at) {
+                float f = 0.0f;
+                std::memcpy(&f, out.bytes.data() + at, 4);
+                return f;
+            };
+            std::fprintf(stderr,
+                         "damping: kA (%g %g %g) max %g -> (%g %g %g); "
+                         "kB (%g %g %g) max %g -> (%g %g %g)\n",
+                         rf(a[1], 0), rf(a[1], 4), rf(a[1], 8), rf(a[3], 0),
+                         o(16), o(20), o(24),
+                         rf(a[2], 0), rf(a[2], 4), rf(a[2], 8), rf(a[4], 0),
+                         o(0), o(4), o(8));
+        }
+        return true;
+    }
     if (key == kWaterHeightAt) {
         out.bytes.assign(4, 0);
         wf(out.bytes, 0, body_.water ? body_.water_height : kNoWater);

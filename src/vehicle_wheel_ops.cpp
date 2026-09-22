@@ -954,23 +954,27 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             }
             for (int i = 0; i < 4; ++i) wf(dst, at + (uint32_t)(4 * i), (d[i] - v[i]) / dt);
         };
-        /* THE PAIRING, and how it was settled. The native's FIRST velocity is the
-         * one it rotates into the coefficients' frame and rotates back afterwards,
-         * which is what a LINEAR velocity needs when the coefficients are per body
-         * axis; the second needs no rotation, which is what an ANGULAR velocity in
-         * the body frame is. The two default clamps, 100 against 20, are sanity
-         * limits either way round and settle nothing.
+        /* THE PAIRING, and the evidence that settles it.
          *
-         * What settles it is that the other pairing does not merely look wrong, it
-         * DIVERGES: applied the other way the cb90's speed reaches 2.8e13 in two
-         * ticks and NaN by the third, while this way it accelerates and holds a
-         * steady speed. A wrong pairing feeds each velocity the other's gain, and
-         * the loop with the larger gain runs away. */
+         * The two default clamps are the tell. A CB90 is a 40-knot boat - 20.6 m/s -
+         * and this graph passes ZERO for both maxima, so both defaults apply: 100 for
+         * the first velocity and 20 for the second. Twenty metres a second is the
+         * boat's own top speed, which makes the SECOND velocity the LINEAR one and
+         * that clamp its speed limiter; a hundred is a sanity limit on the angular
+         * rate. Two more numbers in the same chain agree with the same source: the
+         * graph multiplies by 13500 where the real hull displaces 13.0 to 15.3 t, and
+         * the hull description gives a length of 15.9 m against 15.9 m overall.
+         *
+         * An earlier pass had these the other way round on the grounds that the other
+         * pairing diverges. That was reading a SYMPTOM as evidence: with the linear
+         * clamp at 100 instead of 20 the runaway is merely slower, and the speed
+         * oscillates in sign every tick either way. The instability is in the force
+         * chain, not here. */
         const float v4[4] = {body_.v[0], body_.v[1], body_.v[2], 0.0f};
         const float w4[4] = {body_.w[0], body_.w[1], body_.w[2], 0.0f};
         out.bytes.assign(32, 0);
-        damp(v4, a[1], rf(a[3], 0), 100.0f, out.bytes, 16);   /* extra: linear */
-        damp(w4, a[2], rf(a[4], 0), 20.0f, out.bytes, 0);     /* primary: angular */
+        damp(w4, a[1], rf(a[3], 0), 100.0f, out.bytes, 16);   /* extra: angular */
+        damp(v4, a[2], rf(a[4], 0), 20.0f, out.bytes, 0);     /* primary: linear */
         out.known = true;
         if (std::getenv("BF6_WHEEL_DEBUG")) {
             auto o = [&](uint32_t at) {
@@ -979,9 +983,9 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 return f;
             };
             std::fprintf(stderr,
-                         "damping: kA (%g %g %g) max %g -> (%g %g %g); "
+                         "damping: dt %g kA (%g %g %g) max %g -> (%g %g %g); "
                          "kB (%g %g %g) max %g -> (%g %g %g)\n",
-                         rf(a[1], 0), rf(a[1], 4), rf(a[1], 8), rf(a[3], 0),
+                         dt, rf(a[1], 0), rf(a[1], 4), rf(a[1], 8), rf(a[3], 0),
                          o(16), o(20), o(24),
                          rf(a[2], 0), rf(a[2], 4), rf(a[2], 8), rf(a[4], 0),
                          o(0), o(4), o(8));

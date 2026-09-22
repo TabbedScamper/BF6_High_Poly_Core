@@ -120,11 +120,41 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
         std::set<uint32_t> keyset;
         for (const auto& f : g->graph.fixups) keyset.insert(f.key);
         std::vector<uint32_t> keys(keyset.begin(), keyset.end());
+        /* THE CLOSED SET FIRST. Resolving a key against every printable literal in
+         * the executable withholds any key whose name collides with an unrelated
+         * string, and three of a boat's plainest operators - AddFloat3,
+         * GreaterThanFloat, LessThanFloat - were withheld for exactly that reason
+         * while the graph could not get a number out of them. The named-builtin
+         * descriptors give the operator names and nothing else, so a key resolved
+         * against them is resolved for good. The literal scan still runs for
+         * whatever the descriptors do not cover. */
         std::vector<expression::NamedOperator> names;
         std::string scan_why;
         expression::resolve_named_operators(exe, keys, names, scan_why);
+        {
+            static std::map<std::string, std::vector<expression::NamedBuiltin>> cache;
+            auto it = cache.find(exe);
+            if (it == cache.end()) {
+                std::vector<expression::NamedBuiltin> rows;
+                std::string berr;
+                expression::read_named_builtins(exe, rows, berr);
+                if (std::getenv("BF6_GRAPH_DEBUG"))
+                    std::fprintf(stderr, "named builtins: %zu%s%s\n", rows.size(),
+                                 berr.empty() ? "" : " - ", berr.c_str());
+                it = cache.emplace(exe, std::move(rows)).first;
+            }
+            std::set<uint32_t> want(keys.begin(), keys.end());
+            for (const auto& row : it->second) {
+                if (!want.count(row.key)) continue;
+                g->names[row.key] = row.name;
+                g->builtins.add(row.key, row.name);
+                g->pure.add(row.key, row.name);
+                physics_.add(row.key, row.name);
+            }
+        }
         for (const auto& row : names) {
             if (row.match_count != 1) continue;
+            if (g->names.count(row.key)) continue;   /* the closed set already named it */
             g->names[row.key] = row.name;
             g->builtins.add(row.key, row.name);
             g->pure.add(row.key, row.name);

@@ -496,6 +496,140 @@ uint32_t operator_name_crc32(const uint8_t* bytes, size_t size)
     return ~crc;
 }
 
+bool read_named_builtins(const std::string& exe_path,
+                         std::vector<NamedBuiltin>& out,
+                         std::string& error)
+{
+    out.clear(); error.clear();
+    FILE* f = fopen_binary_read(exe_path.c_str());
+    if (!f) { error = "cannot open " + exe_path; return false; }
+    std::fseek(f, 0, SEEK_END);
+    const long file_size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (file_size < 0x100) { std::fclose(f); error = "not a PE"; return false; }
+    std::vector<uint8_t> data((size_t)file_size);
+    const size_t got = std::fread(data.data(), 1, data.size(), f);
+    std::fclose(f);
+    if (got != data.size()) { error = "short executable read"; return false; }
+    if (rd16(data, 0) != 0x5a4d) { error = "missing MZ header"; return false; }
+    const uint32_t pe = rd32(data, 0x3c);
+    if (!fits(data, pe, 24) || rd32(data, pe) != 0x00004550u) {
+        error = "missing PE header"; return false;
+    }
+    const uint16_t section_count = rd16(data, pe + 6);
+    const uint16_t optional_size = rd16(data, pe + 20);
+    const size_t optional = (size_t)pe + 24;
+    if (!fits(data, optional, optional_size) || optional_size < 32 ||
+        rd16(data, optional) != 0x20b) {
+        error = "unsupported PE optional header"; return false;
+    }
+    const uint64_t image_base = rd64(data, optional + 24);
+    const size_t section_table = optional + optional_size;
+    std::vector<Section> sections;
+    for (uint16_t i = 0; i < section_count; ++i) {
+        const size_t at = section_table + (size_t)i * 40;
+        if (!fits(data, at, 40)) { error = "truncated PE section table"; return false; }
+        Section s;
+        char name[9] = {};
+        std::memcpy(name, data.data() + at, 8);
+        s.name = name;
+        s.virtual_size = rd32(data, at + 8);
+        s.va = rd32(data, at + 12);
+        s.raw_size = rd32(data, at + 16);
+        s.raw_offset = rd32(data, at + 20);
+        s.characteristics = rd32(data, at + 36);
+        sections.push_back(s);
+    }
+
+    /* 1. THE DESCRIPTORS: {implementation, key 0, flags 1} in writable data with the
+     *    implementation landing in executable memory. The ZERO key is the whole
+     *    point - it is what hides these from a key-shaped scan. */
+    std::map<uint64_t, uint64_t> impl_of;      /* descriptor va -> implementation */
+    for (const Section& s : sections) {
+        if (!(s.characteristics & 0x80000000u) ||
+            (s.characteristics & 0x20000000u)) continue;
+        if (!fits(data, s.raw_offset, s.raw_size)) continue;
+        for (size_t at = s.raw_offset; at + 16 <= (size_t)s.raw_offset + s.raw_size; at += 8) {
+            if (rd32(data, at + 8) != 0u || rd32(data, at + 12) != 1u) continue;
+            const uint64_t impl = rd64(data, at);
+            if (!executable_va(impl, image_base, sections)) continue;
+            impl_of[image_base + s.va + (at - s.raw_offset)] = impl;
+        }
+    }
+    if (impl_of.empty()) { error = "no named-builtin descriptors found"; return false; }
+
+    /* Where the read-only literals are, so a reference can be told from a number. */
+    uint64_t rd_lo = ~0ull, rd_hi = 0;
+    for (const Section& s : sections)
+        if (s.name.compare(0, 6, ".rdata") == 0) {
+            rd_lo = std::min(rd_lo, image_base + s.va);
+            rd_hi = std::max(rd_hi, (uint64_t)image_base + s.va + s.virtual_size);
+        }
+
+    /* 2. every RIP-relative reference from code to a descriptor, and 3. the literal
+     *    that same initializer references. Each byte offset is a candidate disp32 -
+     *    a coarse net, but the target has to BE one of the descriptors, which no
+     *    accidental displacement survives. */
+    for (const Section& s : sections) {
+        if (!(s.characteristics & 0x20000000u)) continue;
+        if (!fits(data, s.raw_offset, s.raw_size) || s.raw_size < 8) continue;
+        for (size_t i = 0; i + 4 <= s.raw_size; ++i) {
+            const int32_t disp = (int32_t)rd32(data, s.raw_offset + i);
+            const uint64_t target = image_base + s.va + i + 4 + (int64_t)disp;
+            const auto d = impl_of.find(target);
+            if (d == impl_of.end()) continue;
+            /* The initializer walks the literal before returning the descriptor, so
+             * the function body behind the reference is where the name is. */
+            const size_t lo = i > 400 ? i - 400 : 0;
+            const size_t hi = std::min((size_t)s.raw_size - 4, i + 80);
+            std::string name;
+            for (size_t j = lo; j <= hi && name.empty(); ++j) {
+                const int32_t d2 = (int32_t)rd32(data, s.raw_offset + j);
+                const uint64_t t2 = image_base + s.va + j + 4 + (int64_t)d2;
+                if (t2 < rd_lo || t2 >= rd_hi) continue;
+                const int64_t fo = va_to_file(t2, image_base, sections, data.size());
+                if (fo < 0) continue;
+                const std::string cand = reflected_c_string(data, fo);
+                /* An operator name is an identifier; anything else is a different
+                 * literal the same function happened to touch. */
+                if (cand.size() < 3 || cand.size() > 96) continue;
+                if (!(std::isalpha((unsigned char)cand[0]) || cand[0] == '_')) continue;
+                bool ident = true;
+                for (char c : cand)
+                    if (!(std::isalnum((unsigned char)c) || c == '_')) { ident = false; break; }
+                if (ident) name = cand;
+            }
+            if (name.empty()) continue;
+            NamedBuiltin row;
+            row.name = name;
+            row.key = operator_name_crc32((const uint8_t*)name.data(), name.size());
+            row.implementation_va = d->second;
+            row.descriptor_va = target;
+            out.push_back(std::move(row));
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const NamedBuiltin& a, const NamedBuiltin& b) {
+        if (a.key != b.key) return a.key < b.key;
+        return a.name < b.name;
+    });
+    out.erase(std::unique(out.begin(), out.end(), [](const NamedBuiltin& a,
+                                                     const NamedBuiltin& b) {
+        return a.key == b.key && a.name == b.name;
+    }), out.end());
+    /* A key reached from two DIFFERENT names would put the ambiguity back, so both
+     * go rather than one being picked. Measured over the whole set: none. */
+    std::vector<NamedBuiltin> kept;
+    for (size_t i = 0; i < out.size();) {
+        size_t j = i;
+        while (j < out.size() && out[j].key == out[i].key) ++j;
+        if (j - i == 1) kept.push_back(out[i]);
+        i = j;
+    }
+    out.swap(kept);
+    if (out.empty()) { error = "no named builtins resolved"; return false; }
+    return true;
+}
+
 bool resolve_named_operators(const std::string& exe_path,
                              const std::vector<uint32_t>& query_keys,
                              std::vector<NamedOperator>& out,

@@ -111,6 +111,33 @@ bool read_reflected_operators(const std::string& exe_path,
 
 uint32_t operator_name_crc32(const uint8_t* data, size_t size);
 
+/* A NAMED BUILTIN, from the registry the three scans above cannot see.
+ *
+ * These operators carry no key in the image at all. Each has a descriptor in
+ * writable data shaped {implementation qword, key u32 = 0, flags u32 = 1} - the key
+ * is zero because the engine crc32s it from the operator's NAME at first use - and a
+ * lazy initializer in code that references the name literal, hashes it into the
+ * descriptor, and returns the descriptor. The link is therefore found the other way
+ * round: from the descriptor to the code that returns it, and from there to the
+ * literal that code walks.
+ *
+ * What this buys is a CLOSED CANDIDATE SET. resolve_named_operators hashes every
+ * printable literal in the executable, so a key whose name collides with an
+ * unrelated string is withheld as ambiguous: GreaterThanFloat, LessThanFloat and
+ * AddFloat3 were all "unresolved" on a boat for that reason while being perfectly
+ * ordinary arithmetic. Hashed against these names alone the collision count over the
+ * whole set is zero, measured. */
+struct NamedBuiltin {
+    uint32_t key = 0;                 /* operator_name_crc32(name) */
+    std::string name;
+    uint64_t implementation_va = 0;
+    uint64_t descriptor_va = 0;
+};
+
+bool read_named_builtins(const std::string& exe_path,
+                         std::vector<NamedBuiltin>& out,
+                         std::string& error);
+
 /* Resolve only the requested keys against NUL-terminated printable literals
  * in the current executable. Ambiguous CRC matches are counted and withheld.
  */

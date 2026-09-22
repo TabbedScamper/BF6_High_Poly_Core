@@ -43,6 +43,14 @@ const uint32_t kCurveKeyed = 0x9AFB0561u;
 const uint32_t kBoatHull = 0x115A4FF4u;
 /* and the probe that gives it a water plane under three corners (FUN_1443EF6C0). */
 const uint32_t kWaterPlane = 0xD257C4ACu;
+/* FUN_1443EFC30: THE WATER HEIGHT AT ONE POINT. Two operands, a position and the
+ * height out. The native lifts the point by 1000 and asks every water probe in the
+ * world for its surface, keeps the LOWEST that is above the world's own water
+ * fallback, and when every probe misses (-3.4028235e+38) substitutes -1024.0, which
+ * is the same no-water answer its sibling water-plane probe gives. Offline the
+ * host's surface is one flat height, so the minimum is that height. */
+const uint32_t kWaterHeightAt = 0xED79777Au;
+const float kNoWater = -1024.0f;
 
 /* SHARED ACROSS CLASSES, transcribed from the shipped code (studies muse_shared,
  * muse_boat). Small, and each one unblocks more than one class. */
@@ -708,6 +716,11 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         /* one input, nothing out: a call into the engine with no value */
         out.input_widths = {4};
         return true;
+    case kWaterHeightAt:
+        /* a position -> the water height there */
+        out.input_widths = {16};
+        out.output_width = 4;
+        return true;
     case kWaterPlane:
         /* half width, length, centre, the body matrix, a layer -> hit flag, plane */
         out.input_widths = {4, 4, 16, 64, 4};
@@ -881,6 +894,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         {kCurveKeyed, 2},
         {kBoatHull, 7},
         {kWaterPlane, 5},
+        {kWaterHeightAt, 1},
     };
     for (const auto& m : kMinIn)
         if (m.key == key && a.size() < m.min_in) {
@@ -888,6 +902,12 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kWaterHeightAt) {
+        out.bytes.assign(4, 0);
+        wf(out.bytes, 0, body_.water ? body_.water_height : kNoWater);
+        out.known = true;
+        return true;
+    }
     if (key == kWaterPlane) {
         /* FUN_1443EF6C0: THE WATER PLANE UNDER THREE CORNERS.
          *

@@ -38,6 +38,40 @@ int main(int argc, char** argv)
         return 2;
     }
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    /* expr_disasm refl <exe>: every reflected operator's key, parameter count and
+     * descriptor, with the descriptor's call thunk (+0x28) and native (+0x38). */
+    if (std::strcmp(argv[1], "refl") == 0) {
+        const int n0 = bf6_expression_reflected_operators(argv[2], nullptr, 0, nullptr, 0);
+        std::vector<bf6_expression_reflected_operator> refl((size_t)(n0 > 0 ? n0 : 0));
+        char rerr[256] = {0};
+        const int got = bf6_expression_reflected_operators(argv[2], refl.data(), n0, rerr, (int)sizeof(rerr));
+        FILE* fx = std::fopen(argv[2], "rb");
+        std::vector<uint8_t> img;
+        if (fx) { std::fseek(fx, 0, SEEK_END); img.resize((size_t)std::ftell(fx)); std::fseek(fx, 0, SEEK_SET);
+                  if (std::fread(img.data(), 1, img.size(), fx) != img.size()) img.clear(); std::fclose(fx); }
+        auto rd32 = [&](size_t o) { uint32_t v = 0; if (o + 4 <= img.size()) std::memcpy(&v, img.data() + o, 4); return v; };
+        auto rd64 = [&](size_t o) { uint64_t v = 0; if (o + 8 <= img.size()) std::memcpy(&v, img.data() + o, 8); return v; };
+        const uint32_t pe = rd32(0x3c);
+        const uint16_t nsec = (uint16_t)rd32(pe + 6), optsz = (uint16_t)rd32(pe + 20);
+        const uint64_t base = rd64(pe + 24 + 24);
+        auto file_of = [&](uint64_t va) -> size_t {
+            for (uint16_t s = 0; s < nsec; ++s) {
+                const size_t at = pe + 24 + optsz + s * 40u;
+                const uint32_t vs = rd32(at + 8), rva = rd32(at + 12), rs = rd32(at + 16), ro = rd32(at + 20);
+                if (va >= base + rva && va < base + rva + std::min(vs, rs)) return ro + (size_t)(va - base - rva);
+            }
+            return 0;
+        };
+        for (int k = 0; k < got; ++k) {
+            const auto& r = refl[(size_t)k];
+            const size_t fo = file_of(r.descriptor_va);
+            std::printf("0x%08X params %u desc 0x%llX thunk 0x%llX native 0x%llX\n", r.key, r.parameter_count,
+                        (unsigned long long)r.descriptor_va, (unsigned long long)(fo ? rd64(fo + 0x28) : 0),
+                        (unsigned long long)(fo ? rd64(fo + 0x38) : 0));
+        }
+        std::printf("%d reflected operators%s%s\n", got, rerr[0] ? ": " : "", rerr);
+        return 0;
+    }
     const std::string res = argv[2];
     char err[512] = {0};
     bf6_ctx* c = bf6_open(argv[1], err, (int)sizeof(err));
@@ -882,6 +916,51 @@ int main(int argc, char** argv)
                 std::printf("the key-first registry gave an implementation for %zu of them\n",
                             impl_of.size());
         }
+    }
+
+    /* TYPED VALUE GROUPS: which slot and instance offsets hold a value of which
+     * reflected type. A graph whose curve descriptors are empty in the pool is
+     * filled from its own EBX at load, and these groups are the only ordered record
+     * of what goes where, so they are printed. */
+    std::printf("\n--- typed groups (instance %zu, slot %zu) ---\n",
+                g.instance_values.size(), g.slot_values.size());
+    for (const auto& grp : g.instance_values) {
+        std::printf("  instance type %08X x%zu:", grp.data_type_id, grp.offsets.size());
+        for (size_t i = 0; i < grp.offsets.size() && i < 12; ++i) std::printf(" 0x%X", grp.offsets[i]);
+        std::printf("\n");
+    }
+    for (const auto& grp : g.slot_values) {
+        std::printf("  slot     type %08X x%zu:", grp.data_type_id, grp.offsets.size());
+        for (size_t i = 0; i < grp.offsets.size() && i < 12; ++i) std::printf(" 0x%X", grp.offsets[i]);
+        std::printf("\n");
+    }
+
+    /* Pool relocations: a pointer field in the pool patched at load to point at
+     * another pool offset (array contents, type descriptors). */
+    std::printf("\n--- relocations (%zu) ---\n", g.relocations.size());
+    for (const auto& rel : g.relocations) {
+        std::printf("  pool 0x%X -> pool 0x%X", rel.pointer_field, rel.target);
+        /* What the target holds: a printable run is a name the engine resolves at
+         * load, anything else is shown as its first words. */
+        size_t printable = 0;
+        while (rel.target + printable < g.constant_pool.size() && printable < 200 &&
+               g.constant_pool[rel.target + printable] >= 32 &&
+               g.constant_pool[rel.target + printable] < 127)
+            ++printable;
+        if (printable >= 8) {
+            std::printf("  \"%.*s\"", (int)printable,
+                        (const char*)g.constant_pool.data() + rel.target);
+        } else {
+            std::printf("  words:");
+            for (size_t w = 0; w < 6 && rel.target + w * 4 + 3 < g.constant_pool.size(); ++w) {
+                uint32_t v = 0;
+                std::memcpy(&v, g.constant_pool.data() + rel.target + w * 4, 4);
+                float f = 0.f;
+                std::memcpy(&f, &v, 4);
+                std::printf(" %08X(%g)", v, f);
+            }
+        }
+        std::printf("\n");
     }
 
     /* The constant pool, as floats. Thresholds and speeds live here. */

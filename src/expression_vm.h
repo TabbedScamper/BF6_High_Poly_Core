@@ -160,6 +160,8 @@ struct Evaluation {
     Termination termination = Termination::InvalidGraph;
     Value result;
     uint32_t steps = 0;
+    /* Where the run ended: the record that returned, or the last one reached. */
+    uint32_t last_record = 0;
     uint32_t guessed_branches = 0;
     uint32_t approximated_indirect_jumps = 0;
     std::vector<uint32_t> unresolved_keys;

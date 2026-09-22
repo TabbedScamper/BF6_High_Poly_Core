@@ -30,6 +30,12 @@ struct Slots {
     std::vector<uint8_t> bind_state;
     std::vector<Operand> bind_target;
 
+    /* Every slot offset the graph names, and the ones no record ever writes. A read
+     * of a never-written slot is a read of the buffer's initial zero, and is answered
+     * as known - see the note where these are filled. */
+    std::set<uint32_t> named_slots;
+    std::set<uint32_t> never_written;
+
     /* ARRAY HEAP. Expression arrays are an 8-byte data pointer with the element
      * count at data-4 (research: expression-lerp-array-iteration-and-context-nodes).
      * Offline a pointer is a TAGGED value naming a block here, so `it != end`
@@ -64,6 +70,19 @@ struct Slots {
         Value v;
         if (!width || offset > bytes.size() || width > bytes.size() - offset)
             return v;
+        /* A never-written slot read as a value: the buffer's initial zero, known. The
+         * width is the read's own, which is why this cannot be done up front. */
+        if (width <= 16 && never_written.count(offset)) {
+            bool untouched = true;
+            for (uint32_t i = 0; i < width; ++i)
+                if (initialized[offset + i]) { untouched = false; break; }
+            if (untouched) {
+                v.bytes.assign(width, 0);
+                v.known_bytes.assign(width, 1);
+                v.known = true;
+                return v;
+            }
+        }
         v.bytes.assign(bytes.begin() + offset, bytes.begin() + offset + width);
         v.known_bytes.assign(initialized.begin() + offset, initialized.begin() + offset + width);
         v.known = true;
@@ -636,38 +655,28 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
      *
      * A slot that NO record in the graph ever writes can hold only what the slot
      * buffer starts with, which is zero. Leaving those reads unknown is conservatism
-     * with nothing behind it: there is no producer to have run too late. A boat pays
-     * for it - three of its force sums begin `acc = acc + term` against a slot
-     * nothing writes, and with the seed unknown every sum after it is unknown too.
+     * with nothing behind it: there is no producer that could have run too late. A
+     * boat pays for it - three of its force sums begin `acc = acc + term` against a
+     * slot nothing writes, and with the seed unknown every sum after it is unknown.
      *
-     * Only offsets that are never an OUTPUT are seeded. One that is written
-     * somewhere and simply has not been written yet stays unknown, because that is a
-     * real ordering question rather than an empty one. A wide write that happens to
-     * cover a seeded offset overwrites it in either order, so seeding cannot hide
-     * one. The span runs to the next offset the graph names, which is where the
-     * value ends. */
-    {
-        std::set<uint32_t> named;
-        for (const Record& rec : graph.records)
-            for (const Operand& op : rec.operands)
-                if (op.region == 2) named.insert(op.offset);
-        for (uint32_t off : named) {
-            if (written_slots.count(off)) continue;
-            /* AT MOST A VEC4. A wider never-written span is a STRUCT the graph fills
-             * from somewhere this detection does not see - a wheel config, a contact
-             * - and zeroing one invents a configuration with no radius and no mass,
-             * which is how a boat's acceleration reached 1e13 in two ticks. A value
-             * up to sixteen bytes has nowhere else to come from. */
-            const auto next = named.upper_bound(off);
-            uint32_t width = next == named.end() ? 16u : *next - off;
-            if (width > 16u) continue;
-            if (off + width > slots.bytes.size()) continue;
-            Value zero;
-            zero.bytes.assign(width, 0);
-            zero.known = true;
-            slots.write(off, width, zero);
-        }
-    }
+     * Only offsets that are never an OUTPUT qualify. One that is written somewhere
+     * and merely has not been written yet stays unknown, because that is a real
+     * ordering question rather than an empty one.
+     *
+     * The seed is given AT THE READ rather than up front, because only the read knows
+     * how wide the value is. Seeding up front had to guess the width from the
+     * distance to the next slot the graph names, and that distance is not the width:
+     * it zeroed spans that were really structs - inventing a wheel with no radius and
+     * no mass, which sent a boat's acceleration to 1e13 in two ticks - and then, once
+     * capped, skipped the isolated accumulators it was added for, which is what kept
+     * every helicopter on the ground. A read of no more than sixteen bytes is a value
+     * with nowhere else to come from; a wider one is left alone. */
+    for (const Record& rec : graph.records)
+        for (const Operand& op : rec.operands)
+            if (op.region == 2) slots.named_slots.insert(op.offset);
+    for (uint32_t off : slots.named_slots)
+        if (!written_slots.count(off)) slots.never_written.insert(off);
+
     std::map<uint32_t, unsigned> back_edges;   /* record offset -> times its back-edge ran */
     const unsigned kMaxLoop = 1024;
     /* record offset -> guessed-branch count when the run first reached it: a loop
@@ -697,6 +706,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
         uint32_t next = record.next;
         first_guess.emplace(cursor, result.guessed_branches);
 
+        result.last_record = record.offset;
         if (record.kind == 0x2c) {
             result.termination = Termination::Return;
             result.result = last_written;

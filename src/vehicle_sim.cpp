@@ -572,9 +572,10 @@ void VehicleSim::tick() {
                     }
             }
         char line[256];
-        std::snprintf(line, sizeof line, "%s: termination %d steps %u guessed %u unresolved %zu\n",
-                      g->name.c_str(), (int)r.termination, r.steps, r.guessed_branches,
-                      r.unresolved_keys.size());
+        std::snprintf(line, sizeof line,
+                      "%s: termination %d steps %u ended at rec 0x%X guessed %u unresolved %zu\n",
+                      g->name.c_str(), (int)r.termination, r.steps, r.last_record,
+                      r.guessed_branches, r.unresolved_keys.size());
         report_ += line;
         if (!r.unresolved_keys.empty()) {
             std::map<uint32_t, int> uk;

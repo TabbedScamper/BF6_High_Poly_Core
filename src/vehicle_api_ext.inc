@@ -299,6 +299,10 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         float la[3], aa[3];
         const bool kl = s.get_vec3("LinearAcceleration", la, 0);
         const bool ka = s.get_vec3("AngularAcceleration", aa, 0);
+        if (std::getenv("BF6_ACCEL_DEBUG") && v->time < 0.02)
+            std::fprintf(stderr, "channels: LinearAcceleration (%g %g %g) known %d, "
+                                 "AngularAcceleration (%g %g %g) known %d\n",
+                         la[0], la[1], la[2], (int)kl, aa[0], aa[1], aa[2], (int)ka);
         if (const char* recs = std::getenv("BF6_GRAPH_REC"))
             if (v->time > 1.99 && v->time < 2.01)
                 for (const char* p = recs; *p;) {

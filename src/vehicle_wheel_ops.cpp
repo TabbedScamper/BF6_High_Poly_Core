@@ -969,12 +969,26 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * pairing diverges. That was reading a SYMPTOM as evidence: with the linear
          * clamp at 100 instead of 20 the runaway is merely slower, and the speed
          * oscillates in sign every tick either way. The instability is in the force
-         * chain, not here. */
+         * chain, not here.
+         *
+         * CONFIRMED a second way, by marker rather than by argument: with
+         * BF6_DAMP_PROBE each output carries a distinct triple, and the host reads
+         * AngularAcceleration back as exactly the EXTRA output's triple. So the extra
+         * output is the angular one and the primary the linear one, which is what the
+         * clamps already said. Two independent lines, one from the vessel's published
+         * top speed and one from the channel the graph sums each output into. */
         const float v4[4] = {body_.v[0], body_.v[1], body_.v[2], 0.0f};
         const float w4[4] = {body_.w[0], body_.w[1], body_.w[2], 0.0f};
         out.bytes.assign(32, 0);
         damp(w4, a[1], rf(a[3], 0), 100.0f, out.bytes, 16);   /* extra: angular */
         damp(v4, a[2], rf(a[4], 0), 20.0f, out.bytes, 0);     /* primary: linear */
+        /* WHICH OUTPUT REACHES WHICH CHANNEL, measured rather than argued: with
+         * BF6_DAMP_PROBE each output carries a distinct marker, and whichever channel
+         * the host reads it out of is the one the graph sums it into. */
+        if (std::getenv("BF6_DAMP_PROBE")) {
+            const float mark[8] = {11.f, 12.f, 13.f, 0.f, 21.f, 22.f, 23.f, 0.f};
+            std::memcpy(out.bytes.data(), mark, 32);
+        }
         out.known = true;
         if (std::getenv("BF6_WHEEL_DEBUG")) {
             auto o = [&](uint32_t at) {

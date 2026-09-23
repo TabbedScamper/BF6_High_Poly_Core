@@ -79,6 +79,11 @@ const uint32_t kMotionDamping = 0x9EB2D5CEu;
  * over keyed by field count, which the record itself states: a helicopter's rotor
  * config declares fifteen, the record's count constant is 0xF, and the one field wide
  * enough to need a reference is the one argument passed as a bound register. */
+/* D7D1BAB3, which the reflected registry names (Position, TerrainPosition,
+ * TerrainHeight): a ray straight down onto the ground, which is what every wheel here
+ * already casts. Its outputs come in that order, so the primary - the last operand -
+ * is the height, with the point on the terrain as the extra before it. */
+const uint32_t kTerrainAt = 0xD7D1BAB3u;
 const uint32_t kStructBuild = 0x8B226FBBu;
 const uint32_t kStructBuildLead = 4;   /* type, count, offsets, views - then the fields */
 
@@ -751,6 +756,11 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {16};
         out.output_width = 4;
         return true;
+    case kTerrainAt:
+        out.input_widths = {16};
+        out.extra_output_widths = {16};
+        out.output_width = 4;
+        return true;
     case kStructBuild:
         /* CLAIMED SO THE CHAIN ROUTES IT HERE. The real shape needs the field count
          * the record states as a constant, which only describe_call is given, so this
@@ -963,6 +973,21 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kTerrainAt) {
+        if (!ray_) return false;
+        const float at[3] = {rf(a[0], 0), rf(a[0], 4), rf(a[0], 8)};
+        /* Down from well above the point to well below it, in the world, the way every
+         * wheel ray here is cast. No hit is a hole in the ground, not a height. */
+        const double from[3] = {at[0], at[1] + 1000.0, at[2]};
+        const double to[3] = {at[0], at[1] - 1000.0, at[2]};
+        double hit[3] = {0, 0, 0}, nrm[3] = {0, 0, 0};
+        if (!ray_(ray_user_, from, to, hit, nrm)) return false;
+        out.bytes.assign(20, 0);
+        wf(out.bytes, 0, (float)hit[1]);                  /* primary: TerrainHeight */
+        for (int i = 0; i < 3; ++i) wf(out.bytes, (uint32_t)(4 + 4 * i), (float)hit[i]);
+        out.known = true;
+        return true;
+    }
     if (key == kStructBuild) {
         if (a.size() < kStructBuildLead) return false;
         const BuilderLayout* b = builder_for(a.size() - kStructBuildLead);

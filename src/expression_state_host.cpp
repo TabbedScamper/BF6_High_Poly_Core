@@ -781,6 +781,21 @@ const uint32_t kEntryState    = 0x85766025u; /* thunk 147592EE0 -> 141564A10    
 const uint32_t kControllerOf  = 0x9D712CE7u; /* MotionMachine thunk 147EE9DB0 -> 14433B290 */
 const uint32_t kControllerFlag= 0x0CB2F866u; /* Battlefield thunk 1475F45F0 -> 1475F4510  */
 const uint32_t kGameTick      = 0x9A39505Au; /* node 0x142BCE260: tick, u16 +0x24, +0x26 */
+/* THREE MORE THE REFLECTED REGISTRY NAMES OUTRIGHT, so there is nothing to infer.
+ *
+ *   5DB3C702  (FrameStartTick, FrameEndTick, FrameStartTime, FrameEndTime, DeltaTime)
+ *   8F280F3D  (Player, Option, DefaultValue, ReturnValue)
+ *
+ * The terrain query D7D1BAB3 (Position, TerrainPosition, TerrainHeight) is a ray
+ * straight down and lives with the wheel rays, which have the tracer.
+ *
+ * The frame clock is five outputs this host already knows: it has the time and the
+ * step. The player-option lookup has its own answer built in - a lookup that
+ * finds no setting returns the DefaultValue it was handed, and offline there is never
+ * a setting, so passing the default through is the engine's own miss path rather than
+ * a stand-in. */
+const uint32_t kFrameClock    = 0x5DB3C702u;
+const uint32_t kPlayerOption  = 0x8F280F3Du;
 const uint32_t kGameTime      = 0xE2EEC2BEu; /* node 0x142BCE380: (float)double time      */
 const uint32_t kAffectorQuery = 0xCA1E499Eu; /* shape-B node -> FUN_141723e60             */
 const uint32_t kSetBytes      = 260u;        /* u32 count + 64 x u32                   */
@@ -824,6 +839,17 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         /* (handle) -> byte at +0xBC of the resolved object (server path) */
         out.input_widths = {8};
         out.output_width = 1;
+        return true;
+    case kFrameClock:
+        /* No inputs; five outputs, the last being DeltaTime. */
+        out.input_widths = {};
+        out.extra_output_widths = {4, 4, 4, 4};
+        out.output_width = 4;
+        return true;
+    case kPlayerOption:
+        /* player, option id, default -> the setting, which offline is the default */
+        out.input_widths = {4, 4, 4};
+        out.output_width = 4;
         return true;
     case kGameTick:
         /* Three operands, all outputs (rcx, rdx, r8 in record order): the timing
@@ -933,6 +959,27 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
          * source; false (0) for a null handle is the native's answer, and false is
          * also served for the vehicle's own controller until the field is named. */
         out = Value::from_bool(false);
+        return true;
+    }
+    case kFrameClock: {
+        /* Ticks at 60 Hz, times in seconds, the step last. */
+        const uint32_t tick = (uint32_t)(time_ * 60.0);
+        const float t0 = (float)time_, dt = 1.0f / 60.0f;
+        out.bytes.assign(20, 0);
+        std::memcpy(out.bytes.data() + 0, &dt, 4);          /* primary: DeltaTime */
+        std::memcpy(out.bytes.data() + 4, &tick, 4);
+        const uint32_t tick_end = tick + 1;
+        std::memcpy(out.bytes.data() + 8, &tick_end, 4);
+        const float t1 = t0 + dt;
+        std::memcpy(out.bytes.data() + 12, &t0, 4);
+        std::memcpy(out.bytes.data() + 16, &t1, 4);
+        out.known = true;
+        return true;
+    }
+    case kPlayerOption: {
+        /* The miss path: hand back the default. */
+        out = args.size() >= 3 ? args[2] : Value{};
+        out.known = true;
         return true;
     }
     case kGameTick: {

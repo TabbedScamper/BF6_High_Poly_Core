@@ -19,6 +19,11 @@ const uint32_t kSuspension = 0x8C83D835u;  /* thunk 147EE35E0 -> FUN_1443ED130 *
 const uint32_t kContactForce = 0x602F941Du; /* thunk 147EE4A40 -> FUN_1443F4840 */
 const uint32_t kGravity   = 0x43223158u;   /* thunk 147EE21A0 -> FUN_1443E7F40 */
 const uint32_t kGetCom    = 0x75311A22u;   /* thunk 147EDF970 -> FUN_1443E37D0 */
+/* MotionMachine() -> Vec3, reflected, no name recovered. The dirt bike reads it, adds
+ * (0.25, 0.17, 0.26) when a rider condition holds, and hands the sum to SetInertia
+ * (0x00945C6D) - so it is the matching GETTER: the inertia per kg the body carries
+ * (FUN_1443E3BA0 reads the stored reciprocal and inverts it back). */
+const uint32_t kGetInertia = 0xEF8DF681u;
 const uint32_t kSetCom    = 0x71C3128Fu;   /* thunk 147EDF890 -> FUN_1443E3740 */
 /* MotionMachine(Inertia), reflected void(Vec3 Inertia). The graph hands it the
  * pool inertia divided by the mass, so it sets the inertia PER KG, the same quantity
@@ -47,6 +52,14 @@ const uint32_t kCurveKeyed = 0x9AFB0561u;
 /* BOATS: the whole hull in one call (simulateBoatHullNew, FUN_1443E1130 ->
  * FUN_1443E1960 to build the surface, FUN_1443E30C0 to simulate it). */
 const uint32_t kBoatHull = 0x115A4FF4u;
+/* THE JET SKI'S HULL, the older wrapper: reflected thunk 0x147EDF590 -> FUN_1443E0340.
+ * Same surface builder (FUN_1443E1960) and force kernel (FUN_1443E30C0) as kBoatHull,
+ * but (dt, HullConfig, SimulationConfig, SimulationFrequencyOverride, WaterPlane,
+ * WavesCanAffectBoatHorizontally) -> (UnderWaterRatio, LinearAcceleration,
+ * AngularAcceleration): it RETURNS the accelerations for the graph to add into its
+ * channels instead of integrating them into the body, so the host must not also apply
+ * them. Decoded against the executable's registration and thunk. */
+const uint32_t kJetSkiHull = 0x44995CCEu;
 /* and the probe that gives it a water plane under three corners (FUN_1443EF6C0). */
 const uint32_t kWaterPlane = 0xD257C4ACu;
 /* FUN_1443EFC30: THE WATER HEIGHT AT ONE POINT. Two operands, a position and the
@@ -807,6 +820,7 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         return true;
     case kGravity:
     case kGetCom:
+    case kGetInertia:
     case kLocalGravity:
         out.output_width = 16;
         return true;
@@ -949,6 +963,17 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.extra_output_widths = {1};
         out.output_width = 16;
         return true;
+    case 0x663E5EB8u:
+        /* the motorcycle's springs (see invoke): 7 inputs -> K/D front, K/D rear */
+        out.input_widths = {0x70, 0x70, 16, 16, 0x54, 0x54, 4};
+        out.extra_output_widths = {4, 4, 4};
+        out.output_width = 4;
+        return true;
+    case kJetSkiHull:
+        out.input_widths = {4, 0x30, 0x30, 4, 16, 1};
+        out.extra_output_widths = {4, 16};
+        out.output_width = 16;
+        return true;
     case kBoatHull:
         /* dt, hull description (12 floats), hull physics (12 floats), water plane A,
          * water plane B, substep count, a flag -> submerged fraction, and the
@@ -1025,6 +1050,96 @@ bool WheelOps::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
 }
 
 bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
+    /* A 52-BYTE SUSPENSION CONFIG. FUN_1443ED130 reads its config through +0x52 with no
+     * length and no bounds check (+0x44..+0x51 unconditionally). A car's configs are 84
+     * bytes; a helicopter's (mh47) are 52, packed at a 52-byte stride as per-wheel
+     * structs, so the native reads the next 32 bytes of instance memory. For the
+     * first config that is the second config, which the graph writes every tick. For
+     * the second it is a slot only a dead switch arm writes (the dispatcher r2+29100
+     * is a pool constant), so in the game it holds the instance buffer's initial
+     * contents: zero, the same zero the graph relies on for its never-written
+     * IsFrontWheel slots. Only the over-read tail is filled, only when the 52 bytes the
+     * graph built are known, and only bytes nothing wrote. BF6_SUSP_TAIL_STRICT=1 for
+     * the old refusal. */
+    /* THE MOTORCYCLE'S SPRINGS, 0x663E5EB8: thunk 0x147EE37B0 -> FUN_1443EDA60.
+     * (WheelConfigFront, WheelConfigRear, SuspensionOffsetFront, SuspensionOffsetRear,
+     *  SuspensionConfigFront, SuspensionConfigRear, WheelCount) -> SpringK/D front, then
+     * rear. The weight is split between the axles by where the centre of mass sits
+     * between them, and each axle's stiffness is the load its share needs over its own
+     * travel and preload; the damping pair is the stiffness ratio over the wheel count.
+     * Every constant is the native's, and its divide-by-zero behaviour is kept. It
+     * reads only +0x08 of the wheel configs and offsets and +0x18/+0x20 of the
+     * suspension configs, so only those bytes need to be known. Served before the
+     * generic whole-struct gate for that reason. */
+    if (key == 0x663E5EB8u) {
+        if (a.size() < 7) return false;
+        auto kb = [](const Value& v, uint32_t off) {
+            if (v.bytes.size() < off + 4) return false;
+            if (v.known) return true;
+            if (v.known_bytes.size() < off + 4) return false;
+            for (uint32_t i = off; i < off + 4; ++i) if (!v.known_bytes[i]) return false;
+            return true;
+        };
+        if (!kb(a[0], 8) || !kb(a[1], 8) || !kb(a[2], 8) || !kb(a[3], 8) ||
+            !kb(a[4], 0x18) || !kb(a[4], 0x20) || !kb(a[5], 0x18) || !kb(a[5], 0x20) || !kb(a[6], 0))
+            return false;
+        float k_f = 0.0f, d_f = 0.0f, k_r = 0.0f, d_r = 0.0f;
+        const int32_t count = (int32_t)ru(a[6], 0);
+        if (count > 1 && (count & 1) == 0) {
+            const float front_z = rf(a[0], 8) + rf(a[2], 8);
+            const float rear_z = rf(a[1], 8) + rf(a[3], 8);
+            const float balance = (2.0f / (front_z - rear_z)) * ((rear_z + front_z) * 0.5f - body_.com[2]);
+            const float g = std::sqrt(body_.gravity[0] * body_.gravity[0] + body_.gravity[1] * body_.gravity[1] +
+                                      body_.gravity[2] * body_.gravity[2]);
+            const float inv_n = 1.0f / (float)count;
+            const float share = g * body_.mass * inv_n;
+            k_f = ((1.0f - balance) * share) / ((1.0f - rf(a[4], 0x20)) * rf(a[4], 0x18));
+            k_r = ((balance + 1.0f) * share) / ((1.0f - rf(a[5], 0x20)) * rf(a[5], 0x18));
+            const float ratio = k_f / k_r;
+            d_f = inv_n * ratio;
+            d_r = inv_n / ratio;
+        }
+        ++served_[key];
+        out.bytes.assign(16, 0);
+        wf(out.bytes, 0, d_r);            /* primary: the last operand, SpringDRear */
+        wf(out.bytes, 4, k_f);            /* then the others in operand order */
+        wf(out.bytes, 8, d_f);
+        wf(out.bytes, 12, k_r);
+        out.known = true;
+        if (std::getenv("BF6_BIKE_DEBUG"))
+            std::fprintf(stderr, "bike springs: K %g/%g  D %g/%g\n", k_f, k_r, d_f, d_r);
+        return true;
+    }
+    /* A VEC3 SETTER READS THREE LANES. SetCenterOfMass and SetInertia take a Vec3 the
+     * graph often assembles lane by lane, leaving the padding lane unwritten; the
+     * dirt bike's inertia (the body's, plus a rider term) was refused on that lane
+     * alone. Same rule as the Float3 operators: x, y and z known is enough. */
+    if ((key == kSetInertia || key == kSetCom) && a.size() == 1 && !a[0].known &&
+        a[0].bytes.size() >= 16 && a[0].known_bytes.size() >= 16) {
+        bool xyz = true;
+        for (int i = 0; i < 12 && xyz; ++i) xyz = a[0].known_bytes[(size_t)i] != 0;
+        if (xyz) {
+            std::vector<Value> b = a;
+            for (int i = 12; i < 16; ++i) b[0].known_bytes[(size_t)i] = 1;
+            b[0].known = true;
+            return invoke(key, b, out);
+        }
+    }
+    static const bool susp_strict = std::getenv("BF6_SUSP_TAIL_STRICT") != nullptr;
+    if (key == kSuspension && !susp_strict && a.size() > 6 && !a[6].known &&
+        a[6].bytes.size() >= 0x54 && a[6].known_bytes.size() >= 0x54) {
+        bool head = true;
+        for (uint32_t i = 0; i < 0x34 && head; ++i) head = a[6].known_bytes[i] != 0;
+        if (head) {
+            std::vector<Value> b = a;
+            Value& cfg = b[6];
+            for (uint32_t i = 0x34; i < 0x54; ++i)
+                if (!cfg.known_bytes[i]) { cfg.bytes[i] = 0; cfg.known_bytes[i] = 1; }
+            cfg.known = true;
+            for (uint8_t kb : cfg.known_bytes) if (!kb) { cfg.known = false; break; }
+            if (cfg.known) return invoke(key, b, out);
+        }
+    }
     /* The byte ranges each native READS of its struct inputs; padding a graph never
      * writes does not make the call unknown. {input, offset, length}. */
     struct Need { size_t in; uint32_t off, len; };
@@ -1078,6 +1193,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (key == kTrackSuspension) return i == 2 || i == 3 || i == 6;
         if (key == kTrackShare) return i % 5 == 0 || i % 5 == 3 || i % 5 == 4;
         if (key == kBoatHull) return i == 1 || i == 2 || i == 3 || i == 4;
+        if (key == kJetSkiHull) return i == 1 || i == 2;
         if (key == kWaterPlane) return i == 2 || i == 3;
         if (key == kTyreForce) return i == 4 || i == 10 || i == 11 || i == 12;
         if (key == kSuspension) return i == 1 || i == 2 || i == 3 || i == 6;
@@ -1102,7 +1218,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             const Need* nb = key == kWheelRay ? kRay : key == kSuspension ? kSusp
                            : key == kContactForce ? kContact : key == kForceAtPos ? kForce
                            : key == kWaterPlane ? kPlane
-                           : key == kBoatHull ? kHull
+                           : (key == kBoatHull || key == kJetSkiHull) ? kHull
                            : key == kTrackShare ? kShare
                            : key == kWing ? kWingNeed
                            : key == kTrackSuspension ? kTrackSusp
@@ -1114,7 +1230,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                             : key == kForceAtPos ? sizeof kForce / sizeof *kForce
                             : key == kStandStill ? sizeof kStill / sizeof *kStill
                             : key == kWaterPlane ? sizeof kPlane / sizeof *kPlane
-                            : key == kBoatHull ? sizeof kHull / sizeof *kHull
+                            : (key == kBoatHull || key == kJetSkiHull) ? sizeof kHull / sizeof *kHull
                             : key == kTrackShare ? sizeof kShare / sizeof *kShare
                             : key == kTrackSuspension ? sizeof kTrackSusp / sizeof *kTrackSusp
                             : key == kWing ? sizeof kWingNeed / sizeof *kWingNeed
@@ -1154,7 +1270,8 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         {kTrackShare, 15},
         {kCurveKeyed, 2},
         {kBoatHull, 7},
-        {kWaterPlane, 5},
+        {kJetSkiHull, 6},
+        {kWaterPlane, 4},   /* the trailing layer is optional (the jetski leaves it off) and never read */
         {kWaterHeightAt, 1},
         {kMotionDamping, 5},
         {kJetEngine, 7},
@@ -1268,7 +1385,8 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             vh[0] = r[0]; vh[1] = r[1]; vh[2] = r[2];
         }
         const float spd = std::sqrt(vh[0] * vh[0] + vh[1] * vh[1] + vh[2] * vh[2]);
-        if (!(spd > 1e-6f)) { out.bytes.assign(32, 0); out.known = true; return true; }
+        /* the kernel does all aerodynamic work only for an airflow of at least 1 m/s */
+        if (spd < 1.0f) { out.bytes.assign(32, 0); out.known = true; return true; }
         const float n[3] = {vh[0] / spd, vh[1] / spd, vh[2] / spd};
         const float chord[3] = {c(0x20), c(0x24), c(0x28)};
         /* 0x10 IS THE LIFT AXIS, and the three F-22 configs prove it between them:
@@ -1296,18 +1414,22 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                             c(0x08) * (chord[0] * n[1] - n[0] * chord[1]);
             aoa = s <= 0.0f ? -1.5707964f : 1.5707964f;
         } else {
-            float e[3] = {n[0] * lift_axis[1] - n[1] * lift_axis[0],
-                          n[1] * lift_axis[2] - n[2] * lift_axis[1],
-                          n[2] * lift_axis[0] - n[0] * lift_axis[2]};
+            /* e = n x lift, f = e x n, in ordinary XYZ. The decompiler stores the first
+             * cross product's lanes in a shuffled order; the port had copied that order
+             * as if it were XYZ, which gave a wrong angle of attack (and so a wrong lift
+             * cap). Corrected against the kernel by an adversarial decode. */
+            float e[3] = {n[1] * lift_axis[2] - n[2] * lift_axis[1],
+                          n[2] * lift_axis[0] - n[0] * lift_axis[2],
+                          n[0] * lift_axis[1] - n[1] * lift_axis[0]};
             float m = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
             if (m > 1e-12f) { e[0] /= m; e[1] /= m; e[2] /= m; }
-            float f[3] = {e[0] * n[1] - n[0] * e[1], e[1] * n[2] - n[1] * e[2],
-                          e[2] * n[0] - n[2] * e[0]};
+            float f[3] = {e[1] * n[2] - e[2] * n[1], e[2] * n[0] - e[0] * n[2],
+                          e[0] * n[1] - e[1] * n[0]};
             m = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
             if (m > 1e-12f) { f[0] /= m; f[1] /= m; f[2] /= m; }
-            const float s = (f[0] - lift_axis[0]) * n[1] + (f[1] - lift_axis[1]) * n[0] +
+            const float s = (f[0] - lift_axis[0]) * n[0] + (f[1] - lift_axis[1]) * n[1] +
                             (f[2] - lift_axis[2]) * n[2];
-            float cc = lift_axis[1] * f[0] + lift_axis[0] * f[1] + lift_axis[2] * f[2];
+            float cc = lift_axis[0] * f[0] + lift_axis[1] * f[1] + lift_axis[2] * f[2];
             if (cc <= -1.0f) cc = -1.0f;
             if (1.0f <= cc) cc = 1.0f;
             aoa = std::acos(cc) * sgn(s);
@@ -1318,8 +1440,15 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (5.0f <= a_abs) a_abs = 5.0f;
 
         const float mass = body_.mass;
-        const float speed = std::sqrt(body_.v[0] * body_.v[0] + body_.v[1] * body_.v[1] +
-                                      body_.v[2] * body_.v[2]);
+        /* THE LIFT CAP'S MULTIPLIER IS |GRAVITY|, not the body's speed: the wrapper
+         * FUN_1443F64A0 loads the vector at simulation state +0x1B0C..+0x1B14 and passes
+         * its length as the kernel's second argument. So lift is capped at 1..5 g by
+         * |AoA| in degrees. With the body speed there instead, a jet at 70 m/s had a
+         * cap seven times too high that grew with its own climb rate, and every jet
+         * climbed away uncontrollably. */
+        const float speed = std::sqrt(body_.gravity[0] * body_.gravity[0] +
+                                      body_.gravity[1] * body_.gravity[1] +
+                                      body_.gravity[2] * body_.gravity[2]);
         const float drag_cap = (spd / dt) * mass * 0.5f;
         const float lift_cap = a_abs * mass * speed;
         const float axial = vh[1] * chord[1] + vh[0] * chord[0] + vh[2] * chord[2];
@@ -1636,11 +1765,14 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (std::getenv("BF6_JET_DEBUG"))
             std::fprintf(stderr,
                          "jet: mode %u vectoring %u throttle %g rpm %g curve %g scale %g"
-                         " datum %g alt %g fade %g thrust %g dir (%g %g %g) -> dv %.2f %.2f %.2f\n",
+                         " datum %g alt %g fade %g thrust %g dir (%g %g %g) -> dv %.2f %.2f %.2f"
+                         " at (%g %g %g)+(%g %g %g) dw %.3f %.3f %.3f\n",
                          mode, (unsigned)cfg.bytes[0x118], throttle, rf(a[4], 0), rpm_curve,
                          c(0x110), datum, alt, used, thrust, dir[0], dir[1], dir[2],
                          (s.v[0] - before.v[0]) / dt, (s.v[1] - before.v[1]) / dt,
-                         (s.v[2] - before.v[2]) / dt);
+                         (s.v[2] - before.v[2]) / dt, rf(a[5], 0), rf(a[5], 4), rf(a[5], 8),
+                         c(0), c(4), c(8), (s.w[0] - before.w[0]) / dt, (s.w[1] - before.w[1]) / dt,
+                         (s.w[2] - before.w[2]) / dt);
         return true;
     }
     if (key == kHeliRotor) {
@@ -1995,7 +2127,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         out.known = true;
         return true;
     }
-    if (key == kBoatHull) {
+    if (key == kBoatHull || key == kJetSkiHull) {
         /* simulateBoatHullNew: FUN_1443E1130, which builds the hull surface
          * (FUN_1443E1960) and simulates it (FUN_1443E30C0), one triangle at a time.
          *
@@ -2251,11 +2383,13 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         /* The velocity change goes to the vehicle, not to the graph: this function
          * integrates into the body itself (FUN_1443EBAD0 on its own snapshot), and
          * what it RETURNS is two point velocities and how submerged the hull is. */
-        for (int i = 0; i < 3; ++i) {
-            hull_dv_[i] += s.v[i] - before.v[i];
-            hull_dw_[i] += s.w[i] - before.w[i];
+        if (key == kBoatHull) {
+            for (int i = 0; i < 3; ++i) {
+                hull_dv_[i] += s.v[i] - before.v[i];
+                hull_dw_[i] += s.w[i] - before.w[i];
+            }
+            hull_ran_ = true;
         }
-        hull_ran_ = true;
         /* THE OUTPUT ORDER IS THE REGISTRY'S. The executable names this operator
          * (DeltaTime, HullConfig, SimulationConfig, WaterPlane, SecondWaterPlane,
          * SecondWaterPlaneTickDifference, WavesCanAffectBoatHorizontally,
@@ -2735,6 +2869,18 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         out.bytes.assign(16, 0);
         for (int i = 0; i < 3; ++i) wf(out.bytes, 4 * i, body_.gravity[i]);
         out.known = true;
+        return true;
+    }
+    if (key == kGetInertia) {
+        out.bytes.assign(16, 0);
+        for (int i = 0; i < 3; ++i) {
+            const float inv = body_.inv_inertia[i];
+            wf(out.bytes, 4 * (uint32_t)i,
+               (inv != 0.0f && body_.mass != 0.0f) ? 1.0f / (inv * body_.mass) : 0.0f);
+        }
+        out.known = true;
+        if (std::getenv("BF6_INERTIA_DEBUG"))
+            std::fprintf(stderr, "getinertia: (%g %g %g)\n", rf(out, 0), rf(out, 4), rf(out, 8));
         return true;
     }
     if (key == kGetCom) {

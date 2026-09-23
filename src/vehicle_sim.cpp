@@ -66,7 +66,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             if (!required) continue;
             err = name + ": " + why; return false;
         }
-        g->inst.trace_records = true;
+        g->inst.trace_records = std::getenv("BF6_NO_TRACE") == nullptr;
 
         /* Each relocated pool pointer that lands on a printable run is an asset
          * reference the loader resolves: "[[guid/guid|Path/To/Expression]]". The

@@ -34,8 +34,12 @@ struct bf6_vehicle {
 
 namespace {
 
+/* The tracer is handed the VEHICLE, not its scene, and reads the scene on every ray:
+ * bf6_vehicle_set_ground swaps the scene underneath a running vehicle, and a
+ * pointer captured at open would keep tracing the freed one. */
 int bf6__vehicle_trace(void* user, const double* from, const double* to, double* hit, double* normal) {
-    bf6_ray_scene* s = (bf6_ray_scene*)user;
+    const bf6_vehicle* vv = (const bf6_vehicle*)user;
+    bf6_ray_scene* s = vv ? vv->scene : nullptr;
     double out[7] = {};
     if (!s || bf6_ray_scene_trace(s, from, to, out) < 0) return 0;
     for (int i = 0; i < 3; ++i) { hit[i] = out[i]; normal[i] = out[3 + i]; }
@@ -147,7 +151,16 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
         char merr[256] = {};
         bf6_mount_all(c, 0, merr, (int)sizeof(merr));
     }
-    const std::string simex = have(sim_a) ? sim_a : sim_b;
+    /* A HYPHENATED DESIGNATION. The MQ-9 drone's folder is mq9 but its graph is
+     * simex_veh_airplane_mq-9: the hyphen sits between the letters and the digits. */
+    std::string hy = veh;
+    {
+        size_t k = hy.size();
+        while (k > 0 && std::isdigit((unsigned char)hy[k - 1])) --k;
+        if (k > 0 && k < hy.size() && hy[k - 1] != '-') hy.insert(k, "-");
+    }
+    const std::string sim_c = dir + "/simex_veh_" + cls + "_" + hy;
+    const std::string simex = have(sim_a) ? sim_a : have(sim_b) ? sim_b : have(sim_c) ? sim_c : sim_b;
     if (!have(simex)) return fail("no drivetrain graph: " + sim_a);
     std::unique_ptr<bf6_vehicle> v(new bf6_vehicle());
     v->name = veh;
@@ -176,7 +189,7 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
         if (have(cand)) { graphs.push_back(cand); break; }
     const std::string ske = dir + "/art/ske_veh_" + cls + "_" + veh + "_base";
     std::string e;
-    if (!v->sim.open(c, exe, graphs, ske, bf6__vehicle_trace, v->scene, e)) {
+    if (!v->sim.open(c, exe, graphs, ske, bf6__vehicle_trace, v.get(), e)) {
         bf6_ray_scene_free(v->scene);
         return fail(e);
     }
@@ -513,4 +526,28 @@ void bf6_vehicle_close(bf6_vehicle* v) {
     if (!v) return;
     if (v->scene) bf6_ray_scene_free(v->scene);
     delete v;
+}
+
+/* NEW GROUND UNDER A RUNNING VEHICLE. The Godot driver re-gathers the ground as the
+ * vehicle travels, and used to do it by closing and reopening the vehicle - which
+ * zeroes the velocities and the graphs' state, so a jet that had climbed past the
+ * re-gather distance stopped dead in the air and dropped back down. This replaces the
+ * ray scene only: the new one is built first, swapped in, and the old one freed. */
+int32_t bf6_vehicle_set_ground(bf6_vehicle* v, const float* tris, int32_t vert_count) {
+    if (!v) return 0;
+    bf6_ray_scene* fresh = bf6_ray_scene_create();
+    if (!fresh) return 0;
+    int32_t added = 0;
+    if (tris && vert_count >= 3) {
+        const int32_t n = vert_count - vert_count % 3;
+        std::vector<int32_t> idx((size_t)n);
+        for (size_t i = 0; i < idx.size(); ++i) idx[i] = (int32_t)i;
+        const int32_t mesh = bf6_ray_scene_add_mesh(fresh, tris, n, idx.data(), (int32_t)idx.size());
+        const double identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        if (mesh >= 0 && bf6_ray_scene_add_instance(fresh, mesh, identity) >= 0) added = n / 3;
+    }
+    bf6_ray_scene* old = v->scene;
+    v->scene = fresh;
+    if (old) bf6_ray_scene_free(old);
+    return added;
 }

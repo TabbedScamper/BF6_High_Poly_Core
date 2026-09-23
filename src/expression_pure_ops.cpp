@@ -748,6 +748,10 @@ const float    kRadToRpm    = 9.549296379f;/* .rdata 0x1493195C4 = 0x4118C9EB = 
 const uint32_t kLerpFloat   = 0xA9C36449u; /* builtin 0x140F0C040: (a - a*t) + b*t, unclamped */
 const uint32_t kPtrNotEq    = 0x7E1F69AAu; /* node 0x1424AB3C0: *p1 != *p2 (loop guard)       */
 const uint32_t kFirstTrue   = 0xBD059C86u; /* shape-B node 0x143B67880: first true of n bools */
+/* DistanceFloat2, registered typed at 0x14226C450 (expression_operator_registrations.tsv):
+ * two Float2 in 16-byte storage, sqrt((ax-bx)^2 + (ay-by)^2). Keyed here because no
+ * name was recovered for it, which left the dirt bike's suspension geometry unknown. */
+const uint32_t kDistance2   = 0x9429CBB1u;
 const uint32_t kCurveBytes = 15u * 8u;    /* 15 (x, y) float pairs                         */
 const uint32_t kGearBytes  = 0x54u;       /* 10 forward, 10 reverse, final drive at +0x50  */
 
@@ -800,9 +804,14 @@ bool RecoveredOps::describe(uint32_t key, OperatorSignature& out) {
         out.output_width = 4;
         return true;
     case kIdValid:   out.input_widths = {4};  out.output_width = 1;  return true;
+    case kDistance2: out.input_widths = {16, 16}; out.output_width = 4; return true;
     case kLtFlagCopy:out.input_widths = {64}; out.output_width = 64; return true;
     case kLtToM44:   out.input_widths = {64}; out.output_width = 64; return true;
-    case kVec3Length:out.input_widths = {16}; out.output_width = 4;  return true;
+    /* NOT a Vec3 length: the reflected registry names 0x672C0739
+     * MotionMachine(Plane, Pos, Height), the thunk passes both pointers, and every
+     * call hands it a water plane and a point. Declared with one input, all of those
+     * calls were unresolved. See the invoke for what it computes. */
+    case kVec3Length:out.input_widths = {16, 16}; out.output_width = 4;  return true;
     case kU32Cast:   out.input_widths = {4};  out.output_width = 4;  return true;
     case kCurve15:   out.input_widths = {kCurveBytes, 4}; out.output_width = 4; return true;
     case kCurveScale:out.input_widths = {4, 4, 4, kCurveBytes}; out.output_width = 4; return true;
@@ -890,6 +899,23 @@ bool RecoveredOps::describe_call(uint32_t key, const std::vector<uint32_t>& cons
 }
 
 bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
+    if (key == kDistance2) {
+        if (args.size() != 2) return false;
+        for (const Value& v : args) {
+            if (v.bytes.size() < 8) return false;
+            bool k = v.known;   /* only the two x/y lanes are read */
+            if (!k && v.known_bytes.size() >= 8) { k = true; for (int i = 0; i < 8; ++i) k = k && v.known_bytes[(size_t)i]; }
+            if (!k) return false;
+        }
+        float ax, ay, bx, by;
+        std::memcpy(&ax, args[0].bytes.data(), 4); std::memcpy(&ay, args[0].bytes.data() + 4, 4);
+        std::memcpy(&bx, args[1].bytes.data(), 4); std::memcpy(&by, args[1].bytes.data() + 4, 4);
+        const float dx = ax - bx, dy = ay - by;
+        const float r = std::sqrt(dx * dx + dy * dy);
+        out.bytes.assign(4, 0); std::memcpy(out.bytes.data(), &r, 4); out.known = true;
+        served_[key] += 1;
+        return true;
+    }
     if (key == kFirstTrue) {
         /* 0x143B67880, disassembled: n = *inputs[0]; for i in 0..n-1, if the byte at
          * inputs[1 + i] is non-zero the result is i; none -> 0xFFFFFFFF. */
@@ -992,11 +1018,31 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
         return true;
     }
     case kVec3Length: {
-        float v[3];
-        std::memcpy(v, args[0].bytes.data(), 12);
-        const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        /* FUN_1443E5000, read from the machine code (the decompile showed only its
+         * first sqrt): the PLANE'S HEIGHT UNDER THE POINT. A vertical segment through
+         * Pos, from y+1024 (B) down to y-1024 (A), is intersected with Plane
+         * (n.xyz, d) and the intersection's y is returned - the water level at that
+         * x/z, not the point's height above it. |n| == 0 or a segment parallel to the
+         * plane returns -1024 (.rdata 0x14931A0C8), the native's no-water answer. */
+        if (args.size() < 2) return false;
+        float pl[4], pt[3];
+        std::memcpy(pl, args[0].bytes.data(), 16);
+        std::memcpy(pt, args[1].bytes.data(), 12);
+        float h = -1024.0f;
+        const float nl = std::sqrt(pl[0] * pl[0] + pl[1] * pl[1] + pl[2] * pl[2]);
+        if (nl != 0.0f) {
+            const float A[3] = {pt[0], pt[1] - 1024.0f, pt[2]};
+            const float B[3] = {pt[0], pt[1] + 1024.0f, pt[2]};
+            const float denom = (A[0] - B[0]) * pl[0] + (A[1] - B[1]) * pl[1] + (A[2] - B[2]) * pl[2];
+            if (denom != 0.0f) {
+                const float num = (-pl[3] * pl[0] - B[0]) * pl[0] + (-pl[3] * pl[1] - B[1]) * pl[1] +
+                                  (-pl[3] * pl[2] - B[2]) * pl[2];
+                const float t = num / denom;
+                h = (B[1] - t * B[1]) + t * A[1];
+            }
+        }
         out.bytes.assign(4, 0);
-        std::memcpy(out.bytes.data(), &len, 4);
+        std::memcpy(out.bytes.data(), &h, 4);
         return true;
     }
     case kU32Cast:

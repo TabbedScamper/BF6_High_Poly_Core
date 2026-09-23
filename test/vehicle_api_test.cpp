@@ -4,6 +4,7 @@
  * unless the vehicle moves forward, shifts at least twice and stops under braking. */
 #include "bf6_core.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -81,9 +82,39 @@ int main(int argc, char** argv) {
             cp = cp > lim ? lim : (cp < -lim ? -lim : cp);
             cr = cr > lim ? lim : (cr < -lim ? -lim : cr);
         }
+        /* BF6_JET_LEVEL=<k>: the same idea for a fixed-wing aircraft, whose signs are
+         * measured separately (f16, airborne): InputPitch +0.5 turns the nose DOWN
+         * (angular velocity x positive) and InputRoll +0.5 raises the RIGHT wing
+         * (angular velocity z positive, ~0.85 rad/s). The body's forward axis
+         * fz = qrot(q, (0,0,1)) has fz.y = sin(nose-up angle); its right axis
+         * fx = qrot(q, (1,0,0)) has fx.y = sin(right-wing-up angle). */
+        static const float jlvl = std::getenv("BF6_JET_LEVEL") ? (float)std::atof(std::getenv("BF6_JET_LEVEL")) : 0.0f;
+        if (jlvl != 0.0f) {
+            const float qx = out[3], qy = out[4], qz = out[5], qw = out[6];
+            const float fz_y = 2.0f * (qy * qz - qw * qx);   /* forward (0,0,1) -> y */
+            const float fx_y = 2.0f * (qx * qy + qw * qz);   /* right (1,0,0) -> y   */
+            cp = jlvl * (fz_y * 4.0f - out[10] * 0.8f);
+            cr = -jlvl * (fx_y * 4.0f + out[12] * 0.8f);
+            const float lim = 1.0f;
+            cp = cp > lim ? lim : (cp < -lim ? -lim : cp);
+            cr = cr > lim ? lim : (cr < -lim ? -lim : cr);
+        }
         bf6_vehicle_set_cyclic(v, cp, cr);
         const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
+        /* BF6_TIMING=1: the slowest step and the total, per simulated second - whether a
+         * phase of flight (lift-off, say) makes the core itself stall the caller. */
+        static double t_sum = 0.0, t_max = 0.0;
+        const auto t0 = std::chrono::steady_clock::now();
         if (bf6_vehicle_step(v, in, out) < 33) { std::fprintf(stderr, "step failed\n"); return 2; }
+        if (std::getenv("BF6_TIMING")) {
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            t_sum += ms; if (ms > t_max) t_max = ms;
+            if (f % 60 == 59) {
+                std::printf("timing t %4.1f  alt %7.2f  step max %7.2f ms  sum %8.1f ms/s\n",
+                            (f + 1) / 60.0, out[1], t_max, t_sum);
+                t_sum = 0.0; t_max = 0.0;
+            }
+        }
         /* out: 0-2 pos, 3-6 quat, 7-9 vel, 10-12 angvel, 13 speed, 14 rpm,
          * 15 gear ratio, 16 clutch, 17 throttle, 18 brake */
         if (out[15] != last_ratio && last_ratio != 0.0f && out[15] > 0.0f) ++shifts;

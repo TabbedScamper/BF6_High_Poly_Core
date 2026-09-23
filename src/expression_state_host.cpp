@@ -264,13 +264,17 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
      * successfully and then invoked on nobody, and fails. That is exactly what kept
      * these three unresolved after they were first implemented. Fixed-shape, so the
      * per-key answer is the same as the per-call one. */
-    /* 0x532B3BA9: (object, field 0) -> a reference to the object's storage, which a
-     * kind 0x2E record binds for the region-3 reads after it (FUN_1438068f0 builds a
-     * type-pointer/address pair; 16 bytes). The VM resolves it; invoke is not used. */
+    /* 0x532B3BA9: (object, selector) -> the address of a field, which a kind 0x2E record
+     * binds for the region-3 reads after it. It is the SAME nine bytes as 0x88030F01
+     * (0x143B25460: object + dword[selector]) - verified from the node registry by an
+     * adversarial decode. The FUN_1438068f0 (type, address) pair it was once paired with
+     * in EngineNodes.tsv is not its implementation, and that pairing is what made every
+     * non-zero field look unmeasured. The VM resolves it; invoke is not used. */
     if (key == 0x532B3BA9u) {
         out.input_widths = {4, 4};
         out.output_width = 16;
         out.output_is_reference_to_input0 = true;
+        out.reference_offset_from_input1 = true;
         return true;
     }
     /* 0x88030F01: the same thing one field in. Nine bytes of machine code at
@@ -329,12 +333,6 @@ void StateHost::set_named_transform(uint32_t name_hash, const float rows[16]) {
 
 bool StateHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
                               OperatorSignature& out) {
-    if (key == 0x532B3BA9u && consts.size() >= 2 && consts[1] != 0u) {
-        /* Every measured call passes field 0 (403 of 403); a non-zero field would
-         * need an offset rule nobody has measured, so refuse it. */
-        out = OperatorSignature{};
-        return false;
-    }
     if (key == kNamedTransform && consts.size() >= 3) {
         /* All three operands constants and a mode this measurement has seen;
          * anything else is refused rather than guessed. */
@@ -434,8 +432,8 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
                 if ((uint32_t)ck == (uint32_t)std::strtoul(tr, nullptr, 16)) {
                     float f[3] = {0, 0, 0};
                     if (v.bytes.size() >= 12) std::memcpy(f, v.bytes.data(), 12);
-                    std::fprintf(stderr, "chtrace %08X %s %g %g %g\n", (uint32_t)ck,
-                                 v.known ? "known" : "UNKNOWN", f[0], f[1], f[2]);
+                    std::fprintf(stderr, "chtrace %08X rec 0x%X %s %g %g %g\n", (uint32_t)ck,
+                                 cur_record_, v.known ? "known" : "UNKNOWN", f[0], f[1], f[2]);
                 }
             if (v.known) {
                 channels_[ck] = std::vector<uint8_t>(v.bytes.begin(),
@@ -816,6 +814,18 @@ const uint32_t kHandleOfFirst = 0x63D604B7u; /* thunk 147E0E790 / native 143EDC9
 const uint32_t kPartitionA    = 0xB7F6A5BDu; /* thunk 1475E3700 -> 141727020           */
 const uint32_t kPartitionB    = 0xF87C766Au; /* thunk 1475E39E0 (sub-filter -1)        */
 const uint32_t kEntryState    = 0x85766025u; /* thunk 147592EE0 -> 141564A10           */
+/* THREE THE DIRT BIKE NEEDS, decoded from their natives:
+ *   0x77E24C80 Battlefield(Subjects, Tags) -> subjects carrying every tag. FUN_1417443C0
+ *              clears the result first; this world has no tagged entities: empty.
+ *   0x0F063D92 a skeleton constraint (FUN_1443342C0 -> FUN_144335CB0): two bone
+ *              references and a 64-byte block, NO result. No skeleton offline: no-op.
+ *   0xF743C0B8 current RealmEx == input (FUN_14566BA10). The offline vehicle is the
+ *              authoritative, server half: true only for RealmEx_Server 0x98BE5555.
+ *              The bike tests Client (0xBF0F9789), which gates a client-only reset. */
+const uint32_t kFilterByTags  = 0x77E24C80u;
+const uint32_t kBoneConstraint= 0x0F063D92u;
+const uint32_t kRealmEquals   = 0xF743C0B8u;
+const uint32_t kRealmServer   = 0x98BE5555u;
 /* 0x893E29C6 is NOT a*b: the reflected registry names it MotionMachine(Rpm, GearRatio,
  * AverageDriveWheelSpeed, Load) - three inputs, engine load out. Not served here. */
 const uint32_t kControllerOf  = 0x9D712CE7u; /* MotionMachine thunk 147EE9DB0 -> 14433B290 */
@@ -933,6 +943,18 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.extra_output_widths = {kSetBytes, 4, 1, 4};
         out.output_width = 4;
         return true;
+    case kFilterByTags:
+        out.input_widths = {kSetBytes, 8};
+        out.output_width = kSetBytes;
+        return true;
+    case kBoneConstraint:
+        out.input_widths = {16, 16, 64};
+        out.output_width = 0;
+        return true;
+    case kRealmEquals:
+        out.input_widths = {4};
+        out.output_width = 1;
+        return true;
     case kAffectorPick:
         /* (target set, affector ptr) -> (giver set, giver id, active, rank, duration,
          * escalation); the primary is the last */
@@ -964,6 +986,12 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
 bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
     OperatorSignature sig;
     if (!describe(key, sig) || args.size() != sig.input_widths.size()) return false;
+    if (key == kBoneConstraint) {       /* a side effect with no result: no-op */
+        served_[key] += 1;
+        out = Value{};
+        out.known = true;
+        return true;
+    }
     for (size_t i = 0; i < args.size(); ++i)
         if (!args[i].known || args[i].bytes.size() < sig.input_widths[i]) return false;
     if (key == kTweakFloat || key == kTweakBool) {
@@ -971,6 +999,16 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (it == tweakables_.end()) return false;
         served_[key] += 1;
         out = key == kTweakBool ? Value::from_bool(it->second != 0) : Value::from_u32(it->second);
+        return true;
+    }
+    if (key == kFilterByTags) {
+        served_[key] += 1;
+        out = empty_set();
+        return true;
+    }
+    if (key == kRealmEquals) {
+        served_[key] += 1;
+        out = Value::from_bool(args[0].as_u32() == kRealmServer);
         return true;
     }
     if (key == kAffectorPick) {

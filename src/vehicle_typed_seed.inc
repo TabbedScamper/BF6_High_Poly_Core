@@ -318,7 +318,54 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             by_base[rec.operands[0].offset].push_back({rec.operands[1].offset,
                                                       rec.operands[0].offset});
         }
+        /* THE WIDE FIELDS' CALLS. 0x532B3BA9 is the same nine bytes at 0x143B25460 as
+         * 0x88030F01 (object + dword[selector]); a graph uses it for fields too wide to
+         * pass by value (a Vec3, a 120-byte curve), binding the address for region-3
+         * reads. Its selectors were never patched, so every wide reference pointed at
+         * the struct's first byte: an F-14's mirrored engine config was built with its
+         * RPM curve holding the source's position vector, and that engine made 1.92 N
+         * against its twin's 72,700. Wide fields take these calls the way narrow fields
+         * take theirs - in reflection order, by selector order. */
+        std::map<uint32_t, std::vector<Call>> by_base_wide;
+        if (!std::getenv("BF6_WIDE_FIELDS_OFF"))
+            for (const auto& rec : gr->records) {
+                if (!rec.has_operator || rec.operator_key != 0x532B3BA9u ||
+                    rec.operands.size() < 2) continue;
+                if (rec.operands[0].region != 2 || rec.operands[1].region != 0) continue;
+                by_base_wide[rec.operands[0].offset].push_back({rec.operands[1].offset,
+                                                               rec.operands[0].offset});
+            }
         std::map<uint32_t, uint32_t> sel_patch;
+        for (auto& kv : by_base_wide) {
+            const auto ty = slot_type.find(kv.first);
+            if (ty == slot_type.end()) continue;
+            bf6::TypeGuid g{};
+            if (!ctx->types->guid_by_name_hash(ty->second, g)) continue;
+            const bf6::TypeLayout& lay = ctx->types->layout_full(g);
+            if (!lay.valid || lay.fields.empty()) continue;
+            std::sort(kv.second.begin(), kv.second.end(),
+                      [](const Call& a, const Call& b) { return a.selector < b.selector; });
+            std::vector<uint32_t> sorted_off;
+            for (const auto& f : lay.fields) sorted_off.push_back(f.offset);
+            std::sort(sorted_off.begin(), sorted_off.end());
+            std::vector<uint32_t> wide;
+            for (const auto& f : lay.fields) {
+                const auto nx = std::upper_bound(sorted_off.begin(), sorted_off.end(), f.offset);
+                const uint32_t end = nx == sorted_off.end() ? lay.size : *nx;
+                if (end - f.offset > 8 && (f.offset & 3u) == 0) wide.push_back(f.offset);
+            }
+            if (kv.second.size() != wide.size()) {
+                if (dbg)
+                    std::fprintf(stderr, "seed: slot 0x%X has %zu wide field calls for %zu wide"
+                                         " field(s): left alone\n",
+                                 kv.first, kv.second.size(), wide.size());
+                continue;
+            }
+            for (size_t i = 0; i < wide.size(); ++i) sel_patch[kv.second[i].selector] = wide[i];
+            if (dbg)
+                std::fprintf(stderr, "seed: slot 0x%X type %08X, %zu wide field reference(s)\n",
+                             kv.first, ty->second, wide.size());
+        }
         for (auto& kv : by_base) {
             const auto ty = slot_type.find(kv.first);
             if (ty == slot_type.end()) continue;
@@ -508,6 +555,12 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             };
             for (const auto& pl : ref_places)
                 if (direct.count(pl.pool_offset)) bind(pl.pool_offset, *pl.value, "binding table");
+            if (dbg)
+                for (const auto& pl : ref_places)
+                    if (!direct.count(pl.pool_offset))
+                        std::fprintf(stderr, "seed: ref placement pool 0x%X (%u) -> instance [%td],"
+                                             " not a direct curve operand\n",
+                                     pl.pool_offset, pl.pool_offset, pl.value - kept.data());
             if (dbg)
                 for (uint32_t p : direct)
                     if (!patches.count(p))

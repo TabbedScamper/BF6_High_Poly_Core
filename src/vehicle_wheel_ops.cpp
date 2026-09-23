@@ -20,6 +20,10 @@ const uint32_t kContactForce = 0x602F941Du; /* thunk 147EE4A40 -> FUN_1443F4840 
 const uint32_t kGravity   = 0x43223158u;   /* thunk 147EE21A0 -> FUN_1443E7F40 */
 const uint32_t kGetCom    = 0x75311A22u;   /* thunk 147EDF970 -> FUN_1443E37D0 */
 const uint32_t kSetCom    = 0x71C3128Fu;   /* thunk 147EDF890 -> FUN_1443E3740 */
+/* MotionMachine(Inertia), reflected void(Vec3 Inertia). The graph hands it the
+ * pool inertia divided by the mass, so it sets the inertia PER KG, the same quantity
+ * the host integrates with. */
+const uint32_t kSetInertia = 0x00945C6Du;
 const uint32_t kLocalGravity = 0x95C847CFu; /* thunk 147EE20C0 -> FUN_1443E79D0 */
 const uint32_t kForceAtPos = 0x9855872Eu;  /* thunk 147EE2280 -> FUN_1443E7FF0 */
 const uint32_t kAutoBrake = 0xEEB0D8D7u;   /* thunk 147EE4D40 -> FUN_1443F57A0 */
@@ -839,6 +843,7 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.output_width = 16;
         return true;
     case kSetCom:
+    case kSetInertia:
         /* one Vec3 input, no output: a side effect on the body */
         out.input_widths = {16};
         return true;
@@ -1006,7 +1011,11 @@ bool WheelOps::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
     if (!describe(key, out)) return false;
     /* operands = inputs + outputs (these calls have no context list), so a record with
      * fewer operands than the signature is one that left trailing inputs off. */
-    const size_t outs = 1 + out.extra_output_widths.size();
+    /* A call with no output (0x71C3128F sets the centre of mass and returns nothing)
+     * has no output operand. Counting one anyway took an aircraft's single Vec3 for an
+     * output, trimmed its only input away, and left every aircraft with its centre of
+     * mass at the origin - the F-16's is (0, 1.66, -1.57), just ahead of its mains. */
+    const size_t outs = (out.output_width ? 1u : 0u) + out.extra_output_widths.size();
     if (consts.size() >= outs) {
         const size_t ins = consts.size() - outs;
         if (ins < out.input_widths.size() && ins + 2 >= out.input_widths.size())
@@ -2736,10 +2745,19 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         out.known = true;
         return true;
     }
+    if (key == kSetInertia) {
+        for (int i = 0; i < 3; ++i) inertia_per_kg_[i] = rf(a[0], 4 * i);
+        inertia_set_ = true;
+        out.bytes.clear();
+        out.known = true;
+        return true;
+    }
     if (key == kSetCom) {
         /* FUN_1443E3740 -> FUN_1435D0F80: move the body's centre of mass */
         for (int i = 0; i < 3; ++i) body_.com[i] = rf(a[0], 4 * i);
         com_set_ = true;
+        if (std::getenv("BF6_COM_DEBUG"))
+            std::fprintf(stderr, "setcom call: (%g %g %g)\n", body_.com[0], body_.com[1], body_.com[2]);
         out.bytes.clear();
         out.known = true;
         return true;
@@ -3185,6 +3203,14 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             r2.f[i] = dt * (0.0f - st.lat_axis[i]) * f_lat * force_scale;
             r2.p[i] = P[i] + H[i];
         }
+        if (std::getenv("BF6_TYRE_LEVER"))
+            std::fprintf(stderr, "tyre lever: P (%.3f %.3f %.3f) H (%.3f %.3f %.3f) LH (%.3f %.3f %.3f)"
+                         " com (%.3f %.3f %.3f) f_lat %.1f lat_axis (%.3f %.3f %.3f)"
+                         " cvel (%.3f %.3f %.3f) w (%.4f %.4f %.4f) slip %.4f\n",
+                         P[0], P[1], P[2], H[0], H[1], H[2], LH[0], LH[1], LH[2],
+                         s.com[0], s.com[1], s.com[2], f_lat,
+                         st.lat_axis[0], st.lat_axis[1], st.lat_axis[2],
+                         st.vel[0], st.vel[1], st.vel[2], s.w[0], s.w[1], s.w[2], slip_angle);
         if (finite3(r1.f) && finite3(r1.p)) recs.push_back(r1);
         if (finite3(r2.f) && finite3(r2.p)) recs.push_back(r2);
         /* friction torque back on the wheel, no overshoot through rolling speed */

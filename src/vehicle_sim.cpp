@@ -825,7 +825,7 @@ void VehicleSim::tick() {
          * refusal could only be located by walking the graph by hand. */
         if (std::getenv("BF6_REFUSED_DETAIL"))
             for (const auto& d : r.diagnostics)
-                if (d.rfind("host invoke failed", 0) == 0) report_ += "  " + d + "\n";
+                if (d.rfind("host invoke failed", 0) == 0 || d.rfind("unresolved at record", 0) == 0) report_ += "  " + d + "\n";
         for (const auto& d : r.diagnostics)
             if (d.find(" @") != std::string::npos) {
                 const unsigned long off = std::stoul(d.substr(d.rfind('@') + 1));

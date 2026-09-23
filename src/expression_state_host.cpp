@@ -428,6 +428,15 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
              * then zero. The channel now stays UNKNOWN until the
              * next known write. BF6_CHANNEL_LAUNDER=1 restores the old erase, for A/B. */
             static const bool honest = std::getenv("BF6_CHANNEL_LAUNDER") == nullptr;
+            /* BF6_CHANNEL_TRACE=<hex hash>: every write of that channel, all lanes, in
+             * order - the accumulation chain of a force channel one step at a time. */
+            if (const char* tr = std::getenv("BF6_CHANNEL_TRACE"))
+                if ((uint32_t)ck == (uint32_t)std::strtoul(tr, nullptr, 16)) {
+                    float f[3] = {0, 0, 0};
+                    if (v.bytes.size() >= 12) std::memcpy(f, v.bytes.data(), 12);
+                    std::fprintf(stderr, "chtrace %08X %s %g %g %g\n", (uint32_t)ck,
+                                 v.known ? "known" : "UNKNOWN", f[0], f[1], f[2]);
+                }
             if (v.known) {
                 channels_[ck] = std::vector<uint8_t>(v.bytes.begin(),
                                 v.bytes.begin() + std::min<size_t>(v.bytes.size(), ch->width));
@@ -829,6 +838,27 @@ const uint32_t kFrameClock    = 0x5DB3C702u;
 const uint32_t kPlayerOption  = 0x8F280F3Du;
 const uint32_t kGameTime      = 0xE2EEC2BEu; /* node 0x142BCE380: (float)double time      */
 const uint32_t kAffectorQuery = 0xCA1E499Eu; /* shape-B node -> FUN_141723e60             */
+/* 0xA1D70F8E MotionMachine(ToFilter, Filter, ReturnValue): thunk 0x147EEA460, native
+ * 0x147EEA320. Filters a set's ids against the current execution context (TLS) under
+ * the flag bytes at +9/+10 of the constant Filter struct. Only the case whose RESULT
+ * does not depend on that context is served: the native clears the result first and
+ * inserts only inside the loop over members, so an EMPTY set filters to an empty set.
+ * Slot 2 (0x85A781A7) is the related Vehicle; C22CF89C after it is a
+ * PlayerAbilityState lookup (5 = Active, 7 = Invalid on a miss), not a seat state. */
+const uint32_t kFilterSet     = 0xA1D70F8Eu;
+/* 0xEA5D1359 Aiming(EntryTagId -> Yaw, Pitch, Roll, ZoomLevel): thunk 0x14736B4A0 ->
+ * FUN_1405794A0, which ZEROES all four outputs first and fills them only when an
+ * entry in the vehicle's entry list carries the tag (vtable +0x250 gives the trio,
+ * +0x258 the zoom; a second mode uses +0x270/+0x278). Nobody aiming offline is that
+ * miss path: all zero. Outputs named by reflection descriptor 0x14AF1E1E8. */
+const uint32_t kAiming        = 0xEA5D1359u;
+/* 0x02C66B00 Battlefield(TargetList, Affector -> LastGiver, LastGiverPlayerId, IsActive,
+ * Rank, Duration, EscalationLevel): thunk -> FUN_141727850, which first sets Rank,
+ * Duration, EscalationLevel = 0, LastGiverPlayerId = 0xFFFFFFFF, IsActive = 0 and clears
+ * the LastGiver set (FUN_147f13ab0), then overwrites them only for a target entity that
+ * carries the affector. No entity here carries one. The f16 guessed IsActive TRUE, which
+ * zeroes the throttle channel below 100 (records @3304..@3536). */
+const uint32_t kAffectorPick  = 0x02C66B00u;
 const uint32_t kSetBytes      = 260u;        /* u32 count + 64 x u32                   */
 const uint32_t kNoId          = 0x000FFFFFu; /* DAT_149b71b48                          */
 
@@ -903,6 +933,24 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.extra_output_widths = {kSetBytes, 4, 1, 4};
         out.output_width = 4;
         return true;
+    case kAffectorPick:
+        /* (target set, affector ptr) -> (giver set, giver id, active, rank, duration,
+         * escalation); the primary is the last */
+        out.input_widths = {kSetBytes, 8};
+        out.extra_output_widths = {kSetBytes, 4, 1, 4, 4};
+        out.output_width = 4;
+        return true;
+    case kAiming:
+        /* (entry tag) -> (yaw, pitch, roll, zoom); the primary is the last */
+        out.input_widths = {4};
+        out.extra_output_widths = {4, 4, 4};
+        out.output_width = 4;
+        return true;
+    case kFilterSet:
+        /* (set, constant filter struct) -> set */
+        out.input_widths = {kSetBytes, 12};
+        out.output_width = kSetBytes;
+        return true;
     case kEntryState:
         /* (entity/slot, bool gate) -> (state int, ==0, ==1, ==2, ==3) */
         out.input_widths = {4, 1};
@@ -923,6 +971,31 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (it == tweakables_.end()) return false;
         served_[key] += 1;
         out = key == kTweakBool ? Value::from_bool(it->second != 0) : Value::from_u32(it->second);
+        return true;
+    }
+    if (key == kAffectorPick) {
+        served_[key] += 1;
+        const Value none = empty_set();
+        const uint32_t no_player = 0xFFFFFFFFu;
+        out.bytes.assign(4, 0);                                               /* escalation */
+        out.bytes.insert(out.bytes.end(), none.bytes.begin(), none.bytes.end()); /* giver set */
+        out.bytes.insert(out.bytes.end(), (const uint8_t*)&no_player, (const uint8_t*)&no_player + 4);
+        out.bytes.insert(out.bytes.end(), 1 + 4 + 4, 0);                   /* active, rank, duration */
+        out.known = true;
+        return true;
+    }
+    if (key == kAiming) {
+        served_[key] += 1;
+        out.bytes.assign(16, 0);                 /* zoom (primary), yaw, pitch, roll */
+        out.known = true;
+        return true;
+    }
+    if (key == kFilterSet) {
+        uint32_t count = 0;
+        std::memcpy(&count, args[0].bytes.data(), 4);
+        if (count != 0) return false;          /* context-dependent: not served */
+        served_[key] += 1;
+        out = empty_set();
         return true;
     }
     served_[key] += 1;

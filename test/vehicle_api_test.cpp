@@ -1,3 +1,4 @@
+#include <algorithm>
 /* The drivable-vehicle C ABI end to end: open the flyer60 on a flat plane, full
  * throttle for 8 s, then brake; print what bf6_vehicle_step returns. Fails (exit 3)
  * unless the vehicle moves forward, shifts at least twice and stops under braking. */
@@ -96,6 +97,12 @@ int main(int argc, char** argv) {
                         "quat (%.3f %.3f %.3f %.3f)\n",
                         f / 60.0, out[0], out[1], out[2], out[7], out[8], out[9],
                         out[3], out[4], out[5], out[6]);
+        /* BF6_ANGVEL=<frames>: angular velocity (world) and lateral velocity every N
+         * frames - whether a torque is feeding on the rate it should damp. */
+        if (const char* av = std::getenv("BF6_ANGVEL"))
+            if (f % std::max(1, std::atoi(av)) == 0)
+                std::printf("av %d  angvel (%8.4f %8.4f %8.4f)  vel (%7.3f %7.3f %7.3f)\n", f,
+                            out[10], out[11], out[12], out[7], out[8], out[9]);
         if (f % 60 == 0 && !std::getenv("BF6_XYZ"))
             std::printf("t %4.1f  z %7.2f  speed %6.2f  rpm %5.0f  ratio %6.3f  clutch %.2f  thr %.2f  brk %.2f\n",
                         f / 60.0, out[2], out[13], out[14], out[15], out[16], out[17], out[18]);

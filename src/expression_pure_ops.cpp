@@ -284,22 +284,22 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
      * and the refusal took the matrix transform, the second add and the normaliser after
      * it down too. So for an operator whose EVERY input is a Float3, x/y/z known is
      * enough. RotateFloat3 is left out on purpose: its quaternion's fourth lane is data. */
-    /* OPT-IN, measured: BF6_FLOAT3_XYZ=1. The rule is right - these operators read three
-     * lanes - and it frees two vehicles (the cb90 drives at 13 m/s, the fa18f flies at 47
-     * m/s and 196 m, both stuck before). But it makes more of every plane's real maths run,
-     * and on the f22 that exposes a gear defect: once its airspeed is KNOWN (0 km/h at
-     * rest, via the MagnitudeFloat3 at record 3204) the graph enters a ground-proximity
-     * prediction loop, the loop guard aborts the whole run at its back-edge after 291
-     * steps, and even with the guard relaxed the suspension and tyres then do not run at
-     * all, so the aircraft falls through the runway at -9.81. Off by default until the f22
-     * gear path is understood, rather than blessing a regression. */
-    static const bool relax_float3 = std::getenv("BF6_FLOAT3_XYZ") != nullptr;
+    /* ON BY DEFAULT since the aircraft blocks were cleared (BF6_FLOAT3_STRICT=1 for A/B).
+     * It was opt-in because on the f22 it exposed what looked like a gear defect: once the
+     * airspeed was known the gear stopped running and the jet fell through the runway.
+     * The gear was never at fault. Its master gate reads the Airborne State channel, and
+     * that channel was being set by a block behind an UNRESOLVED affector query
+     * (0x02C66B00) whose IsActive the VM guessed true - a "vehicle disabled" effect that
+     * also zeroes the throttle. With that query answered (FUN_141727850's own miss path),
+     * every jet takes off under this rule, and the boat drives. */
+    static const bool relax_float3 = std::getenv("BF6_FLOAT3_STRICT") == nullptr;
     const bool all_float3 = relax_float3 && (n == "AddFloat3" || n == "SubtractFloat3" ||
                             n == "AbsoluteFloat3" || n == "AverageFloat3" ||
                             n == "DistanceFloat3" || n == "DotFloat3" ||
                             n == "EqualsFloat3" || n == "NotEqualsFloat3" ||
                             n == "MagnitudeFloat3" || n == "MagnitudeSquaredFloat3" ||
-                            n == "NormalizeFloat3");
+                            n == "NormalizeFloat3" ||
+                            n == "MultiplyFloat3Float3Float3" || n == "CrossVec3");
     /* BF6_FLOAT3_ONLY=<name>[,<name>]: apply the relaxation to named operators only, so
      * which one changes a vehicle can be found by bisection. Diagnostic. */
     bool relax = all_float3;

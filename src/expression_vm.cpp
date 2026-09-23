@@ -1450,6 +1450,14 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 (signature.output_width && !call.output)) {
                 add_unresolved(result, record.operator_key);
                 last_written.tainted = true;
+                /* why: not described, an input count that does not match, or no output */
+                result.diagnostics.push_back(
+                    "unresolved at record " + std::to_string(record.offset) + " key " +
+                    std::to_string(record.operator_key) + (described ? " described" : " not described") +
+                    " inputs " + std::to_string(call.inputs.size()) + "/" +
+                    std::to_string(signature.input_widths.size()) + " operands " +
+                    std::to_string(record.operands.size()) +
+                    (signature.output_width && !call.output ? " no-output" : ""));
                 /* A refused operator leaves its output slot UNWRITTEN, which is where
                  * an unknown is born - so trace it, against the slot it would have
                  * written (the last region-2 operand), as unknown. */

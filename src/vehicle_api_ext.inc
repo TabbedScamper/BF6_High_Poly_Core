@@ -363,7 +363,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                                  "AngularAcceleration (%g %g %g) known %d\n",
                          la[0], la[1], la[2], (int)kl, aa[0], aa[1], aa[2], (int)ka);
         if (const char* recs = std::getenv("BF6_GRAPH_REC"))
-            if (v->time > 1.99 && v->time < 2.01)
+            if (std::fabs(v->time - (std::getenv("BF6_GRAPH_REC_T") ? std::atof(std::getenv("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
                 for (const char* p = recs; *p;) {
                     char* end = nullptr;
                     const unsigned long r = std::strtoul(p, &end, 16);
@@ -372,7 +372,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                     p = *end ? end + 1 : end;
                 }
         if (const char* src = std::getenv("BF6_GRAPH_SRC"))
-            if (v->time > 1.99 && v->time < 2.01)
+            if (std::fabs(v->time - (std::getenv("BF6_GRAPH_REC_T") ? std::atof(std::getenv("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
                 std::fprintf(stderr, "%s", s.sources((uint32_t)std::strtoul(src, nullptr, 16)).c_str());
         if (std::getenv("BF6_GRAPH_PHYSICS_REPORT") && (v->time < 0.02 || std::fabs(v->time - std::atof(std::getenv("BF6_GRAPH_PHYSICS_REPORT"))) < 0.009))
             std::fprintf(stderr, "%s%s%s", s.report().c_str(), s.why("LinearAcceleration").c_str(),
@@ -436,9 +436,27 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             }
             s.state_mut().clear_unseeded_frame_reads();
         }
-        if (s.wheel_ops().com_set())
+        if (s.wheel_ops().com_set()) {
+            if (std::getenv("BF6_COM_DEBUG"))
+                std::fprintf(stderr, "com: host (%g %g %g) -> graph (%g %g %g)\n",
+                             d.p.com[0], d.p.com[1], d.p.com[2], s.wheel_ops().body().com[0],
+                             s.wheel_ops().body().com[1], s.wheel_ops().body().com[2]);
             for (int i = 0; i < 3; ++i) d.p.com[i] = s.wheel_ops().body().com[i];
+        }
         s.wheel_ops().clear_com_set();
+        if (s.wheel_ops().inertia_set() && !std::getenv("BF6_NO_GRAPH_INERTIA")) {
+            if (std::getenv("BF6_INERTIA_DEBUG"))
+                std::fprintf(stderr, "inertia per kg: host (%g %g %g) -> graph (%g %g %g)\n",
+                             d.p.inertia_per_kg[0], d.p.inertia_per_kg[1], d.p.inertia_per_kg[2],
+                             s.wheel_ops().inertia_per_kg()[0], s.wheel_ops().inertia_per_kg()[1],
+                             s.wheel_ops().inertia_per_kg()[2]);
+            /* FUN_1443E39C0 stores the reciprocal of every lane, and ignores the call
+             * only when all three lanes are within 1e-6 of zero. */
+            const float* gi = s.wheel_ops().inertia_per_kg();
+            if (std::fabs(gi[0]) > 1e-6f || std::fabs(gi[1]) > 1e-6f || std::fabs(gi[2]) > 1e-6f)
+                for (int i = 0; i < 3; ++i) d.p.inertia_per_kg[i] = gi[i];
+        }
+        s.wheel_ops().clear_inertia_set();
         d.integrate_body_accel(dt, la, aa, std::getenv("BF6_GRAPH_GRAVITY") != nullptr);
         /* THE HULL'S OWN VELOCITY CHANGE. A boat's hull function integrates its
          * forces into the body block itself rather than handing accelerations to the

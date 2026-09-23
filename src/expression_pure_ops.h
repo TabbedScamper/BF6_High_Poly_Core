@@ -36,6 +36,8 @@
 #include "expression_vm.h"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -103,8 +105,25 @@ public:
     bool describe(uint32_t key, OperatorSignature& out) override;
     bool describe_call(uint32_t key, const std::vector<uint32_t>& consts,
                        OperatorSignature& out) override {
-        for (Host* h : hosts_)
-            if (h->describe_call(key, consts, out)) return true;
+        /* BF6_OPS_OFF=<hex>,<hex>: refuse these keys outright, to attribute a change
+         * to the operator that caused it. */
+        if (const char* off = std::getenv("BF6_OPS_OFF"))
+            for (const char* p = off; *p;) {
+                char* end = nullptr;
+                const unsigned long k = std::strtoul(p, &end, 16);
+                if (end == p) break;
+                if ((uint32_t)k == key) { out = OperatorSignature{}; return false; }
+                p = *end ? end + 1 : end;
+            }
+        for (size_t i = 0; i < hosts_.size(); ++i)
+            if (hosts_[i]->describe_call(key, consts, out)) {
+                /* BF6_WHO_DESCRIBES=<hex key>: which host in the chain claims it */
+                if (const char* w = std::getenv("BF6_WHO_DESCRIBES"))
+                    if (std::strtoul(w, nullptr, 16) == key)
+                        std::fprintf(stderr, "key %08X described by host %zu: %zu inputs, out %u\n",
+                                     key, i, out.input_widths.size(), out.output_width);
+                return true;
+            }
         out = OperatorSignature{};
         return false;
     }

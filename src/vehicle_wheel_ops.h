@@ -79,6 +79,10 @@ public:
     const float* hull_dv() const { return hull_dv_; }
     const float* hull_dw() const { return hull_dw_; }
     void clear_com_set() { com_set_ = false; }
+    /* The graph set the inertia per kg (0x00945C6D) since the last clear. */
+    bool inertia_set() const { return inertia_set_; }
+    const float* inertia_per_kg() const { return inertia_per_kg_; }
+    void clear_inertia_set() { inertia_set_ = false; }
     const WheelBody& body() const { return body_; }
     /* THE CURVES THE ENGINE BINDS AT LOAD. A keyed curve's keys are not in the
      * graph's pool: the descriptor there holds a pointer the loader fills, so the
@@ -129,6 +133,8 @@ private:
     HeapSink* heap_ = nullptr;
     int rays_ = 0, ray_hits_ = 0;
     bool com_set_ = false;
+    bool inertia_set_ = false;
+    float inertia_per_kg_[3] = {0, 0, 0};
     std::vector<float> tyre_omega_;
     std::vector<uint8_t> tyre_contact_;
     float hull_dv_[3] = {0, 0, 0}, hull_dw_[3] = {0, 0, 0};

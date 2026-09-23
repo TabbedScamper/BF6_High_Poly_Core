@@ -980,8 +980,8 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         const float v4[4] = {body_.v[0], body_.v[1], body_.v[2], 0.0f};
         const float w4[4] = {body_.w[0], body_.w[1], body_.w[2], 0.0f};
         out.bytes.assign(32, 0);
-        damp(w4, a[1], rf(a[3], 0), 100.0f, out.bytes, 16);   /* extra: angular */
-        damp(v4, a[2], rf(a[4], 0), 20.0f, out.bytes, 0);     /* primary: linear */
+        damp(v4, a[1], rf(a[3], 0), 100.0f, out.bytes, 16);   /* extra: LINEAR */
+        damp(w4, a[2], rf(a[4], 0), 20.0f, out.bytes, 0);     /* primary: ANGULAR */
         /* WHICH OUTPUT REACHES WHICH CHANNEL, measured rather than argued: with
          * BF6_DAMP_PROBE each output carries a distinct marker, and whichever channel
          * the host reads it out of is the one the graph sums it into. */
@@ -1894,6 +1894,11 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         for (int i = 0; i < 4; ++i) { r.f[i] = dt * rf(a[2], 4 * i) * force_scale; r.p[i] = rf(a[1], 4 * i); }
         std::vector<ForceRecord> recs;
         if (finite3(r.f) && finite3(r.p)) recs.push_back(r);
+        /* Every force the graph applies, in the body frame, so a thrust pointing
+         * across the hull instead of along it is visible rather than inferred. */
+        if (std::getenv("BF6_FORCE_DEBUG") && dt > 0.0f)
+            std::fprintf(stderr, "force: (%9.1f %9.1f %9.1f) N at (%5.2f %5.2f %5.2f)\n",
+                         r.f[0] / dt, r.f[1] / dt, r.f[2] / dt, r.p[0], r.p[1], r.p[2]);
         apply_all(s, recs);
         out.bytes.assign(32, 0);
         for (int i = 0; i < 4; ++i) wf(out.bytes, 4 * i, (s.w[i] - before.w[i]) / dt);

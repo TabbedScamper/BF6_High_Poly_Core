@@ -187,6 +187,24 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
                 for (int i = 0; i < 3; ++i) v->dyn.p.wheel[w].mount[i] = sk->bones[b].model[9 + i];
                 ++found;
             }
+    /* WHICH WAY THE HULL RUNS. A boat's forces are only in the right place if the
+     * frame is, and the rig is the one thing that says so without assumption: the
+     * span of its bones along each axis is the vehicle's own length, width and
+     * height. Printed rather than assumed, because the hull surface this library
+     * builds picks an axis for the description's "length". */
+    if (sk && std::getenv("BF6_RIG_SPAN")) {
+        float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+        for (int b = 0; b < sk->bone_count; ++b)
+            for (int i = 0; i < 3; ++i) {
+                const float p = sk->bones[b].model[9 + i];
+                if (p < lo[i]) lo[i] = p;
+                if (p > hi[i]) hi[i] = p;
+            }
+        std::fprintf(stderr, "rig span: x %.2f..%.2f (%.2f)  y %.2f..%.2f (%.2f)  "
+                             "z %.2f..%.2f (%.2f)  over %d bones\n",
+                     lo[0], hi[0], hi[0] - lo[0], lo[1], hi[1], hi[1] - lo[1],
+                     lo[2], hi[2], hi[2] - lo[2], sk->bone_count);
+    }
     if (sk) bf6_free(c, sk);
     /* THE RIG LOCATORS ARE NOT THE WHEELS ANY MORE. Graph physics takes each wheel's
      * position from the WheelConfig the graph carries (InitialPosition), so a vehicle
@@ -391,7 +409,11 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             float wv[3], ww[3];
             bf6__qrot(d.quat, hv, wv);
             bf6__qrot(d.quat, hw, ww);
-            for (int i = 0; i < 3; ++i) { d.vel[i] += wv[i]; d.angvel[i] += ww[i]; }
+            const bool no_spin = std::getenv("BF6_HULL_NO_TORQUE") != nullptr;
+            for (int i = 0; i < 3; ++i) {
+                d.vel[i] += wv[i];
+                if (!no_spin) d.angvel[i] += ww[i];
+            }
         }
     }
     bf6::VehicleDriveInputs di;

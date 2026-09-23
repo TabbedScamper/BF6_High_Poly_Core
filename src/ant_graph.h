@@ -77,6 +77,9 @@ public:
     bool signal_pass(Graph& g, const Obj* entry, bool& ok);
 private:
     void note_unknown(const Obj* o);
+    /* The same list, for a reason that is not simply an unknown type: a chooser
+     * that could not be evaluated says WHY rather than returning a bare false. */
+    void note_unknown_str(const std::string& why);
     std::map<std::string, Value> m_;
     std::vector<std::string> unknown_;
 };

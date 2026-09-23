@@ -366,6 +366,9 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         const float o0 = f32(a[3]), o1 = f32(a[4]);
         if (i1 == i0) return false;
         out = put_f32(o0 + (v - i0) * (o1 - o0) / (i1 - i0));
+        if (std::getenv("BF6_RANGE_DEBUG"))
+            std::fprintf(stderr, "RangeChange(%g, %g..%g -> %g..%g) = %g\n",
+                         v, i0, i1, o0, o1, f32(out));
         return true;
     }
     if (n == "DivideIntIntInt") {

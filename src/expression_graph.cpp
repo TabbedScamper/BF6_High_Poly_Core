@@ -1,6 +1,7 @@
 #include "expression_graph.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -118,7 +119,9 @@ static bool parse_typed_table(const uint8_t* data, size_t begin, size_t bytes,
 // controls must keep rejecting at 100%.
 static uint32_t proven_fixed_length(uint8_t k)
 {
-    if (k <= 0x09) return 20u + 8u * (uint32_t)k;
+    /* 0x00..0x13: one operator pointer and k+1 operand pairs, 20 + 8k (interpreter
+     * cases 0x00-0x13; 0x0a-0x13 were missing and are measured in the same table). */
+    if (k <= 0x13) return 20u + 8u * (uint32_t)k;
     switch (k) {
     case 0x14: return 28; case 0x16: return 44; case 0x17: return 52;
     case 0x1a: return 36; case 0x1f: return 20; case 0x33: return 24;
@@ -135,6 +138,8 @@ static uint32_t proven_fixed_length(uint8_t k)
     case 0x35: return 24; case 0x36: return 24; case 0x38: return 40;
     case 0x39: return 36; case 0x3b: return 36; case 0x3d: return 36;
     case 0x3e: return 40;
+    case 0x3a: return 36;                         /* flag-selected 2-byte copy */
+    case 0x29: return 8;                          /* unconditional call */
     default: return 0;
     }
 }
@@ -197,7 +202,30 @@ static bool mandatory_starts_ok(size_t off, size_t next,
     return it == mandatory.end() || *it >= next;
 }
 
-/* KIND 0x23's LENGTH IS ITS OPERATOR'S ARITY, and it is not in the record.
+/* KIND 0x23's LENGTH IS IN THE RECORD, read the way the interpreter reads it
+ * (FUN_142484fc0 case 0x23): u32 n_in at +12, then n_in 8-byte operand pairs,
+ * then u32 n_out, n_out pairs, then u32 n_ctx, n_ctx pairs. So
+ *     length = 24 + 8 * (n_in + n_out + n_ctx)
+ * with n_out and n_ctx found AFTER the preceding list - the earlier fit tried
+ * fixed offsets (+16, +20) and topped out at 77.8% for exactly that reason.
+ * 0 when the counts run past the region. */
+static uint32_t k23_length(const uint8_t* region, size_t off, size_t limit)
+{
+    size_t at = off + 12;
+    uint32_t total = 0;
+    for (int list = 0; list < 3; ++list) {
+        if (at + 4 > limit) return 0;
+        const uint32_t n = u32(region + at);
+        if (n > 64) return 0;
+        total += n;
+        at += 4 + (size_t)n * 8;
+    }
+    if (at > limit) return 0;
+    return 24u + total * 8u;
+}
+
+/* (Superseded for length by k23_length above; kept for the record.)
+ * KIND 0x23's LENGTH IS ITS OPERATOR'S ARITY, and it is not in the record.
  *
  * Fitting the length to the record's own fields tops out at 77.8%: the shape
  * (dword3=0, dword4=0) occurs 6,977 times at 24 bytes and 1,387 times at 32,
@@ -263,6 +291,16 @@ static bool tile_records(const uint8_t* region, size_t limit,
                 ways[off] = ways[next]; choice[off] = (uint32_t)len;
             }
         } else if (kind == 0x23) {
+            /* Exact, from the record's own counts (see k23_length). */
+            const uint32_t exact = k23_length(region, off, limit);
+            if (exact) {
+                const size_t next = off + exact;
+                if (next <= limit && ways[next] && mandatory_starts_ok(off, next, mandatory)) {
+                    ways[off] = ways[next];
+                    choice[off] = exact;
+                }
+                continue;
+            }
             // The operator's own arity settles it where the registry knows the
             // key; that is one length, so no ambiguity can arise.
             const uint32_t pinned = arity_length(arity, key_by_offset, off);
@@ -361,6 +399,45 @@ static void materialize_records(const uint8_t* region, size_t region_bytes,
             covered += end - off;
             records.push_back(std::move(r));
             continue;
+        }
+        if (r.kind == 0x23 && k23_length(region, off, end) == end - off) {
+            /* Three counted lists: inputs, outputs, context. */
+            size_t at = off + 12;
+            uint16_t ns[3] = {0, 0, 0};
+            std::vector<Operand> lists[3];
+            for (int list = 0; list < 3; ++list) {
+                const uint32_t n = u32(region + at);
+                at += 4;
+                for (uint32_t j = 0; j < n; ++j, at += 8)
+                    lists[list].push_back({u32(region + at), u32(region + at + 4)});
+                ns[list] = (uint16_t)n;
+            }
+            for (int list = 0; list < 3; ++list)
+                r.operands.insert(r.operands.end(), lists[list].begin(), lists[list].end());
+            r.counted_lists = true;
+            r.n_in = ns[0]; r.n_out = ns[1]; r.n_ctx = ns[2];
+            covered += end - off;
+            records.push_back(std::move(r));
+            continue;
+        }
+        /* SPLIT-LIST CALLS 0x14..0x1D (interpreter): the pairs after the operator
+         * pointer go to an INPUT array and an OUTPUT array in a fixed split per
+         * kind, the same (inputs, outputs) calling convention as 0x23. */
+        {
+            static const uint8_t kSplit[10][2] = {
+                {1,1},{1,2},{1,3},{1,4},{2,0},{2,1},{3,0},{3,1},{4,0},{4,1}};
+            if (r.kind >= 0x14 && r.kind <= 0x1d) {
+                const uint8_t ni = kSplit[r.kind - 0x14][0], no = kSplit[r.kind - 0x14][1];
+                if (end - off == 12u + 8u * (size_t)(ni + no)) {
+                    for (size_t at = off + 12; at + 8 <= end; at += 8)
+                        r.operands.push_back({u32(region + at), u32(region + at + 4)});
+                    r.counted_lists = true;
+                    r.n_in = ni; r.n_out = no; r.n_ctx = 0;
+                    covered += end - off;
+                    records.push_back(std::move(r));
+                    continue;
+                }
+            }
         }
         size_t body = off + (r.has_operator ? 12u : 4u);
         size_t body_end = end;

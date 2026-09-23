@@ -4900,6 +4900,18 @@ void bf6_free(bf6_ctx* c, void* handle) {
 // The mount's own name tables and raw bytes. Same reason as the two above, and
 // Public definitions inherit the header's C linkage.
 #include "raw_ext.inc"
+
+/* A reflected type's declared size by its name hash, from THIS install's
+ * executable. Opens the schema on first use when no level has, with the same
+ * rule as a level open: first readable (not encrypted) candidate wins. Returns 0
+ * when the hash names no type or the schema is unreadable. */
+uint32_t bf6_type_size_by_hash(bf6_ctx* c, uint32_t name_hash)
+{
+    if (!c) return 0;
+    std::string e;
+    if (!ensure_types(c, e)) return 0;
+    return c->types->size_by_name_hash(name_hash);
+}
 // The soldier's authored movement values, read from the player's own install
 // rather than baked into a constants block. Sits after raw_ext.inc because it
 // mounts through those helpers.
@@ -4907,6 +4919,8 @@ void bf6_free(bf6_ctx* c, void* handle) {
 #include "expression_ext.inc"
 #include "expression_registry_ext.inc"
 #include "ebxdump_ext.inc"
+#include "expression_bindings_ext.inc"
+#include "vehicle_api_ext.inc"
 #include "ebx_import_ext.inc"
 #include "armory_ext.inc" // installed armory and field-upgrade providers
 #include "options_ext.inc"

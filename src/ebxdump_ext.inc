@@ -78,6 +78,8 @@ void bf6__dump_val(const bf6::EbxValue& v, int depth, int max_depth,
         // The resolved path is the useful half: it is how one record names
         // another, and following it by hand is the whole job of a walk.
         out += "import " + (v.import_path.empty() ? v.s : v.import_path);
+        // Which instance inside it: an import names one record, not a file.
+        if (!v.import_instance.empty()) out += " #" + v.import_instance;
         break;
     case K::Array:
         std::snprintf(buf, sizeof(buf), "[%d]", (int)v.items.size());
@@ -140,6 +142,66 @@ const char* bf6_field_name(uint32_t name_hash)
      * behavior depend on a staged oracle. Keep this ABI for compatibility and
      * report the live truth. fieldnames.py remains the evidence-side join. */
     return nullptr;
+}
+
+/* The type guid of every instance in a partition, newline separated, without
+ * decoding any instance: the cheap census for "which partitions hold type X".
+ * Returns the instance count, or -1 when the partition cannot be parsed. */
+int bf6_ebx_instance_types(bf6_ctx* c, const char* name, char* out, int out_len)
+{
+    if (!c || !name) return -1;
+    std::string terr;
+    if (!ensure_types(c, terr)) return -1;
+    std::string err;
+    std::vector<uint8_t> raw = c->src.get_ebx(name, err);
+    if (raw.empty()) return -1;
+    bf6::Ebx e(*c->types);
+    if (!e.parse(std::move(raw), err)) return -1;
+    std::string s;
+    for (size_t i = 0; i < e.instance_count(); i++) {
+        s += bf6::TypeDb::guid_str(e.instance_type(i));
+        s += '\n';
+    }
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)e.instance_count();
+}
+
+/* EMBEDDED struct types, which the instance census cannot see: a config type
+ * authored as a field of another instance never has an instance of its own. One
+ * line "<instance> <struct type guid>" per distinct pair. Returns the line count. */
+static void bf6__struct_walk(const bf6::EbxValue& v, size_t inst, std::set<std::string>& seen,
+                             std::string& s, int depth)
+{
+    if (depth > 24) return;
+    if (v.kind == bf6::EbxValue::Kind::Struct) {
+        const std::string g = bf6::TypeDb::guid_str(v.guid);
+        char line[96];
+        std::snprintf(line, sizeof line, "%d %s", (int)inst, g.c_str());
+        if (seen.insert(line).second) { s += line; s += '\n'; }
+        for (const auto& kv : v.fields) bf6__struct_walk(kv.second, inst, seen, s, depth + 1);
+    }
+    for (const auto& it : v.items) bf6__struct_walk(it, inst, seen, s, depth + 1);
+}
+
+int bf6_ebx_struct_types(bf6_ctx* c, const char* name, char* out, int out_len)
+{
+    if (!c || !name) return -1;
+    std::string terr;
+    if (!ensure_types(c, terr)) return -1;
+    std::string err;
+    std::vector<uint8_t> raw = c->src.get_ebx(name, err);
+    if (raw.empty()) return -1;
+    bf6::Ebx e(*c->types);
+    if (!e.parse(std::move(raw), err)) return -1;
+    std::string s;
+    std::set<std::string> seen;
+    for (size_t i = 0; i < e.instance_count(); i++) {
+        const bf6::EbxValue v = e.read_instance(i);
+        for (const auto& kv : v.fields) bf6__struct_walk(kv.second, i, seen, s, 0);
+        for (const auto& it : v.items) bf6__struct_walk(it, i, seen, s, 0);
+    }
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)seen.size();
 }
 
 int64_t bf6_ebx_dump(bf6_ctx* c, const char* name, int max_depth,
@@ -207,7 +269,11 @@ int64_t bf6_ebx_dump(bf6_ctx* c, const char* name, int max_depth,
          * guid here. Printing the guid is not a fallback, it is the identity. */
         const bf6::TypeGuid tg = e.instance_type(i);
         const std::string tn = bf6::TypeDb::guid_str(tg);
-        std::snprintf(buf, sizeof(buf), "\n  [%d] type %s\n    ", (int)i, tn.c_str());
+        /* The instance guid too, when exported: it is what an import from
+         * another partition names, so without it an import cannot be followed. */
+        const std::string ig = e.instance_guid(i);
+        std::snprintf(buf, sizeof(buf), "\n  [%d] type %s%s%s\n    ", (int)i, tn.c_str(),
+                      ig.empty() ? "" : "  #", ig.c_str());
         s += buf;
         bf6::EbxValue v = e.read_instance(i);
         bf6__dump_val(v, 0, max_depth <= 0 ? 3 : max_depth, s);

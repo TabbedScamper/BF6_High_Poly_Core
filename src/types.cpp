@@ -248,6 +248,45 @@ int64_t TypeDb::find_guid(const TypeGuid& guid)
     return fo;
 }
 
+/* THE TYPE BEHIND A NAME HASH. An expression graph names its typed slot groups by
+ * hash and its data lives in EBX keyed by guid, so one of the two has to be turned
+ * into the other before a curve can be matched to the slot that holds it. Same
+ * validation as size_by_name_hash: a candidate counts only when its own layout reads
+ * the hash back. */
+bool TypeDb::guid_by_name_hash(uint32_t name_hash, TypeGuid& out)
+{
+    if (!name_hash || !ti_found_ || ti_end_ <= ti_off_ + 24) return false;
+    for (size_t o = ti_off_; o + 24 <= ti_end_; o += 4)
+    {
+        if (rd<uint32_t>(data_, o) != name_hash) continue;
+        TypeGuid g;
+        std::memcpy(g.data(), data_.data() + o + 8, 16);
+        const TypeLayout& lay = layout(g);
+        if (lay.valid && lay.name_hash == name_hash && lay.size) { out = g; return true; }
+    }
+    return false;
+}
+
+uint32_t TypeDb::size_by_name_hash(uint32_t name_hash)
+{
+    const auto c = size_by_hash_cache_.find(name_hash);
+    if (c != size_by_hash_cache_.end()) return c->second;
+    uint32_t size = 0;
+    if (name_hash && ti_found_ && ti_end_ > ti_off_ + 24)
+    {
+        for (size_t o = ti_off_; o + 24 <= ti_end_ && !size; o += 4)
+        {
+            if (rd<uint32_t>(data_, o) != name_hash) continue;
+            TypeGuid g;
+            std::memcpy(g.data(), data_.data() + o + 8, 16);
+            const TypeLayout& lay = layout(g);
+            if (lay.valid && lay.name_hash == name_hash && lay.size) size = lay.size;
+        }
+    }
+    size_by_hash_cache_[name_hash] = size;
+    return size;
+}
+
 const TypeLayout& TypeDb::layout(const TypeGuid& guid)
 {
     auto it = layout_cache_.find(guid);

@@ -76,6 +76,11 @@ constexpr const char* kFloatChannel      = "15069cf8-f758-fa4c-23be-778b6939ac47
 constexpr const char* kEnumAsset         = "a5cab29b-aabb-e8f1-8ecb-a48ad0b941e9";
 constexpr const char* kEnumChannel       = "8308d4de-c89c-ebda-5629-55b5ab2e55f9";
 constexpr const char* kEnumItem          = "37948790-7933-b4e3-f96d-ab1e63ef9383";
+/* IntegerAsset, named in the research repo's verified type table. Same shape as the
+ * other scalar states: the authored default in 0x97ea1523 with the shared descriptor
+ * beside it. ant.melee.counter.int is the one the first-person chain reads, and it was
+ * the last "game state not evaluable" the top machine reported. */
+constexpr const char* kIntAsset          = "0ca8a9ae-dd84-eeb1-c3b7-2c286b5a66bb";
 constexpr const char* kFloatComparison   = "57ef39ec-4fd6-988d-f799-23c09a6addbc";
 constexpr const char* kBoolChooser       = "48155699-ed9c-adcf-4e0a-ccd29461119c";
 constexpr const char* kEnumPair          = "19b1bfd2-07ad-e287-a6be-7ef64ee5e12b";
@@ -88,6 +93,36 @@ constexpr uint32_t kCmpInput  = 0x63545f5eu;   /* FloatComparison: float input *
 constexpr uint32_t kCmpInput2 = 0xea11b64au;   /* FloatComparison: second input (null in every sample seen) */
 constexpr uint32_t kCmpOp     = 0xf2ca26dbu;   /* GameStateCompareOp */
 constexpr uint32_t kCmpValue  = 0x8350c0b8u;   /* threshold */
+/* FloatBoolAsset: a float game state read AS a bool, by comparing it against a
+ * threshold with the same GameStateCompareOp enum - confirmed by name in the
+ * research data: 0 EqualTo, 1 NotEqualTo, 2 LessThan, 3 LessThanOrEqualTo,
+ * 4 GreaterThan, 5 GreaterThanOrEqualTo.
+ *
+ * These gate movement conditions all over the 1P graph and NONE of them could be
+ * evaluated, which is a large part of why the graph answered almost no state:
+ * ant.inputstrafe.floatbool is op 1 against 0, so it is true exactly when the
+ * strafe input is non-zero, and that is the shape of the whole family. */
+constexpr const char* kFloatBool = "2482b4a7-eb58-fe29-968e-ef020b282c5d";
+/* BoolLogicAsset, named in the research repo (2c5c25ae): a logic gate over other bool
+ * states. Inputs in 0x32C22329 (or a single source in 0x3E982DDA), the operation in
+ * 0xEE96D8A4 which is EBoolOperationMode - Equal 0, NotEqual 1, And 2, Or 3, Inverse 4 -
+ * and 0x5AB403A2 inverts the result.
+ *
+ * This one gate was why first-person WALKING never animated. The transition from
+ * 1p.loco.idle.node to 1p.loco.run.node is conditioned on movementspeed.ground.bool AND
+ * 1p._loco.runandsprintactionfilter.boollogic, and that filter is an OR over
+ * mm.action.enumgs_grounded and mm.action.enumgs_playingmainexternalstate. Unevaluable, it
+ * read false, so the run node - and the sprint cycle node beside it - could never be
+ * entered, and the arms held the stand pose at every speed. */
+constexpr const char* kBoolLogic = "2c5c25ae-d118-7172-5138-f899c57a786f";
+constexpr uint32_t kBlInputs = 0x32c22329u;
+constexpr uint32_t kBlSource = 0x3e982ddau;
+constexpr uint32_t kBlOp     = 0xee96d8a4u;
+constexpr uint32_t kBlInvert = 0x5ab403a2u;
+constexpr uint32_t kFbSource  = 0x4676ba2cu;   /* Source, the float state */
+constexpr uint32_t kFbSource2 = 0x26633407u;   /* a second source, null in every sample */
+constexpr uint32_t kFbValue   = 0x8cf424e7u;   /* the threshold */
+constexpr uint32_t kFbOp      = 0xee96d8a4u;   /* Operation, GameStateCompareOp */
 
 double num(const bf6::EbxValue* v)
 {
@@ -138,14 +173,96 @@ void States::note_unknown(const Obj* o)
     unknown_.push_back(s);
 }
 
+void States::note_unknown_str(const std::string& why)
+{
+    for (const auto& u : unknown_) if (u == why) return;
+    unknown_.push_back(why);
+}
+
+/* GameStateCompareOp applied. `ok` false = an operation not in the enum. */
+static bool compare_op(int op, float x, float t, bool& ok)
+{
+    ok = true;
+    switch (op) {
+    case 0: return x == t;
+    case 1: return x != t;
+    case 2: return x < t;
+    case 3: return x <= t;
+    case 4: return x > t;
+    case 5: return x >= t;
+    default: ok = false; return false;
+    }
+}
+
 bool States::as_bool(Graph& g, const Obj* o, bool& ok)
 {
     ok = false;
     if (!o) { note_unknown(o); return false; }
+    /* THE TWO LITERALS, WHICH THE DATA DOES NOT DISTINGUISH.
+     *
+     * common/literal.true.bool and common/literal.false.bool are byte-identical: both
+     * are BoolChannels with every field false, including the authored default. So the
+     * name is the only information that exists about which is which, and the engine must
+     * special-case them the same way.
+     *
+     * Reading both as false is not a small error. These are how the graph spells "always"
+     * and "never": a chooser of vetoes ends with a permissive default that yields
+     * literal.true.bool, and reading that false turns the default into another veto.
+     * Measured, 1p.enablesprintpose.chooserbool is ten vetoes over exactly such a
+     * default - entry 10 matched and yielded false - so the sprint pose layer was held
+     * off in every stance, and the sprint pose never played at all. */
+    {
+        auto ends_with = [&](const std::string& tail) {
+            const size_t n = tail.size();
+            return o->path.size() >= n && o->path.compare(o->path.size() - n, n, tail) == 0;
+        };
+        if (ends_with("literal.true.bool")) { ok = true; return true; }
+        if (ends_with("literal.false.bool")) { ok = true; return false; }
+    }
     if (o->type == kBoolAsset || o->type == kBoolChannel) {
         ok = true;
         if (const Value* v = get(o->path)) return v->b;
         return num(o->f(kDefault)) != 0.0;
+    }
+    if (o->type == kBoolLogic) {
+        /* EBoolOperationMode over the inputs. Every input has to be readable: a gate with
+         * an unknown term is not false, it is unknown, and treating it as false is how a
+         * filter that should pass ends up blocking. */
+        std::vector<bool> in;
+        if (const bf6::EbxValue* xs = o->f(kBlInputs))
+            for (const auto& it : xs->items) {
+                const Obj* s = g.resolve(&it, o);
+                if (!s) continue;
+                bool sok = false;
+                const bool v = as_bool(g, s, sok);
+                if (!sok) return false;
+                in.push_back(v);
+            }
+        if (in.empty()) {
+            if (const Obj* s = g.resolve(o->f(kBlSource), o)) {
+                bool sok = false;
+                const bool v = as_bool(g, s, sok);
+                if (!sok) return false;
+                in.push_back(v);
+            }
+        }
+        if (in.empty()) { note_unknown(o); return false; }
+        const int op = (int)num(o->f(kBlOp));
+        bool r = in[0];
+        switch (op) {
+        case 0: for (size_t i = 1; i < in.size(); ++i) r = r == in[i]; break;   /* Equal */
+        case 1: for (size_t i = 1; i < in.size(); ++i) r = r != in[i]; break;   /* NotEqual */
+        case 2: for (size_t i = 1; i < in.size(); ++i) r = r && in[i]; break;   /* And */
+        case 3: for (size_t i = 1; i < in.size(); ++i) r = r || in[i]; break;   /* Or */
+        case 4: r = !r; break;                                                 /* Inverse */
+        default:
+            note_unknown_str("bool logic operation " + std::to_string(op)
+                             + " not in EBoolOperationMode: " + o->path);
+            return false;
+        }
+        if (num(o->f(kBlInvert)) != 0.0) r = !r;
+        ok = true;
+        return r;
     }
     if (o->type == kEnumItem) {
         const Obj* e = g.resolve(o->f(kItemEnum), o);
@@ -179,17 +296,45 @@ bool States::as_bool(Graph& g, const Obj* o, bool& ok)
         if (!pol || pol->type != kSignalPolicy) { note_unknown(o); return false; }
         ok = true;
         if (!es) return false;
+        /* WHY A CHOOSER SAID FALSE, because there are three different reasons and they
+         * were indistinguishable. A chooser that cannot be evaluated, one whose chosen
+         * value cannot be read, and one where genuinely no entry matched all returned a
+         * bare false, so a feature held off by its Enable gave no clue which. The
+         * sprint pose is the case: 1p.enablesprintpose.chooserbool is ten vetoes over a
+         * default of true, every veto false for a standing rifleman, and it still read
+         * false. */
+        int index = 0;
         for (const auto& er : es->items) {
             const Obj* e = g.resolve(&er, o);
             bool pok = true;
             if (e && signal_pass(g, e, pok) && pok) {
                 bool bok = false;
                 const bool v = as_bool(g, g.resolve(e->f(0x81309ef7u), e), bok);
-                if (!bok) { ok = false; return false; }
+                if (!bok) {
+                    note_unknown_str("bool chooser entry " + std::to_string(index)
+                                     + " matched but its value is not evaluable: " + o->path);
+                    ok = false;
+                    return false;
+                }
+                /* A MATCHED ENTRY YIELDING FALSE IS NORMAL, and was reported here while the
+                 * sprint pose was being chased. It is how a veto chooser says no - 11 of
+                 * them do it on a resting player - so reporting it buried the notes that
+                 * mean something. The two failure paths above still report, because those
+                 * are the cases where a false is not an answer. */
                 return v;
             }
-            if (!pok) { ok = false; return false; }
+            if (!pok) {
+                note_unknown_str("bool chooser entry " + std::to_string(index)
+                                 + " has a signal that is not evaluable: " + o->path);
+                ok = false;
+                return false;
+            }
+            ++index;
         }
+        /* NO ENTRY MATCHING IS AN ANSWER, not a failure: this chooser kind has no
+         * last-entry fallback, so false is what the engine returns too (the comment above
+         * records that from FUN_1409c0350). sp.1p.gundown.enable.chooserbool is one -
+         * a singleplayer feature with no entry for a multiplayer player. */
         return false;
     }
     if (o->type == kFloatComparison) {
@@ -202,16 +347,24 @@ bool States::as_bool(Graph& g, const Obj* o, bool& ok)
         const float x = as_float(g, g.resolve(o->f(kCmpInput), o), fok);
         if (!fok) return false;
         const float t = (float)num(o->f(kCmpValue));
-        ok = true;
-        switch ((int)num(o->f(kCmpOp))) {
-        case 0: return x == t;
-        case 1: return x != t;
-        case 2: return x < t;
-        case 3: return x <= t;
-        case 4: return x > t;
-        case 5: return x >= t;
-        default: ok = false; note_unknown(o); return false;
+        const bool r = compare_op((int)num(o->f(kCmpOp)), x, t, ok);
+        if (!ok) note_unknown(o);
+        return r;
+    }
+    if (o->type == kFloatBool) {
+        /* A second source would mean comparing two states rather than a state
+         * against a constant; null in every shipped sample, and reported rather
+         * than assumed away if one ever appears. */
+        if (o->f(kFbSource2) && o->f(kFbSource2)->kind != bf6::EbxValue::Kind::Null) {
+            note_unknown(o);
+            return false;
         }
+        bool fok = false;
+        const float x = as_float(g, g.resolve(o->f(kFbSource), o), fok);
+        if (!fok) return false;
+        const bool r = compare_op((int)num(o->f(kFbOp)), x, (float)num(o->f(kFbValue)), ok);
+        if (!ok) note_unknown(o);
+        return r;
     }
     note_unknown(o);
     return false;
@@ -227,6 +380,14 @@ float States::as_float(Graph& g, const Obj* o, bool& ok)
         if (const Value* v = get(o->path)) return v->f;
         return (float)num(o->f(kDefault));
     }
+    /* An INTEGER or ENUM state read where a float is wanted. Both are scalar states
+     * with the same default field, and a condition that compares a counter against a
+     * threshold reads it through this face. */
+    if (o->type == kIntAsset || o->type == kEnumAsset || o->type == kEnumChannel) {
+        ok = true;
+        if (const Value* v = get(o->path)) return (float)v->i;
+        return (float)num(o->f(kDefault));
+    }
     note_unknown(o);
     return 0.f;
 }
@@ -236,7 +397,7 @@ int32_t States::as_int(Graph& g, const Obj* o, bool& ok)
     (void)g;
     ok = false;
     if (!o) { note_unknown(o); return 0; }
-    if (o->type == kEnumAsset || o->type == kEnumChannel) {
+    if (o->type == kEnumAsset || o->type == kEnumChannel || o->type == kIntAsset) {
         ok = true;
         if (const Value* v = get(o->path)) return v->i;
         return (int32_t)num(o->f(kDefault));

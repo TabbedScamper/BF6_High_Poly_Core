@@ -75,6 +75,13 @@ struct Record {
     std::vector<uint32_t> dispatch_labels;
     std::vector<uint32_t> dispatch_targets;
     std::vector<Operand> operands;
+    /* KIND 0x23 CARRIES THREE COUNTED OPERAND LISTS (interpreter FUN_142484fc0,
+     * case 0x23): u32 n_in at +12, n_in pairs, u32 n_out, n_out pairs, u32 n_ctx,
+     * n_ctx pairs; the call is fn(ctx list, OUTPUT list, INPUT list). When
+     * counted_lists is set, operands holds inputs, then outputs, then context, in
+     * that order, and the three counts say where each list starts. */
+    bool counted_lists = false;
+    uint16_t n_in = 0, n_out = 0, n_ctx = 0;
 };
 
 struct Graph {

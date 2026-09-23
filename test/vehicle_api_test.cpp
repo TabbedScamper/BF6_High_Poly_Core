@@ -36,7 +36,15 @@ int main(int argc, char** argv) {
         if (out[15] != last_ratio && last_ratio != 0.0f && out[15] > 0.0f) ++shifts;
         if (out[15] > 0.0f) last_ratio = out[15];
         if (out[13] > top) top = out[13];
-        if (f % 60 == 0)
+        /* WHICH WAY IT ACTUALLY WENT. A vehicle whose forces land on one axis and
+         * whose motion appears on another is the only way to tell a misdirected force
+         * from a mislabelled frame, so all three components are available. */
+        if (f % 60 == 0 && std::getenv("BF6_XYZ"))
+            std::printf("t %4.1f  pos (%7.2f %7.2f %7.2f)  vel (%6.2f %6.2f %6.2f)  "
+                        "quat (%.3f %.3f %.3f %.3f)\n",
+                        f / 60.0, out[0], out[1], out[2], out[7], out[8], out[9],
+                        out[3], out[4], out[5], out[6]);
+        if (f % 60 == 0 && !std::getenv("BF6_XYZ"))
             std::printf("t %4.1f  z %7.2f  speed %6.2f  rpm %5.0f  ratio %6.3f  clutch %.2f  thr %.2f  brk %.2f\n",
                         f / 60.0, out[2], out[13], out[14], out[15], out[16], out[17], out[18]);
     }

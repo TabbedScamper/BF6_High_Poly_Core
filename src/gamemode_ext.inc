@@ -52,6 +52,12 @@ constexpr uint32_t F_HEIGHT       = 0x28CEA299;
 constexpr uint32_t F_TEAM         = 0x2ADBF2A3;
 constexpr uint32_t F_ENABLED      = 0xF97D7309;
 constexpr uint32_t F_FLAGS        = 0x5645E663;
+constexpr uint32_t F_GEM_BLUEPRINT = 0xCBD4EB97;
+constexpr uint32_t F_GEM_SELECTOR  = 0x783E16EC;
+constexpr uint32_t F_GEM_INSTANCE_PARAMS = 0xD6C985F8;
+constexpr uint32_t F_INSTANCE_PARAM_TARGET = 0xC419E7DD;
+constexpr uint32_t F_INSTANCE_PARAM_PROPERTY = 0xCDC6F6A3;
+constexpr uint32_t F_INSTANCE_PARAM_ASSET = 0x7950A6B3;
 
 constexpr uint32_t F_LT_RIGHT   = 0xC478CC3B;
 constexpr uint32_t F_LT_UP      = 0xBF151EF9;
@@ -84,13 +90,6 @@ const Wanted kWanted[] = {
      * BY SHAPE below, and its template link is a raw word at byte 132. */
     { "ee2bf4d0-c3fd-b131-1c29-78b6dd42672e", BF6_GM_GEM,           "gem instance (ee2bf4d0)",         true  },
 };
-
-/* The gem's parameter struct: field 5389A5F9 wraps a struct whose sole int is
- * the value word (1,7,11,...,31 on mp_isolated). Kept for the record; it is
- * NOT a vehicle type. */
-constexpr uint32_t F_GEM_PARAM = 0x5389A5F9;
-constexpr int      kGemSize = 160;
-constexpr int      kGemLinkAt = 132;
 
 /* WHAT OWNS A SHAPE. A polygon or box on a mode layer is usually the
  * geometry of some entity that links to it - a camera trigger, an area
@@ -254,9 +253,9 @@ bool is_mode(const std::string& m)
 }
 
 struct Entity {
-    std::string mode, layer, partition, type_name, blueprint;
+    std::string mode, layer, partition, type_name, blueprint, instance_guid;
     int         kind = 0;
-    int         instance = -1;
+    int         instance = -1, root_order = -1;
     Mat34       xf = bf6::mat_identity();
     bool        own_transform = false;
     int32_t     team = 0;
@@ -270,8 +269,10 @@ struct Entity {
     std::string owner_type;     /* name or dashed guid of the entity this shape belongs to */
     int         owner_kind = -1;
     bool        is_gem = false;
-    std::string gem_link;       /* gems: the byte-132 word's partition leaf, "" none, "?" out of range */
+    std::string gem_link;
     int32_t     gem_value = -1;
+    std::string gem_shape;
+    uint32_t    gem_shape_property = 0;
 };
 
 struct Stats {
@@ -393,6 +394,7 @@ void GmWalk::collect_partition(Ebx& e, const Mat34& parent, const std::string& r
         Entity en;
         en.mode = cur_mode; en.layer = cur_layer; en.partition = part;
         en.type_name = w->second->name; en.kind = w->second->kind; en.instance = (int)i;
+        en.instance_guid = e.instance_guid(i);
         en.xf = parent;
         if (w->second->own_transform) {
             const EbxValue* t = v.field(F_TRANSFORM);
@@ -405,35 +407,34 @@ void GmWalk::collect_partition(Ebx& e, const Mat34& parent, const std::string& r
         if (const EbxValue* f = v.field(F_FLAGS)) en.flags = (uint32_t)as_i(f);
         if (gem) {
             en.is_gem = true;
-            /* Team: the one int in the team range (the key word is huge, the
-             * value word sits inside its own struct); Godot's _int_of rule */
-            if (!v.field(F_TEAM))
-                for (const auto& f : v.fields) {
-                    if (f.second.kind != EbxValue::Kind::Int && f.second.kind != EbxValue::Kind::Uint) continue;
-                    if (f.first == F_FLAGS) continue;
-                    const int32_t iv = as_i(&f.second);
-                    if (iv > 0 && iv < 128) { en.team = iv; break; }
-                }
-            if (const EbxValue* pr = v.field(F_GEM_PARAM))
-                if (pr->kind == EbxValue::Kind::Struct)
-                    for (const auto& f : pr->fields)
-                        if (f.second.kind == EbxValue::Kind::Int || f.second.kind == EbxValue::Kind::Uint) { en.gem_value = as_i(&f.second); break; }
-            /* THE LINK WORD, raw. The walk hands the reference back as a null
-             * typed pointer, so the bytes are read: 0xFFFFFFFF is "none", else
-             * an index into the partition's import table whose partition
-             * half resolves through the guid index to a name. */
-            const int64_t base = e.payload() + (int64_t)e.instance_offset(i);
-            const std::vector<uint8_t>& d = e.raw();
-            en.gem_link = "?";
-            if (base >= 0 && base + kGemSize <= (int64_t)d.size()) {
-                uint32_t refw = 0;
-                std::memcpy(&refw, d.data() + base + kGemLinkAt, 4);
-                if (refw == 0xFFFFFFFFu) en.gem_link.clear();
-                else if ((size_t)refw < e.import_count()) {
-                    auto it = gi.find(e.import_at((size_t)refw).partition);
-                    en.gem_link = it != gi.end() ? leaf_of(strip_ebx(it->second)) : std::string("?");
-                }
+            /* Blueprint is an ordinary PointerRef at field 0xCBD4EB97. The
+             * u32 at byte 0x84 belongs to 0x783E16EC and is the ModBuilder
+             * vehicle selector; treating it as an import index silently
+             * reclassified selectors 3..20 as unrelated imported assets. */
+            en.gem_value = as_i(v.field(F_GEM_SELECTOR));
+            std::string blueprint_guid, blueprint_path;
+            if (e.import_ref(i, F_GEM_BLUEPRINT, blueprint_guid, blueprint_path)) {
+                const std::string& resolved = blueprint_path.empty() ? blueprint_guid : blueprint_path;
+                en.gem_link = leaf_of(strip_ebx(resolved));
+            } else {
+                en.gem_link.clear();
             }
+            /* InstanceParameters bind a named GEM property to an internal
+             * parameter object. CapturePoint property 0x5C3A072B points from
+             * that object to the exact imported VectorShapeAsset. */
+            if (const EbxValue* params = v.field(F_GEM_INSTANCE_PARAMS))
+                if (params->kind == EbxValue::Kind::Array)
+                    for (const EbxValue& binding : params->items) {
+                        if (binding.kind != EbxValue::Kind::Struct) continue;
+                        const EbxValue* target = binding.field(F_INSTANCE_PARAM_TARGET);
+                        if (!target || target->kind != EbxValue::Kind::InstanceRef || target->instance < 0) continue;
+                        std::string shape_guid, shape_path;
+                        if (!e.import_ref((size_t)target->instance, F_INSTANCE_PARAM_ASSET,
+                                          shape_guid, shape_path)) continue;
+                        en.gem_shape_property = (uint32_t)as_i(binding.field(F_INSTANCE_PARAM_PROPERTY));
+                        en.gem_shape = shape_path.empty() ? shape_guid : shape_path;
+                        break;
+                    }
             st.gems++;
             if (!en.gem_link.empty() && en.gem_link != "?") st.gems_linked++;
         }
@@ -452,6 +453,22 @@ void GmWalk::collect_partition(Ebx& e, const Mat34& parent, const std::string& r
         ents.push_back(std::move(en));
     }
     if (ents.size() == first) return;
+
+    /* Root Objects[] is authored order, not a set. Repeated GEM interfaces
+     * such as HQs and capture points rely on it, so preserve it independently
+     * of partition instance number, GUID, or world position. */
+    const std::vector<uint32_t> owant{ F_OBJECTS };
+    for (size_t i = 0; i < e.instance_count(); i++) {
+        const EbxValue root = e.read_instance(i, &owant);
+        const EbxValue* objects = root.field(F_OBJECTS);
+        if (!objects || objects->kind != EbxValue::Kind::Array) continue;
+        for (size_t order = 0; order < objects->items.size(); order++) {
+            const EbxValue& object = objects->items[order];
+            if (object.kind != EbxValue::Kind::InstanceRef || object.instance < 0) continue;
+            auto found = by_instance.find(object.instance);
+            if (found != by_instance.end()) ents[found->second].root_order = (int)order;
+        }
+    }
 
     /* LinkConnections live on whatever instance declares Links - the blueprint
      * root, usually - as Source/Target instance refs. Only edges whose both
@@ -694,7 +711,8 @@ static void bf6__gm_publish(bf6_ctx* c, const std::vector<bf6gm::Entity>& ents, 
         r = bf6_gm_entity{};
         r.mode = intern(e.mode); r.layer = intern(e.layer); r.partition = intern(e.partition);
         r.type_name = intern(e.type_name); r.blueprint = intern(e.blueprint);
-        r.kind = e.kind; r.instance = e.instance;
+        r.kind = e.kind; r.instance = e.instance; r.root_order = e.root_order;
+        r.instance_guid = intern(e.instance_guid);
         for (int k = 0; k < 4; k++) {
             r.xform[k * 3 + 0] = e.xf.m[k].x; r.xform[k * 3 + 1] = e.xf.m[k].y; r.xform[k * 3 + 2] = e.xf.m[k].z;
         }
@@ -715,6 +733,8 @@ static void bf6__gm_publish(bf6_ctx* c, const std::vector<bf6gm::Entity>& ents, 
         /* "" must survive as a non-NULL pointer: NULL means "not a gem" */
         r.gem_link  = e.is_gem ? (e.gem_link.empty() ? "" : intern(e.gem_link)) : nullptr;
         r.gem_value = e.is_gem ? e.gem_value : -1;
+        r.gem_shape = e.gem_shape.empty() ? nullptr : intern(e.gem_shape);
+        r.gem_shape_property = e.gem_shape_property;
         modes.insert(e.mode);
         switch (e.kind) {
             case BF6_GM_SPAWN:         c->gm_stats.spawns++; break;
@@ -829,7 +849,7 @@ namespace bf6gmlay {
 using bf6::Vec3;
 
 constexpr float kCaptureMaxArea   = 1500.f;
-constexpr float kBigFlagMaxArea   = 10000.f;
+constexpr float kBigFlagMaxArea   = 12000.f;
 constexpr int   kBigFlagMinSpawns = 4;
 constexpr float kBigFlagRadius    = 45.f;
 constexpr int   kSanityMaxFlags   = 16;

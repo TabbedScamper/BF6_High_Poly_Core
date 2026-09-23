@@ -433,6 +433,26 @@ void transform_sections(std::vector<Sec>& secs, const M43& t)
         }
     }
 }
+/* SOME of a weapon's sections, picked by mesh name. A weapon part that hangs off
+ * its own bone has to be re-expressed in that bone's frame, and only those
+ * sections may move: transforming the whole gun would take the receiver with it. */
+void transform_sections_matching(std::vector<Sec>& secs, const M43& t,
+                                const char* mesh_contains)
+{
+    std::vector<Sec> picked;
+    std::vector<Sec*> from;
+    for (Sec& s : secs)
+        if (s.mesh.find(mesh_contains) != std::string::npos) from.push_back(&s);
+    if (from.empty()) return;
+    /* transform_sections owns the arithmetic, including the normal matrix, so it
+     * is reused rather than copied: the picked sections are moved through it and
+     * moved back, which keeps ONE implementation of the transform. */
+    picked.reserve(from.size());
+    for (Sec* s : from) picked.push_back(std::move(*s));
+    transform_sections(picked, t);
+    for (size_t i = 0; i < from.size(); ++i) *from[i] = std::move(picked[i]);
+}
+
 
 /* A mesh through the armory reader, skinned by a palette and optionally
  * placed, as sections. `rig_bones` resolves a flagged (0x8000) skin index to an
@@ -693,6 +713,36 @@ int64_t record(const std::string& head, const std::vector<float>& body, uint8_t*
 
 /* ---------------------------------------------------------------- the weapon */
 
+/* THE WHOLE INSTALL, not just the front-end families.
+ *
+ * bf6_mount_frontend selects the shared UI/weapons/characters archive families.
+ * That is not the whole install: bf6_open mounts Data/Win32 only, and this
+ * header's own note on bf6_mount_all puts the shortfall exactly - "a weapon
+ * folder that holds 250 assets holds 4 of them in the Data/Win32 mount - every
+ * per-attachment record is in the Update packages."
+ *
+ * Measured on 2026-09-20: the M4A1's 1P animation folder answers with 7 assets
+ * under the front-end mount and carries its reloads, its firing parts additives
+ * and its whole inspect set under this one. Across all 1P animation assets it is
+ * ~200 against 3285, and for context databases 165 against 877. Every "the game
+ * does not ship that animation" conclusion this project has drawn came from the
+ * narrow mount.
+ *
+ * include_levels stays 0: level archives are much slower to mount and nothing
+ * here has needed them. First mount wins on a name collision, so this only ever
+ * ADDS names - anything already resolving keeps resolving, unchanged. Measured
+ * cost of the wider mount is about 70 ms, against a ~2.4 s walk-mode takeover. */
+static bool mount_full(bf6_ctx* c, char* why, int why_len)
+{
+    if (!bf6_mount_frontend(c, why, why_len)) return false;
+    char ignored[512] = {0};
+    /* A failure here is not fatal: the front-end families are mounted and the
+     * narrower answer is still a usable one. It must not turn a working loadout
+     * into an error. */
+    bf6_mount_all(c, 0, ignored, (int)sizeof(ignored));
+    return true;
+}
+
 /* The configured weapon's sections and slot anchors: the factory fits with the
  * user's choices mixed in, the configured assembly, each part skinned by the
  * configured palette and placed by its attach transform. */
@@ -700,7 +750,7 @@ bool assemble_weapon(bf6_ctx* c, const char* item_id, const char* fits_text, con
                      std::vector<Sec>& secs, std::string& anchors_json, std::string& error)
 {
     char why[512] = {0};
-    if (!bf6_mount_frontend(c, why, sizeof(why))) { error = why[0] ? why : "The reader cannot mount front-end equipment."; return false; }
+    if (!mount_full(c, why, sizeof(why))) { error = why[0] ? why : "The reader cannot mount front-end equipment."; return false; }
     const std::vector<std::string> ebx = names(c, "common/hardware/");
     const std::vector<Item> items = read_items(c, ebx);
     const Item* item = find_item(items, item_id);
@@ -896,6 +946,23 @@ const char* const k1pStandClip =
     "animations/glacier/assets/1p/common/rifle/loco/p_1p_rifle_stand_idle_01";
 const char* const k1pStandAdditive =
     "animations/glacier/assets/1p/common/rifle/loco/ladtv_1p_rifle_stand_idle_01";
+/* THE OTHER TWO STANCES, WHICH ARE JUST CLIPS.
+ *
+ * Crouch and prone looked like graph states - the install declares
+ * ptm.stancestate.current.enumgs and its stand/crouch/prone items, and a
+ * chooser above 1p.cameraposition.sf picks between three camera pose nodes. All
+ * true, and none of it is needed: the poses themselves ship beside the stand
+ * pose in the shared rifle folder, and reading one is the same work as reading
+ * the other.
+ *
+ * NEITHER HAS A SWAY LAYER. Only stand has a ladtv_ sibling, so these two are
+ * still poses and the caller gets a single frame. That is the honest answer -
+ * a motionless crouch is what the install carries here - and it is the reason
+ * the one-frame case has to be allowed through rather than refused. */
+const char* const k1pCrouchClip =
+    "animations/glacier/assets/1p/common/rifle/loco/p_1p_rifle_crouch_idle_01";
+const char* const k1pProneClip =
+    "animations/glacier/assets/1p/common/rifle/loco/p_1p_rifle_prone_idle_01";
 
 struct Pose {
     std::vector<bf6_anim_binding> bindings;
@@ -976,8 +1043,18 @@ std::string resolve_idle_clip(bf6_ctx* c, const std::string& role,
  * The generic rifle hold is only the fallback for a weapon the lookup cannot
  * place; it differs from the M4A1's own stance by up to 39 degrees on the
  * left hand, which is a hand that misses the weapon. */
-std::string first_person_stance(bf6_ctx* c, const std::string& item)
+std::string first_person_stance(bf6_ctx* c, const std::string& item,
+                                const std::string& stance = "stand")
 {
+    /* CROUCH AND PRONE TAKE THE SHARED POSE, not a weapon-specific one.
+     *
+     * 1p.weaponpose.cdb resolves the weapon's own STAND hold - that is what it
+     * is for, and the M4A1's folder carries exactly one pose clip, its stand
+     * idle. Asking it for a crouch would return that stand hold and the soldier
+     * would stand up while claiming to crouch, which is worse than using the
+     * shared rifle crouch pose the install does carry. */
+    if (stance == "crouch") return k1pCrouchClip;
+    if (stance == "prone")  return k1pProneClip;
     if (!item.empty()) {
         int32_t sw = -1, wt = -1;
         char err[256] = {0};
@@ -1356,7 +1433,8 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
               std::vector<M43>& skin, int& rig_bones, M43& weapon, float foot[3], std::string& error,
               std::vector<BindBone>* bind = nullptr, M43* weapon_local = nullptr,
               int* weapon_bone = nullptr, float* eye_y = nullptr,
-              bool first_person = false, float* view_origin = nullptr)
+              bool first_person = false, float* view_origin = nullptr,
+              M43* mag_local = nullptr, M43* mag2_local = nullptr)
 {
     std::string renderbones;
     /* Prefer the mesh asset's own Renderbones import; some outfits reuse another rig. */
@@ -1422,7 +1500,9 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
                 for (int k = 0; k < 12; ++k)
                     (*bind)[(size_t)i].posed[k] = local[(size_t)i].m[k];
     }
-    int right_hand = -1, right_grip = -1, feet = 0;
+    int right_hand = -1, right_grip = -1, wep_align = -1, feet = 0;
+    int mag_align = -1;   /* the magazine bone, so its geometry can be re-framed */
+    int mag2_align = -1;  /* and the second one, which the reload brings in */
     float eye_l = 0.f, eye_r = 0.f, head_y = 0.f;
     bool have_eye_l = false, have_eye_r = false, have_head = false;
     bool have_weapon = false;
@@ -1434,7 +1514,9 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
         skin[(size_t)i] = mul(from12(s->bones[i].inverse), model[(size_t)i]);
         const char* nm = s->bones[i].name;
         if (!nm) continue;
-        if (std::strcmp(nm, "Wep_Align") == 0) { weapon = model[(size_t)i]; have_weapon = true; }
+        if (std::strcmp(nm, "Wep_Align") == 0) { weapon = model[(size_t)i]; wep_align = i; have_weapon = true; }
+        if (std::strcmp(nm, "Wep_MGZ_Mag1") == 0) mag_align = i;
+        if (std::strcmp(nm, "Wep_MGZ_Mag2") == 0) mag2_align = i;
         if (std::strcmp(nm, "RightHand") == 0) right_hand = i;
         /* WHERE THE SOLDIER'S EYES ARE, at the pose actually shown.
          *
@@ -1482,7 +1564,53 @@ bool skin_for(bf6_ctx* c, const std::set<std::string>& ebx, const std::string& m
         else if (have_head) *eye_y = head_y;
     }
     if (ok) {
-        if (have_weapon && right_hand >= 0 && right_grip >= 0) {
+        if (first_person && have_weapon && wep_align >= 0) {
+            /* FIRST PERSON HOLDS THE WEAPON ON ITS OWN WEAPON BONE.
+             *
+             * The gun's geometry is authored in Wep_Align's frame - that is
+             * what `weapon = model[Wep_Align]` above means - and the 1P clip
+             * DRIVES Wep_Align, along with Wep_Root and both hands. So the
+             * authored hold already agrees about where all three are, and the
+             * weapon needs no re-anchoring at all: ride Wep_Align at identity
+             * and the hands arrive on the gun because the animator put them
+             * there.
+             *
+             * Re-expressing it in the WRIST's frame, as third person must,
+             * throws that away. The rifle then follows the right hand rigidly
+             * and stops responding to the left one, because the left hand is
+             * gripping a weapon whose position is no longer being taken from
+             * the clip that posed it. */
+            if (weapon_local) *weapon_local = identity43();
+            if (weapon_bone) *weapon_bone = wep_align;
+            /* THE MAGAZINE, WHICH RIDES A DIFFERENT BONE.
+             *
+             * The gun's geometry is authored in Wep_Align's frame, which is why
+             * hanging it off Wep_Align at identity is right. The magazine hangs
+             * off Wep_MGZ_Mag1 instead so a reload can take it out, and geometry
+             * in one bone's frame attached to ANOTHER bone is simply in the wrong
+             * place - measured as the magazine sitting off the weapon. So it is
+             * re-expressed in the magazine bone's frame, exactly as the third
+             * person path re-expresses the whole gun in the wrist's.
+             *
+             * THE BIND MATRICES, NOT THE POSED ONES. This first used model[], the
+             * SAMPLED pose, and the magazine came out 162 mm off. An attachment
+             * applies its bone's own transform - rest at build, animated after - so
+             * the frame change has to be the one that holds at REST, or it is only
+             * right for the single frame the palette happened to be sampled at.
+             *
+             * bones[].inverse IS the inverse bind matrix, so the magazine's is
+             * already the inverse this needs and only Wep_Align's has to be undone.
+             */
+            if (wep_align >= 0) {
+                M43 align_bind;
+                if (inverse43(from12(s->bones[(size_t)wep_align].inverse), align_bind)) {
+                    if (mag_local && mag_align >= 0)
+                        *mag_local = mul(align_bind, from12(s->bones[(size_t)mag_align].inverse));
+                    if (mag2_local && mag2_align >= 0)
+                        *mag2_local = mul(align_bind, from12(s->bones[(size_t)mag2_align].inverse));
+                }
+            }
+        } else if (have_weapon && right_hand >= 0 && right_grip >= 0) {
             /* Front-end clips carry a separate weapon IK target whose offset is
              * not applied to the rendered arm: join the authored grip frame to
              * the wrist actually drawn, or every rifle floats above the hands. */
@@ -1519,7 +1647,7 @@ extern "C" int64_t bf6_loadout_catalogue(bf6_ctx* c, uint8_t** out)
 {
     if (!c || !out) return -1;
     char why[512] = {0};
-    if (!bf6_mount_frontend(c, why, sizeof(why))) return -1;
+    if (!mount_full(c, why, sizeof(why))) return -1;
     const std::vector<Item> items = read_items(c, names(c, "common/hardware/"));
     std::string j = "{\"items\":[";
     for (size_t i = 0; i < items.size(); ++i) {
@@ -1562,7 +1690,7 @@ extern "C" int64_t bf6_loadout_attachments(bf6_ctx* c, const char* item_id, cons
 {
     if (!c || !item_id || !out) return -1;
     char why[512] = {0};
-    if (!bf6_mount_frontend(c, why, sizeof(why))) return -1;
+    if (!mount_full(c, why, sizeof(why))) return -1;
     const std::vector<std::string> ebx = names(c, "common/hardware/");
     const std::vector<Item> items = read_items(c, ebx);
     const Item* item = find_item(items, item_id);
@@ -1713,7 +1841,7 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
     };
 
     char why[512] = {0};
-    if (!bf6_mount_frontend(c, why, sizeof(why))) { error = why[0] ? why : "The reader cannot mount front-end equipment."; return finish(); }
+    if (!mount_full(c, why, sizeof(why))) { error = why[0] ? why : "The reader cannot mount front-end equipment."; return finish(); }
     const std::vector<std::string> bundles = names(c, "pf_cha");
     std::set<std::string> ebx;
     for (const std::string& p : names(c, "common/characters/")) ebx.insert(p);
@@ -1781,6 +1909,8 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
 
     M43 weapon = identity43();
     M43 weapon_local = identity43();
+    M43 mag_local = identity43();   /* Wep_Align's frame expressed in the magazine bone's */
+    M43 mag2_local = identity43();  /* and in the second magazine bone's */
     int weapon_bone = -1;
     float camera_y = 0.f;      /* the eye joints' height in rig space, before placing */
     float view[3] = {0, 0, 0}; /* CameraJoint's position, the first-person origin */
@@ -1807,7 +1937,7 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
         int rig_bones = 0;
         if (!skin_for(c, ebx, mesh, pose, skin, rig_bones, weapon, foot, error,
                       want_skin ? &mesh_rig : nullptr, &weapon_local, &weapon_bone,
-                      &camera_y, first_person, view)) {
+                      &camera_y, first_person, view, &mag_local, &mag2_local)) {
             secs.clear();
             return finish();
         }
@@ -1889,14 +2019,40 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
      * named, so it can be attached and ride the animation; otherwise it is
      * planted at the sampled frame, which is all a static soldier needs. */
     transform_sections(gun, want_skin ? weapon_local : weapon);
+    /* And the magazine on top, into the bone it actually hangs from. Skinned
+     * builds only: a static soldier has the whole gun planted at one frame and
+     * nothing rides a bone at all. */
+    /* THE MAGAZINE THE RELOAD BRINGS IN.
+     *
+     * The reload drives TWO magazine bones: Wep_MGZ_Mag1 travels 1243 mm taking the
+     * spent magazine out, and Wep_MGZ_Mag2 travels 751 mm bringing a fresh one in.
+     * The build ships ONE magazine, so the second bone moved nothing and a reload
+     * ended with an empty magazine well.
+     *
+     * The game instances the same mesh twice, and that is safe to reproduce because
+     * all three magazine bones - Mag1, Mag2 and the MGZ_ATT mount - rest at exactly
+     * the same point, measured (0, 67.1, 147.6) mm. So the copy sits hidden inside
+     * the first until the reload pulls them apart.
+     *
+     * Copied BEFORE the first is re-framed, or the copy would be re-framed twice.
+     * The two surfaces are NOT split between the bones: they are 864 and 5080 verts
+     * of one magazine, not two copies, and separating them would tear it in half. */
+    std::vector<Sec> mag2;
+    if (want_skin)
+        for (const Sec& s : gun)
+            if (s.mesh.find("_magazine_") != std::string::npos) mag2.push_back(s);
+    if (want_skin) transform_sections_matching(gun, mag_local, "_magazine_");
+    if (!mag2.empty()) transform_sections(mag2, mag2_local);
     const size_t gun_from = secs.size();
     for (Sec& s : gun) secs.push_back(std::move(s));
-    if (first_person) {
+    if (first_person && !want_skin) {
         /* ANCHORED ON THE EYE, not on the floor. A first-person build has no
          * feet to stand on and its whole job is to be parented to a camera, so
          * the origin is CameraJoint and the engine attaches the record at
          * identity. Placing it by the lowest vertex, as the 3P soldier is,
-         * would hang the arms wherever the shoulders happened to reach. */
+         * would hang the arms wherever the shoulders happened to reach.
+         *
+         * STATIC BUILDS ONLY - see the skinned branch below for why. */
         have_view = view[0] != 0.f || view[1] != 0.f || view[2] != 0.f;
         if (have_view) {
             M43 anchor = identity43();
@@ -1910,14 +2066,68 @@ extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, con
          * space the skinning palette will accept it in - translating it here
          * would be invisible at bind pose, where the palette is the identity,
          * and would tear the soldier apart the moment a pose was applied. The
-         * engine is told where to stand the skeleton instead. */
-        if (any) {
+         * engine is told where to stand the skeleton instead.
+         *
+         * THAT WARNING USED TO BE UNREACHABLE IN FIRST PERSON, because the
+         * branch above claimed `first_person` before this one could test
+         * `want_skin`, so the skinned 1P build had its geometry translated to
+         * the eye after all. It failed exactly as written: invisible at bind
+         * pose, and measured at 274x rest edge length the moment the idle
+         * played, with every vertex sitting the eye height away from the bone
+         * it followed. The arms were being skinned by a palette built for a
+         * mesh that was no longer where the palette expected it.
+         *
+         * So first person takes this path too now. It differs only in where
+         * the root goes: an eye anchor rather than a floor one, because a
+         * first-person build still has no feet to stand on. */
+        if (first_person) {
+            have_view = view[0] != 0.f || view[1] != 0.f || view[2] != 0.f;
+            if (have_view) {
+                root_offset[0] = -view[0];
+                root_offset[1] = -view[1];
+                root_offset[2] = -view[2];
+                have_root = true;
+            }
+        } else if (any) {
             root_offset[0] = -foot[0];
             root_offset[1] = -min_y;
             root_offset[2] = -foot[2];
             have_root = true;
         }
-        for (size_t i = gun_from; i < secs.size(); ++i) secs[i].attach_bone = weapon_bone;
+        /* THE MAGAZINE FOLLOWS THE MAGAZINE BONE, not the whole gun's.
+         *
+         * Every gun section used to hang off Wep_Align, which makes the weapon one
+         * rigid lump. That is why a reload never took the magazine out: the m4a1's
+         * own a_1p_m4a1_stand_reloadtactical_01 drives TWELVE weapon-part bones -
+         * Wep_MGZ_Mag1, its two ammo bones, Wep_MGZ_Mag2, Wep_Bolt1, Wep_Bolt2,
+         * Wep_BoltCatch, Wep_MagRelease, Wep_Trigger and two magnifier bones, all
+         * measured present in BOTH the clip and the rig - and not one of them moved
+         * anything, because no geometry was attached to any of them.
+         *
+         * ONLY WHAT THE DATA SEPARATES CAN BE ATTACHED SEPARATELY. The m4a1 arrives
+         * as 12 gun sections over 9 mesh assets, and the magazine is its own asset
+         * (ob_wep_carbine_m4a1_magazine_1p_mesh), so it can take the magazine bone
+         * while the rest keep Wep_Align. The bolt, trigger and mag release are part
+         * of the receiver mesh and cannot be split here at all - that needs the
+         * source model, not this loop - so their tracks still drive nothing and this
+         * does not pretend otherwise. */
+        int mag_bone = -1;
+        for (size_t i = 0; i < base_rig.size(); ++i)
+            if (base_rig[i].name == "Wep_MGZ_Mag1") { mag_bone = (int)i; break; }
+        for (size_t i = gun_from; i < secs.size(); ++i) {
+            const bool is_mag = secs[i].mesh.find("_magazine_") != std::string::npos;
+            secs[i].attach_bone = (is_mag && mag_bone >= 0) ? mag_bone : weapon_bone;
+        }
+        /* And the incoming magazine, on the second bone. */
+        int mag2_bone = -1;
+        for (size_t i = 0; i < base_rig.size(); ++i)
+            if (base_rig[i].name == "Wep_MGZ_Mag2") { mag2_bone = (int)i; break; }
+        if (mag2_bone >= 0)
+            for (Sec& s : mag2) {
+                s.attach_bone = mag2_bone;
+                secs.push_back(std::move(s));
+            }
+        mag2.clear();
     } else if (any) {
         M43 anchor = identity43();
         anchor.m[9] = -foot[0];
@@ -1943,7 +2153,7 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
     if (!c || !out) return -1;
     *out = nullptr;
     char why[512] = {0};
-    if (!bf6_mount_frontend(c, why, sizeof(why))) return -1;
+    if (!mount_full(c, why, sizeof(why))) return -1;
 
     bf6json::Value req;
     if (request_json && *request_json) {
@@ -1977,12 +2187,30 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
     bf6_skeleton* s = nullptr;
     bf6_anim_clip* clip = nullptr;
     bf6_anim_clip* add_clip = nullptr;
+    /* The additive asset. Chosen inside the first_person branch and read again
+     * where the clip is opened, so it is declared out here beside add_clip. */
+    std::string swayclip;
+    const char* add_asset = k1pStandAdditive;
     do {
         if (first_person) {
             /* The first-person resting hold. Now that the RAW and flat pose
              * containers read, this is the authored asset rather than frame 0
              * of a turn-in-place transition standing in for it. */
-            clip_path = first_person_stance(c, field(req, "item", "carbine/m4a1"));
+            const std::string stance = field(req, "stance", "stand");
+            /* "clip" NAMES ONE OUTRIGHT, bypassing the stance lookup.
+             *
+             * The stance names cover the three poses the install ships as
+             * poses. Everything else a first-person view does - the slide, the
+             * turns, the stance transitions - ships as its own clip under its
+             * own name, and there are 160 of them for the rifle alone. Naming
+             * them one at a time in here would be a list that goes stale; the
+             * caller knows which it wants. It is also the only way to find out
+             * whether a clip binds against this rig at all without a rebuild
+             * per guess. */
+            const std::string named = field(req, "clip", "");
+            clip_path = named.empty()
+                ? first_person_stance(c, field(req, "item", "carbine/m4a1"), stance)
+                : named;
             bf6_anim_binding_stats st{};
             const int n = bf6_anim_bindings(c, clip_path.c_str(), rig_ebx, ske_ebx,
                                             nullptr, 0, &st);
@@ -2005,17 +2233,76 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
              *
              * Absent or unbindable, the hold is simply still. A missing fidget
              * layer is not a reason to refuse the arms. */
+            /* "sway":"0" LEAVES IT OFF, for measurement rather than for taste.
+             *
+             * The hands hold the weapon rigidly, so the transform from the
+             * weapon bone to each hand must not change over the clip. It does:
+             * 0.0 mm at the loop ends and up to 22 mm in between, and the loop
+             * ends are exactly where this layer's excursion is zero. That
+             * implicates the layer, but implicating is not proving, and the
+             * only way to tell a broken sway from a broken grip underneath it
+             * is to measure the same thing with the sway absent. */
+            /* AND ONLY STAND HAS ONE. There is no ladtv_ sibling for the crouch
+             * or the prone pose, so asking for one there is a guaranteed
+             * binding failure dressed up as a missing fidget layer. Skip it by
+             * name rather than by letting it fail. */
+            /* The sway belongs to the stand POSE. A named clip is a transition
+             * or a cycle with its own motion, so layering the stand fidget over
+             * it would be two animations at once. */
+            const bool sway = field(req, "sway", "1") != "0" && stance == "stand"
+                && named.empty();
+            /* WHICH additive, overridable for measurement.
+             *
+             * k1pStandAdditive is `ladtv_1p_rifle_stand_idle_01`, and `ladtv_` is
+             * a LAYER additive: that one is layer 0 of 1p.legs.idle.slc, the LEGS.
+             * The arms have their own (`adtv_oma_rifle_stand_idle_01`) with a
+             * breathing cycle beside it. Which of them is the 1P hold's fidget is
+             * a question for the grip measurement, not for the folder a file
+             * happens to sit in. */
+            swayclip = field(req, "swayclip", "");
+            add_asset = swayclip.empty() ? k1pStandAdditive : swayclip.c_str();
             bf6_anim_binding_stats ast{};
-            const int an = bf6_anim_bindings(c, k1pStandAdditive, rig_ebx, ske_ebx,
-                                             nullptr, 0, &ast);
+            const int an = sway ? bf6_anim_bindings(c, add_asset, rig_ebx, ske_ebx,
+                                                   nullptr, 0, &ast) : 0;
             if (an > 0 && an <= 4096) {
                 add_bindings.assign((size_t)an, bf6_anim_binding{});
-                if (bf6_anim_bindings(c, k1pStandAdditive, rig_ebx, ske_ebx,
+                if (bf6_anim_bindings(c, add_asset, rig_ebx, ske_ebx,
                                       add_bindings.data(), an, &ast) != an)
                     add_bindings.clear();
             }
         } else {
-            clip_path = resolve_idle_clip(c, role, bindings, stats, error);
+            /* "clip" OVERRIDES THE THIRD-PERSON IDLE TOO.
+             *
+             * resolve_idle_clip answers with a FRONT-END idle - for the assault
+             * rifle it is ui_frontend_standing_idle_assault_02 - because this
+             * whole path was built for the loadout screen, where that is exactly
+             * right. A soldier standing at a spawner in a level is not on the
+             * loadout screen, and a menu pose there reads as wrong.
+             *
+             * The install ships gameplay idles beside it (p_3p_rifle_stand_idle_01,
+             * l_3p_rifle_stand_idle_01 and its intensity variants), so a caller
+             * that knows it is placing a soldier in the world can ask for one. */
+            const std::string named3p = field(req, "clip", "");
+            clip_path = named3p.empty()
+                ? resolve_idle_clip(c, role, bindings, stats, error)
+                : named3p;
+            if (!named3p.empty()) {
+                /* A named clip needs its own bindings; resolve_idle_clip fills
+                 * them as a side effect and is not being called. */
+                bf6_anim_binding_stats st{};
+                const int n = bf6_anim_bindings(c, clip_path.c_str(), rig_ebx, ske_ebx,
+                                                nullptr, 0, &st);
+                if (n < 1 || n > 4096) {
+                    error = "That clip has no readable animation binding.";
+                    break;
+                }
+                bindings.assign((size_t)n, bf6_anim_binding{});
+                if (bf6_anim_bindings(c, clip_path.c_str(), rig_ebx, ske_ebx,
+                                      bindings.data(), n, &stats) != n) {
+                    error = "That clip has no readable animation binding.";
+                    break;
+                }
+            }
         }
         if (clip_path.empty()) break;
         /* The PLAIN rig, with no renderbones appended: a clip binds rig bones,
@@ -2050,7 +2337,7 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
          * Dropped rather than refused if its own layout check fails, on the
          * same principle as the binding above. */
         if (!add_bindings.empty()) {
-            add_clip = bf6_anim_clip_open(c, k1pStandAdditive);
+            add_clip = bf6_anim_clip_open(c, add_asset);
             if (!add_clip || add_clip->channel_count < 1 ||
                 add_clip->channel_count > (int)add_bindings.size() ||
                 add_clip->key_time_count < 1) {
@@ -2089,10 +2376,38 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
         std::vector<M43> model((size_t)s->bone_count);
         std::vector<float> add_channels;
         if (add_clip) add_channels.assign((size_t)add_clip->channel_count * 4, 0.f);
+        /* THE ADDITIVE, GATHERED PER BONE. Allocated once outside the frame loop
+         * rather than per frame: 799 frames times a few hundred bones is not a
+         * place to be calling the allocator. `add_d` holds identity rotations so
+         * a bone with only a translation delta composes against identity rather
+         * than against whatever was left from the previous frame. */
+        std::vector<M43> add_d((size_t)s->bone_count, identity43());
+        std::vector<uint8_t> add_rot, add_trans;
         /* The equipped weapon's grip over the class hold, and the left hand to
          * the weapon, on EVERY frame - the same two steps bf6_loadout_soldier
          * applies to its one frame, so frame 0 here is still its `posed`. */
-        const std::vector<GripOverride> grip = first_person
+        /* THE WEAPON'S GRIP, which was off for first person.
+         *
+         * weapon_hpose_overrides reads the weapon's own authored hand poses - the
+         * install carries hposes.grippose.cdb with lefthand, righthand and attach
+         * variants, plus wep.gripposemaster.cdb - and apply_grip writes them over
+         * the class hold. Without it every weapon is held in the generic rifle
+         * grip, which is the difference between a hand ON the gun and a hand near
+         * it, and it is exactly the "different grips" the tool did not have.
+         *
+         * It was gated to third person with no reason recorded. "grip":"0" turns it
+         * off again so the two can be compared on grip rigidity, which is the only
+         * judge that has held up on this file.
+         *
+         * MEASURED, AND THE GATE WAS RIGHT: turning it on took the hand slide from
+         * 5.02 to 18.61 mm. The reason is that hposes.* are THIRD-person hand poses
+         * (hposes.lefthand.m4a1.pc and its siblings live under assets/3p/), and the
+         * first-person grip is already baked into the weapon-specific 1P stance
+         * pose - p_1p_oma_m4a1_stand_idle_01 is the M4A1 hold, grip included. So
+         * first person HAS per-weapon grips; it just does not get them from here.
+         * "grip":"1" turns it on for measurement. */
+        const std::vector<GripOverride> grip =
+            (first_person && field(req, "grip", "0") != "1")
             ? std::vector<GripOverride>()
             : weapon_hpose_overrides(c, field(req, "item", "carbine/m4a1"), bindings, clip->channel_count);
 
@@ -2118,40 +2433,162 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
                 else if (b.component == BF6_ANIM_DOF_VECTOR3)
                     for (int k = 0; k < 3; ++k) local[(size_t)b.bone].m[9 + k] = v[k];
             }
-            /* THE ADDITIVE LAYER, applied on top of the posed local. A delta
-             * rotation composes, a delta translation adds - that is what makes
-             * it additive rather than a second pose overwriting the first.
+            /* THE ADDITIVE LAYER, AS ONE TRANSFORM PER BONE.
              *
-             * Composition is on the RIGHT (posed * delta), which applies the
-             * sway in the bone's own local frame. That side is not established
-             * from the data: at this clip's magnitudes - largest excursion
-             * 0.034, about two degrees - the two orders differ by far less than
-             * a degree, so the values cannot distinguish them. It is the one
-             * thing here taken from convention rather than measured, and the
-             * way to settle it is the runtime's own blend routine, not more
-             * staring at clip values. */
+             * It used to be applied per BINDING, one component at a time, with
+             * the rotation composed on the right and the translation simply
+             * added. Two things were wrong with that.
+             *
+             * THE SIDE. The old note here said the clip's magnitudes - largest
+             * excursion 0.034, about two degrees - cannot distinguish
+             * posed*delta from delta*posed. That is true of the VALUES and
+             * false of the RESULT. The hands hold the weapon, so the transform
+             * from the weapon bone to each hand cannot change across the clip,
+             * and the wrong side breaks exactly that. Measured, as the largest
+             * slide of four hand bones against Wep_Align over the clip:
+             *
+             *     right (posed*delta)   21.49 .. 31.66 mm
+             *     left  (delta*posed)    3.51 ..  7.18 mm
+             *     third person, control   0.00 mm
+             *
+             * Third person being exactly rigid is what makes that readable: a
+             * correct hold does not slide at all. So the side is LEFT.
+             *
+             * THE COMPONENTS ARE NOT INDEPENDENT. These are row-vector 3x4s, so
+             * composing delta then bone sends a point to p*Rd*Rm + td*Rm + tm.
+             * The translation therefore picks up the bone's OWN rotation, and
+             * adding it raw - as the per-binding version did - drops that term.
+             * Doing it per binding could not have got this right in any case,
+             * because the two components arrive as separate bindings in no
+             * guaranteed order, and the answer depends on both.
+             *
+             * So the deltas are gathered per bone first, then applied once. */
             if (add_clip && ok) {
                 if (!bf6_anim_clip_sample(c, add_clip, f, add_channels.data(), nullptr)) { ok = false; break; }
+                add_rot.assign((size_t)s->bone_count, 0);
+                add_trans.assign((size_t)s->bone_count, 0);
                 for (const bf6_anim_binding& b : add_bindings) {
                     if (b.bone < 0 || b.bone >= s->bone_count) continue;
                     if (b.channel < 0 || (size_t)b.channel * 4 + 3 >= add_channels.size()) { ok = false; break; }
                     const float* v = add_channels.data() + (size_t)b.channel * 4;
-                    float* m = local[(size_t)b.bone].m;
                     if (b.component == BF6_ANIM_DOF_QUATERNION) {
-                        float d[12] = {0};
-                        quat_rows(v[0], v[1], v[2], v[3], d);
-                        float r[9];
-                        for (int i = 0; i < 3; ++i)
-                            for (int j = 0; j < 3; ++j)
-                                r[i*3+j] = m[i*3+0]*d[0*3+j] + m[i*3+1]*d[1*3+j] + m[i*3+2]*d[2*3+j];
-                        for (int k = 0; k < 9; ++k) m[k] = r[k];
+                        quat_rows(v[0], v[1], v[2], v[3], add_d[(size_t)b.bone].m);
+                        add_rot[(size_t)b.bone] = 1;
                     } else if (b.component == BF6_ANIM_DOF_VECTOR3) {
-                        for (int k = 0; k < 3; ++k) m[9 + k] += v[k];
+                        for (int k = 0; k < 3; ++k) add_d[(size_t)b.bone].m[9 + k] = v[k];
+                        add_trans[(size_t)b.bone] = 1;
                     }
                 }
                 if (!ok) break;
+                const std::string side = field(req, "swayside", "left");
+                /* THE LAYER IS MASKED, AND THIS WAS NOT MASKING IT.
+                 *
+                 * `ladtv_1p_rifle_stand_idle_01` is layer 0 of 1p.legs.idle.slc,
+                 * and that layer carries the blend mask
+                 * animations/kingston/global/blendmasks/1p.lowerbodyandchest.bml.
+                 * Read out of the authored data, its 25 per-set weights are:
+                 *
+                 *   1 : connect ground trajectory deltatrajectory hips leftleg
+                 *       rightleg lvelocityrig rvelocityrig ik.leftfoot
+                 *       ik.rightfoot torso
+                 *   0 : camera camera3p lefthand leftarm righthand rightarm
+                 *       head headgear spinex weaponroot weaponparts weapon2*
+                 *
+                 * The sway is authored for the legs, hips and chest and is
+                 * explicitly ZERO on the hands, the arms and the weapon. The
+                 * `ladtv_` prefix says the same: it is a LAYER additive and it
+                 * belongs to the lower body. Applying it to everything is what
+                 * left the hands sliding 3.5..7.2 mm along a weapon they hold
+                 * rigidly, where third person measures 0.00 mm.
+                 *
+                 * WHAT THIS IS NOT: matching bone NAMES is a hypothesis test,
+                 * not the mask. The real mask is 25 DOF sets of packed 64-bit
+                 * descriptors - lefthand.ds alone holds 141 - and decoding those
+                 * is the correct fix. This decides whether that work is
+                 * justified: "lowerbody" should take the slide to about 0.00 mm,
+                 * and if it does not then the mask was never the cause.
+                 *
+                 * MEASURED, AND IT DOES NOT. "lowerbody" took the slide from
+                 * 5.02 mm UP to 17.49 mm, so this is refused as the default and
+                 * the descriptors are NOT worth decoding for this. The reason is
+                 * instructive: LeftShoulder contains neither "Hand" nor "Arm",
+                 * so it kept the sway while LeftArm, LeftForeArm and LeftHand
+                 * lost it, and breaking a chain halfway is worse than leaving it
+                 * whole. A name is not a DOF set.
+                 *
+                 * The likelier reading is that this layer is simply not the 1P
+                 * hold s fidget at all: `ladtv_` is a LAYER additive and this one
+                 * is layer 0 of 1p.legs.idle.slc, the LEGS. Whatever sways the
+                 * arms is a different asset, and that is the thread to pull. */
+                const std::string mask = field(req, "swaymask", "none");
+                for (int i = 0; i < s->bone_count; ++i) {
+                    if (!add_rot[(size_t)i] && !add_trans[(size_t)i]) continue;
+                    if (mask == "lowerbody") {
+                        const char* bn = s->bones[i].name;
+                        if (bn && (std::strstr(bn, "Hand") || std::strstr(bn, "Arm")
+                                   || std::strstr(bn, "Wep") || std::strstr(bn, "Camera")))
+                            continue;
+                    }
+                    float* m = local[(size_t)i].m;
+                    const float* d = add_d[(size_t)i].m;
+                    float r[12];
+                    for (int k = 0; k < 12; ++k) r[k] = m[k];
+                    if (add_rot[(size_t)i]) {
+                        for (int y = 0; y < 3; ++y)
+                            for (int x = 0; x < 3; ++x)
+                                r[y*3+x] = (side == "right")
+                                    ? m[y*3+0]*d[0*3+x] + m[y*3+1]*d[1*3+x] + m[y*3+2]*d[2*3+x]
+                                    : d[y*3+0]*m[0*3+x] + d[y*3+1]*m[1*3+x] + d[y*3+2]*m[2*3+x];
+                    }
+                    /* THE TRANSLATION IS ADDED RAW, on either side.
+                     *
+                     * Composing it as the row-vector algebra suggests - td*Rm +
+                     * tm, the delta turned by the bone's own rotation - was
+                     * tried and is wrong: it took the slide from 3.51..7.18 mm
+                     * back up to 19.15..22.29 mm. So the delta translation is
+                     * already in the frame the bone's translation is in, which
+                     * is the parent's, and the only correct thing to do with it
+                     * is add it. The rotation and the translation of this layer
+                     * are therefore NOT two halves of one transform, however
+                     * much they look like it. */
+                    if (add_trans[(size_t)i])
+                        for (int k = 0; k < 3; ++k) r[9 + k] = m[9 + k] + d[9 + k];
+                    for (int k = 0; k < 12; ++k) m[k] = r[k];
+                }
             }
-            if (!first_person) {
+            /* THE LEFT HAND SOLVED ONTO THE WEAPON, in first person too.
+             *
+             * This was third person only, with the note that "whether the
+             * first-person holds want the same pass is not established". The grip
+             * measurement establishes it. The hands hold the weapon, so the
+             * transform from Wep_Align to each hand cannot change across the clip,
+             * and:
+             *
+             *   third person, WITH this solve      0.00 mm of slide
+             *   first person, WITHOUT it           5.02 .. 7.18 mm
+             *
+             * Third person is not rigid by luck - it is rigid BECAUSE this pass
+             * forces it, and the soldier feature layer carries
+             * common/gameplay/soldier/animation/ikchain_lefthand for exactly this.
+             *
+             * Two other explanations for that residual were tried and refuted by
+             * measurement first: masking the sway to its authored
+             * 1p.lowerbodyandchest weights took it UP to 17.49 mm, and every other
+             * candidate additive scored worse (12.38, 12.57, 10.25) or was inert.
+             * MEASURED, AND IT IS ALSO REFUTED: enabling it for first person took
+             * the LEFT hand from 5.02 to 6.96 mm and left the right hand at 3.51,
+             * which it would, since it only solves the left arm. So it stays off
+             * for first person and "iksolve":"1" turns it on for measurement.
+             *
+             * AND THE TARGET ITSELF WAS WRONG. Third person is rigid on the RIGHT
+             * hand too, which no left-arm solve can explain. In third person the
+             * weapon rides RightHand through the grip transform; in first person
+             * Wep_Align is animated on its own tracks. The two are built
+             * differently, so 0.00 mm was never the figure first person should be
+             * held to, and a few millimetres of authored hand-to-weapon variance
+             * may simply be correct. Three hypotheses, three refutations, and the
+             * fourth candidate is that there is nothing here to fix. */
+            if (!first_person || field(req, "iksolve", "0") == "1") {
                 bool topo = true;
                 for (int i = 0; i < s->bone_count && topo; ++i) {
                     const int p = s->bones[i].parent;
@@ -2168,11 +2605,33 @@ extern "C" int64_t bf6_loadout_soldier_clip(bf6_ctx* c, const char* request_json
         }
         if (!ok) { error = "The selected soldier pose could not be sampled."; break; }
 
+        /* THE NAME, NOT JUST THE INDEX.
+         *
+         * `bone_of` indexes THIS skeleton - the plain rig composed above, with
+         * no renderbones appended. The caller's skeleton is not that list: it
+         * is built per mesh and carries each section's renderbones, so the same
+         * ordinal is not the same bone on both sides. Third person survives it
+         * because the appended bones land past the shared base and leave the
+         * low indices alone. First person does not, and there the index alone
+         * sends every rotation to a different joint.
+         *
+         * Nothing about that can fail loudly. An index in range always names a
+         * real bone, so every track binds, every quaternion stays an ordinary
+         * rotation, and the only symptom is a skin pulled apart between joints
+         * that disagree - measured at 274x rest edge length on the 1P arms.
+         *
+         * So the name goes on the wire and the caller resolves it. The index
+         * stays, because a reader that already trusts it is no worse off and
+         * dropping a field from a record breaks them for no gain. */
         for (int t = 0; t < bones_out; ++t) {
+            const int bi = bone_of[(size_t)t];
             char buf[128];
-            std::snprintf(buf, sizeof(buf), "%s{\"bone\":%d,\"track\":%zu}", t ? "," : "",
-                          bone_of[(size_t)t], (size_t)t * (size_t)frames * 12);
+            std::snprintf(buf, sizeof(buf), "%s{\"bone\":%d,\"track\":%zu,\"name\":",
+                          t ? "," : "", bi, (size_t)t * (size_t)frames * 12);
             tracks_json += buf;
+            const char* bn = (bi >= 0 && bi < s->bone_count) ? s->bones[(size_t)bi].name : nullptr;
+            json_str(tracks_json, bn ? bn : "");
+            tracks_json += "}";
         }
     } while (false);
     if (add_clip) bf6_free(c, add_clip);

@@ -96,6 +96,15 @@ public:
     // A field's type_va -> what that type is.
     ResolvedType resolve(uint64_t type_va) const;
 
+    // A type's declared instance size by its NAME HASH (the u32 8 bytes before
+    // its guid), 0 when no record carries that hash. A candidate counts only if
+    // layout(its guid) reads back the same hash, so a stray matching dword
+    // elsewhere in the section cannot answer. For the expression VM's typed
+    // copies, whose width is the data type's size (ExpressionBoneId = 16).
+    uint32_t size_by_name_hash(uint32_t name_hash);
+    /* The guid of the type a name hash names, false when nothing carries it. */
+    bool guid_by_name_hash(uint32_t name_hash, TypeGuid& out);
+
     // Research: the first `n` qwords of the TypeInfoData a type_va points at,
     // so a record whose layout resolve() does not know can be read directly.
     std::vector<uint64_t> debug_typeinfo_qwords(uint64_t type_va, int n) const;
@@ -171,6 +180,7 @@ private:
 
     std::map<TypeGuid, TypeLayout> layout_cache_;
     std::map<TypeGuid, TypeLayout> full_cache_;
+    std::map<uint32_t, uint32_t>   size_by_hash_cache_;
     TypeLayout                     empty_;
 };
 

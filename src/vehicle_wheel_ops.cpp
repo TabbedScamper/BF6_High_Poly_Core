@@ -2833,9 +2833,21 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * a lateral gear offset is an uncancelled roll. This measures whether that is
          * what rolls a helicopter over, WITHOUT inventing gear geometry to do it. */
         const bool susp_at_com = std::getenv("BF6_SUSP_AT_COM") != nullptr;
+        /* BF6_SUSP_NO_A2=1 drops operand 2 from the application point. THE REASON TO
+         * DOUBT IT: 8C83D835 is NOT in the executable's reflected registry, so unlike the
+         * jet, both rotors, the wing, the damping and the hull, this operator has no
+         * authoritative parameter names - the claim that operand 2 is a HandlingOffset
+         * comes from an inferred study, and inferred maps from that source have already
+         * been wrong once (the tail rotor's config offsets). The ah64e's three gears read
+         * operand 2 as (1,0,0,0), (0,0,0,0) and (-0,0,0,0), which is a unit basis vector
+         * and two zeros rather than the three positions a gear layout would have, and the
+         * stiff spring sits on the SINGLETON while the soft pair share theirs - inverted
+         * from a tricycle gear, where the mains carry the weight. */
+        const bool no_a2 = std::getenv("BF6_SUSP_NO_A2") != nullptr;
         for (int i = 0; i < 4; ++i) {
             const float pt = susp_at_com ? body_.com[i]
-                                         : rf(a[2], 4 * i) + rf(PB, base + 4 * i);
+                             : (no_a2 ? rf(PB, base + 4 * i)
+                                      : rf(a[2], 4 * i) + rf(PB, base + 4 * i));
             r1.p[i] = r2.p[i] = r3.p[i] = pt;
             r1.f[i] = dt * (spring * dir[i]) * force_scale;
             r2.f[i] = dt * (damper * dir[i]) * force_scale;

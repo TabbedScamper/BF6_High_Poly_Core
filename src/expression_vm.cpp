@@ -765,11 +765,45 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
         if (record.kind == 0x26 && !record.operands.empty()) {
             const Value condition = materialize(graph, instance, slots,
                                                 record.operands[0], 1);
+            /* AN UNTOUCHED CONDITION IS FALSE, not a coin flip. A slot that no record has
+             * actually written holds the buffer's zero, which is what the engine's
+             * zero-initialised state block would give - but `never_written` excludes any
+             * slot a record COULD write, including the eight wheel blocks of eleven that
+             * a helicopter graph never runs. That excluded a one-byte branch condition,
+             * which then read UNKNOWN and left the evaluator guessing; it guessed
+             * fall-through, and fall-through is the wrong side.
+             *
+             * Reading EVERY untouched narrow slot as a known zero was tried first and is
+             * wrong: it destroyed all six airplanes (the f16 went from 67.25 m/s at 73 m
+             * to 0.24 m/s on the ground), because value reads rely on unknown propagating.
+             * So this applies to the BRANCH DECISION only, where the alternative is a
+             * guess rather than a computation. */
             if (condition.known) {
                 if (!condition.as_bool()) next = record.control_target;
             } else {
                 ++result.guessed_branches;
-                result.diagnostics.push_back("unknown branch condition; followed fall-through @" + std::to_string(record.offset));
+                /* BF6_GUESS_TAKE=<hex rec>[,<hex rec>...]: take the branch at these
+                 * records instead of falling through. An unknown condition is a COIN
+                 * FLIP the evaluator has to resolve somehow, and falling through is a
+                 * convention, not a measurement - so when a guessed branch sits upstream
+                 * of the behaviour under investigation, the only way to find out whether
+                 * the convention is the right one is to try the other side. The ah64e
+                 * guesses five branches a tick and two of them precede every suspension
+                 * block it runs. */
+                bool take = false;
+                if (const char* want = std::getenv("BF6_GUESS_TAKE"))
+                    for (const char* p = want; *p;) {
+                        char* e = nullptr;
+                        const unsigned long r = std::strtoul(p, &e, 16);
+                        if (e == p) break;
+                        if ((uint32_t)r == record.offset) { take = true; break; }
+                        p = *e ? e + 1 : e;
+                    }
+                if (take) next = record.control_target;
+                result.diagnostics.push_back(
+                    std::string("unknown branch condition; followed ") +
+                    (take ? "TAKEN (forced)" : "fall-through") + " @" +
+                    std::to_string(record.offset));
                 last_written.tainted = true;
             }
         } else if (record.kind == 0x28 && !record.operands.empty()) {

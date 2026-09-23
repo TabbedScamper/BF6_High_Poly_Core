@@ -37,6 +37,16 @@ struct Slots {
     std::set<uint32_t> never_written;
     /* Per byte: whether ANY record's output span can reach it. */
     std::vector<uint8_t> writable;
+    /* Per byte: nothing touched it during the whole previous tick (see
+     * Instance::untouched_last_tick). Empty on the first tick. */
+    const std::vector<uint8_t>* untouched_prev = nullptr;
+    /* BF6_ZERO_UNTOUCHED_BOOLS=1: credit a one-byte read of such a byte with the zero the
+     * engine's zero-initialised state would give, instead of leaving it unknown and making
+     * the evaluator guess a branch. MEASURED, and left off: it raises every airplane's
+     * climb a long way (the f22 from 17.5 m to 489 m while keeping 51 m/s) but does NOT
+     * fix the ah64e, and raising five aircraft on a wing with no stall curve is not a
+     * change worth blessing while it cannot be judged. */
+    bool zero_untouched_bools = std::getenv("BF6_ZERO_UNTOUCHED_BOOLS") != nullptr;
 
     /* ARRAY HEAP. Expression arrays are an 8-byte data pointer with the element
      * count at data-4 (research: expression-lerp-array-iteration-and-context-nodes).
@@ -95,8 +105,22 @@ struct Slots {
          * counts as unwritable only if it falls outside every record's output span,
          * which is bounded generously below, so this under-claims rather than over. */
         for (uint32_t i = 0; i < width; ++i)
-            if (!initialized[offset + i] && offset + i < writable.size() &&
-                !writable[offset + i])
+            if (!initialized[offset + i] &&
+                ((offset + i < writable.size() && !writable[offset + i]) ||
+                 /* OR a whole previous tick went by without anything touching it, which
+                  * settles what the static span cannot: the span says a record MIGHT
+                  * write this byte, a finished tick says none did. */
+                 /* ONE-BYTE READS ONLY. A bool - which is what a branch condition is -
+                  * has nowhere else to come from, and the alternative for it is a GUESS.
+                  * A wider value read is left alone because the airplanes depend on
+                  * unknown propagating through them: crediting every untouched byte this
+                  * way took the f16 from 67.25 m/s at 73 m to 0.12 m/s on the ground. It
+                  * also made the boat suddenly make way, 22.12 m/s where it had never
+                  * moved, so there is a real gap behind those wide reads - but it is the
+                  * boat's own gap and not something to buy with six aircraft. */
+                 (width == 1 && zero_untouched_bools && untouched_prev &&
+                  offset + i < untouched_prev->size() &&
+                  (*untouched_prev)[offset + i])))
                 v.known_bytes[i] = 1;
         for (uint32_t i = 0; i < width; ++i) {
             const bool byte_known = v.known_bytes[i] != 0;
@@ -570,6 +594,31 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
         return result;
     }
     Slots slots(graph.header.slot_file_size);
+    /* CARRY LAST TICK'S EVIDENCE IN, AND THIS TICK'S OUT. A byte still untouched when a
+     * tick ends is one nothing writes, which is what the static output spans cannot tell.
+     * The guard records it on every exit path, of which this function has several. */
+    if (instance && !instance->untouched_last_tick.empty())
+        slots.untouched_prev = &instance->untouched_last_tick;
+    /* BF6_PERSIST_SLOTS=1 restores the slot file as the previous tick left it, which is
+     * what the engine does - its state block lives across frames. Off by default until
+     * the fleet says it is safe. */
+    const bool persist_slots = std::getenv("BF6_PERSIST_SLOTS") != nullptr;
+    if (persist_slots && instance && instance->slot_bytes_prev.size() == slots.bytes.size()) {
+        slots.bytes = instance->slot_bytes_prev;
+        slots.initialized = instance->slot_init_prev;
+    }
+    struct RecordUntouched {
+        Instance* inst;
+        const Slots& s;
+        ~RecordUntouched() {
+            if (!inst) return;
+            inst->untouched_last_tick.assign(s.initialized.size(), 0);
+            for (size_t i = 0; i < s.initialized.size(); ++i)
+                inst->untouched_last_tick[i] = s.initialized[i] ? 0u : 1u;
+            inst->slot_bytes_prev = s.bytes;
+            inst->slot_init_prev = s.initialized;
+        }
+    } record_untouched{instance, slots};
     /* THE HEAP, LENT TO THE HOSTS for this run and taken back at the end, so a host
      * that grows an engine vector (the tank's track sampler writes one contact per
      * road wheel) can hand the graph a pointer the array operators understand. The
@@ -708,7 +757,21 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
     slots.writable.assign(slots.bytes.size(), 0);
     for (const Record& rec : graph.records) {
         const uint32_t mw = move_width(rec);
+        /* The fallback span for a record that states no move width. 272 was chosen to
+         * over-cover, but it covers seventeen times the widest ordinary output and left
+         * nearly the whole slot file "writable", which defeats the known-zero rule that
+         * depends on a byte lying OUTSIDE every span. Counted lists keep 272 above. */
+        const uint32_t kSpan = std::getenv("BF6_WIDE_SPAN") ? 272u : 64u;
+        /* BF6_WRITABLE_AT=<hex byte>: which record and operand claim that byte as
+         * possibly-written. A byte inside any claim cannot be credited with the buffer's
+         * zero, so it reads UNKNOWN, and for a one-byte branch condition that means the
+         * evaluator guesses. Knowing WHICH claim covers it beats guessing span sizes. */
+        static const char* const want_w = std::getenv("BF6_WRITABLE_AT");
+        const uint32_t want_byte = want_w ? (uint32_t)std::strtoul(want_w, nullptr, 16) : 0xFFFFFFFFu;
         auto cover = [&](uint32_t off, uint32_t w) {
+            if (want_w && want_byte >= off && want_byte < off + w)
+                std::fprintf(stderr, "writable 0x%X claimed by rec 0x%X operand 0x%X span %u\n",
+                             want_byte, rec.offset, off, w);
             for (uint32_t i = 0; i < w && off + i < slots.writable.size(); ++i)
                 slots.writable[off + i] = 1;
         };
@@ -718,8 +781,27 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 if (rec.operands[o].region == 2) cover(rec.operands[o].offset, 272);
             continue;
         }
-        for (const Operand& op : rec.operands)
-            if (op.region == 2) cover(op.offset, mw > 16 ? mw : 272);
+        /* ONLY THE OUTPUT OPERANDS, because an INPUT never writes. Covering 272 bytes
+         * from every operand of every record marked very nearly the whole slot file
+         * writable, which defeated the byte-level rule above: an uninitialised byte is
+         * credited with the buffer's zero only when it lies outside every output span,
+         * and almost none did. A one-byte branch condition at 0x8432 on the ah64e is
+         * caught that way - nothing writes it, but it sits inside some unrelated
+         * operand's 272-byte span, so it reads UNKNOWN and the evaluator has to GUESS the
+         * branch. That one guess is the difference between the ah64e falling 160 metres
+         * and hovering.
+         *
+         * Where a record states its input and output counts, the outputs are the operands
+         * from n_in onward; a record stating neither keeps the old behaviour, so this
+         * narrows the claim only where the record itself says how. */
+        if (rec.n_out > 0 && (uint32_t)rec.n_in + rec.n_out <= rec.operands.size()) {
+            for (uint32_t o = rec.n_in; o < (uint32_t)rec.n_in + rec.n_out; ++o)
+                if (rec.operands[o].region == 2)
+                    cover(rec.operands[o].offset, mw > 16 ? mw : 272);
+        } else {
+            for (const Operand& op : rec.operands)
+                if (op.region == 2) cover(op.offset, mw > 16 ? mw : kSpan);
+        }
     }
 
     std::map<uint32_t, unsigned> back_edges;   /* record offset -> times its back-edge ran */

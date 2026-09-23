@@ -126,6 +126,32 @@ struct Instance {
      * where an offline caller does the same. Empty by default, so nothing changes for
      * a caller that does not use it. */
     std::map<uint32_t, Value> slot_seed;
+    /* BYTES NO RECORD TOUCHED DURING A WHOLE PREVIOUS TICK, as evidence for the next one.
+     *
+     * Statically, a byte inside any record's possible output span cannot be credited with
+     * the buffer's zero, because that record might write it - and the spans deliberately
+     * over-cover. That is right for a byte a running record writes LATER in the tick, and
+     * wrong for a byte nothing writes at all: an ah64e branch condition sat inside a
+     * counted list's 272-byte claim and a one-byte flag's span, was read UNKNOWN, and left
+     * the evaluator guessing a branch that decides whether the aircraft hovers or rolls
+     * over.
+     *
+     * A whole tick settles it. A byte still untouched when a tick ends is one nothing
+     * writes, so from the next tick on it reads as the zero the engine's zero-initialised
+     * state block would give. Empty on the first tick, so first-tick behaviour is
+     * unchanged - which matters, because reading every such byte as zero from the start
+     * destroyed all six airplanes (the f16 fell from 67.25 m/s at 73 m to 0.24 m/s on the
+     * ground). */
+    std::vector<uint8_t> untouched_last_tick;
+    /* THE SLOT FILE AS THE PREVIOUS TICK LEFT IT, because the engine's state block
+     * PERSISTS ACROSS FRAMES and this evaluator rebuilt it from scratch every tick.
+     * A value written late in one tick and read early in the next - a previous-frame
+     * value, which is ordinary in these graphs - was therefore read uninitialised for
+     * ever. On the ah64e that is a one-byte branch condition the evaluator then has to
+     * GUESS, and the guess decides whether the aircraft hovers or rolls into the ground.
+     * Empty until the first tick ends. */
+    std::vector<uint8_t> slot_bytes_prev;
+    std::vector<uint8_t> slot_init_prev;
     /* OPT-IN EXECUTION TRACE, for finding the first unknown value at RUNTIME.
      *
      * Static tracing over record order cannot say what wrote a slot before it was read,

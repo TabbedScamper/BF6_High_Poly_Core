@@ -1178,7 +1178,18 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 ref.bytes.assign(signature.output_width, 0);
                 ref.known = true;
                 slots.write(call.output->offset, signature.output_width, ref);
-                slots.refs[call.output->offset] = *call.inputs[0];
+                Operand target = *call.inputs[0];
+                /* A reference to one FIELD: the byte offset comes from the second
+                 * operand, which for the field-address operator is a pool word the
+                 * caller has patched with that field's offset. An unknown offset
+                 * leaves the reference pointing at the object's start, which is what
+                 * it meant before this existed. */
+                if (signature.reference_offset_from_input1 && call.inputs.size() > 1) {
+                    const Value off = materialize(graph, instance, slots,
+                                                  *call.inputs[1], 4);
+                    if (off.known) target.offset += off.as_u32();
+                }
+                slots.refs[call.output->offset] = target;
                 last_written = ref;
                 if (instance && instance->trace_records)
                     instance->trace.push_back({record.offset, record.operator_key,

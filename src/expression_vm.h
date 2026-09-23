@@ -41,6 +41,11 @@ struct OperatorSignature {
      * relative to it. Measured need: 0x532B3BA9 (object, 0) -> 0x2E -> a 16-byte
      * move from r3+0x0 is how the suspension reads HitPoint out of the ray result. */
     bool output_is_reference_to_input0 = false;
+    /* AND THE REFERENCE MAY BE INTO THE MIDDLE OF IT. 0x88030F01 is nine bytes of
+     * machine code - `mov eax,[rdx]; add rax,rcx; mov [r8],rax` - so it returns its
+     * object's address PLUS a byte offset it reads from its second operand. That is a
+     * reference to one FIELD, where 0x532B3BA9 returns one to the whole object. */
+    bool reference_offset_from_input1 = false;
 };
 
 /* HOW A HOST HANDS BACK AN ARRAY. Some natives return no value: they grow an engine

@@ -257,6 +257,22 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
         out.output_is_reference_to_input0 = true;
         return true;
     }
+    /* 0x88030F01: the same thing one field in. Nine bytes of machine code at
+     * 0x143B25460 - `mov eax,[rdx]; add rax,rcx; mov [r8],rax; ret` - so the output is
+     * input 0's address plus the dword at input 1. Ghidra made no function there,
+     * which is why it read as unresolved for so long while gating a helicopter's rotor
+     * config, a plane's jet config and a boat's last two branches at once.
+     *
+     * Input 1 is a POOL word, zero on disk because the loader fills it from the
+     * reflected field table. The caller patches it with the field's own offset, so
+     * nothing here needs to know which field this call wants. */
+    if (key == 0x88030F01u) {
+        out.input_widths = {4, 4, 4};
+        out.output_width = 16;
+        out.output_is_reference_to_input0 = true;
+        out.reference_offset_from_input1 = true;
+        return true;
+    }
     if (key == 0xC58D8EA6u) { out.input_widths = {};           out.output_width = 4;  return true; }
     if (key == 0x6D98A861u) { out.input_widths = {16, 16, 16}; out.output_width = 64; return true; }
     if (key == 0xE22FCA6Fu) { out.input_widths = {8, 8, 4};    out.output_width = 1;  return true; }

@@ -224,6 +224,62 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
         }
     }
 
+    /* THE FIELD OFFSET EACH ADDRESS CALL WANTS.
+     *
+     * 0x88030F01 is `object + *(dword*)selector`, and the selector is a pool word the
+     * loader fills from the reflected field table. Offline it reads zero, so every one
+     * of these calls returns the object's start and the graph reads the same field
+     * fifteen times - which is why a helicopter's rotor config came out empty.
+     *
+     * The calls that share a base object address that object's fields IN ORDER: their
+     * selectors sit at consecutive pool offsets, and the struct builder downstream
+     * writes the i-th of them to the i-th field of the same type. So the i-th call by
+     * selector offset takes the i-th field, and patching its pool word is all that is
+     * needed - the operator itself reads the offset from there, exactly as the native
+     * does. Where the base slot's type has no reflected layout, nothing is patched and
+     * the calls stay as they were. */
+    {
+        struct Call { uint32_t selector; uint32_t base; };
+        std::map<uint32_t, std::vector<Call>> by_base;
+        for (const auto& rec : gr->records) {
+            if (!rec.has_operator || rec.operator_key != 0x88030F01u ||
+                rec.operands.size() < 3) continue;
+            if (rec.operands[0].region != 2 || rec.operands[1].region != 0) continue;
+            by_base[rec.operands[0].offset].push_back({rec.operands[1].offset,
+                                                      rec.operands[0].offset});
+        }
+        std::map<uint32_t, uint32_t> sel_patch;
+        for (auto& kv : by_base) {
+            const auto ty = slot_type.find(kv.first);
+            if (ty == slot_type.end()) continue;
+            bf6::TypeGuid g{};
+            if (!ctx->types->guid_by_name_hash(ty->second, g)) continue;
+            const bf6::TypeLayout& lay = ctx->types->layout_full(g);
+            if (!lay.valid || lay.fields.empty()) continue;
+            std::sort(kv.second.begin(), kv.second.end(),
+                      [](const Call& a, const Call& b) { return a.selector < b.selector; });
+            /* More calls than the type has fields would mean the order is not what it
+             * looks like, so nothing is patched rather than some of it. */
+            if (kv.second.size() > lay.fields.size()) {
+                if (dbg)
+                    std::fprintf(stderr, "seed: slot 0x%X has %zu field calls for %zu"
+                                         " field(s): left alone\n",
+                                 kv.first, kv.second.size(), lay.fields.size());
+                continue;
+            }
+            for (size_t i = 0; i < kv.second.size(); ++i)
+                sel_patch[kv.second[i].selector] = lay.fields[i].offset;
+            if (dbg)
+                std::fprintf(stderr, "seed: slot 0x%X type %08X, %zu field address(es)\n",
+                             kv.first, ty->second, kv.second.size());
+        }
+        if (!sel_patch.empty()) {
+            sim.add_pool_patches(name, sel_patch);
+            if (dbg)
+                std::fprintf(stderr, "seed: %zu field selector(s) patched\n", sel_patch.size());
+        }
+    }
+
     /* THE FIELD TABLE A STRUCT BUILDER NEEDS. 0x8B226FBB writes its i-th argument at
      * the i-th field of the type it produces, and only this caller can see the type
      * database, so the table is measured here and handed to the host. The type is the

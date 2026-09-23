@@ -1,6 +1,7 @@
 #include "vehicle_wheel_ops.h"
 
 #include <cmath>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1127,26 +1128,86 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 tris.push_back(e);
             }
         };
-        const float y_top = oy, y_bot = oy - depth;
-        for (uint32_t i = 0; i < stations; ++i) {
-            const float z0 = oz - hl + length * ((float)i / (float)stations);
-            const float z1 = oz - hl + length * ((float)(i + 1) / (float)stations);
-            const float bl0[3] = {ox - hw, y_bot, z0}, bl1[3] = {ox - hw, y_bot, z1};
-            const float br0[3] = {ox + hw, y_bot, z0}, br1[3] = {ox + hw, y_bot, z1};
-            const float tl0[3] = {ox - hw, y_top, z0}, tl1[3] = {ox - hw, y_top, z1};
-            const float tr0[3] = {ox + hw, y_top, z0}, tr1[3] = {ox + hw, y_top, z1};
-            quad(bl0, br0, br1, bl1);   /* the bottom */
-            quad(bl1, tl1, tl0, bl0);   /* port side */
-            quad(br0, tr0, tr1, br1);   /* starboard side */
+        const float y_top = oy + depth;
+        /* THE HULL, from FUN_1443E1960 rather than the box that stood in for it. The
+         * box displaced 208 cubic metres where this boat floats on 13.5, which is why
+         * it was thrown half a kilometre into the air.
+         *
+         * The surface is a HALF hull, mirrored. Station i runs bow to joint, point j
+         * runs centreline to gunwale, and the two exponents shape it: [9] the bottom
+         * and stem fullness against a half-LENGTH base, [4] the transverse fullness
+         * against a half-BEAM base. The forebody blends one into the other, the stern
+         * run carries the section aft to the transom at a constant beam, and a transom
+         * cap closes it. The deck is left open, as the native leaves it.
+         *
+         * Two things are pinned by continuity rather than read, because the sincos
+         * polynomial's constants are not in the listing: the first factor is cos-like
+         * so the joint station meets the stern run at the full half beam, the second
+         * sin-like so the bow station collapses to a stem at +L/2. Both are labelled
+         * here and the reconstruction is checked against the one number that can
+         * falsify it - a floating hull displaces its own mass. */
+        const uint32_t stern_rows = ru(H, 7 * 4) ? ru(H, 7 * 4) : 1u;
+        if (std::getenv("BF6_HULL_DESC")) {
+            std::fprintf(stderr, "hull desc:");
+            for (int i = 0; i < 12; ++i) std::fprintf(stderr, " [%d]=%g", i, rf(H, (uint32_t)(4 * i)));
+            std::fprintf(stderr, "\n");
         }
-        {   /* the two ends */
-            const float zb = oz - hl, zf = oz + hl;
-            const float a0[3] = {ox - hw, y_bot, zb}, a1[3] = {ox + hw, y_bot, zb};
+        const float fore = rf(H, 8 * 4);
+        const float side_exp = rf(H, 4 * 4), bottom_exp = rf(H, 9 * 4);
+        const float zslope = hl > 0.0f ? (fore * length) / hl : 0.0f;
+        const float zoff = fore * length - hl;
+        const float stern_span = (1.0f - fore) * length;
+        const uint32_t rows = stations + stern_rows;
+        std::vector<std::vector<std::array<float, 3>>> grid(
+            rows, std::vector<std::array<float, 3>>(stations));
+        const float step = stations > 1 ? 1.0f / (float)(stations - 1) : 1.0f;
+        for (uint32_t i = 0; i < stations; ++i) {
+            const float u = (float)i * step, w = 1.0f - u;
+            const float ang = w * 1.5707964f;
+            const float Sn = std::cos(ang);      /* cos-like, pinned by continuity */
+            const float Cs = std::sin(ang);      /* sin-like, pinned by continuity */
+            for (uint32_t j = 0; j < stations; ++j) {
+                const float vv = (float)j * step;
+                const float X = vv * hw * Sn;
+                const float Y = depth * (w * std::pow(vv, bottom_exp) +
+                                         u * std::pow(vv, side_exp));
+                const float Z = (w * (vv * hl * Cs) +
+                                 u * (vv * hw * Cs * (hl > 0.0f ? hw / hl : 0.0f)))
+                                * zslope - zoff;
+                grid[i][j] = {ox + X, oy + Y, oz + Z};
+            }
+        }
+        for (uint32_t i2 = 0; i2 < stern_rows; ++i2) {
+            const uint32_t r = stations + i2;
+            for (uint32_t j = 0; j < stations; ++j) {
+                const float X = (float)j * step * hw;
+                const float Y = depth * std::pow(hw > 0.0f ? X / hw : 0.0f, side_exp);
+                const float Z = (hl - fore * length) -
+                                (float)(i2 + 1) * (1.0f / (float)stern_rows) * stern_span;
+                grid[r][j] = {ox + X, oy + Y, oz + Z};
+            }
+        }
+        /* Starboard, then the mirror with X negated about the origin. */
+        for (int side = 0; side < 2; ++side) {
+            const float sx = side ? -1.0f : 1.0f;
+            auto at = [&](uint32_t r, uint32_t j, float out[3]) {
+                out[0] = ox + sx * (grid[r][j][0] - ox);
+                out[1] = grid[r][j][1];
+                out[2] = grid[r][j][2];
+            };
+            for (uint32_t r = 1; r < rows; ++r)
+                for (uint32_t j = 1; j < stations; ++j) {
+                    float a[3], b[3], c[3], d[3];
+                    at(r - 1, j - 1, a); at(r - 1, j, b); at(r, j, c); at(r, j - 1, d);
+                    if (side) quad(a, d, c, b);
+                    else quad(a, b, c, d);
+                }
+        }
+        {   /* the transom, at the aft end, closing the section */
+            const float zb = oz - hl;
+            const float a0[3] = {ox - hw, oy, zb}, a1[3] = {ox + hw, oy, zb};
             const float a2[3] = {ox + hw, y_top, zb}, a3[3] = {ox - hw, y_top, zb};
             quad(a0, a3, a2, a1);
-            const float b0[3] = {ox - hw, y_bot, zf}, b1[3] = {ox + hw, y_bot, zf};
-            const float b2[3] = {ox + hw, y_top, zf}, b3[3] = {ox - hw, y_top, zf};
-            quad(b0, b1, b2, b3);
         }
 
         /* THE GAINS, exactly as the native scales them. */
@@ -1274,11 +1335,23 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         wf(out.bytes, 16, wet_norm > 0.0f ? wet_sum / wet_norm : 0.0f);
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(20 + 4 * i), (s.w[i] - before.w[i]) / dt);
         out.known = true;
-        if (std::getenv("BF6_HULL_DEBUG"))
-            std::fprintf(stderr, "hull: %zu panels, %d wet, submerged %.3f, dv %.3f %.3f %.3f\n",
+        if (std::getenv("BF6_HULL_DEBUG")) {
+            /* THE ONE NUMBER THAT SAYS WHETHER THE SURFACE IS RIGHT. Buoyancy is
+             * rho g V, so the upward acceleration times the mass, over rho g, is the
+             * volume of water this surface claims to displace - and a floating hull
+             * displaces its own mass, 13.5 cubic metres for a 13.5 t boat. Printed
+             * next to the weight's own acceleration so the two can be compared at a
+             * glance: equal means it floats, and anything else says by how much the
+             * surface is wrong rather than merely that it is. */
+            const float up = (s.v[1] - before.v[1]) / dt;
+            const float volume = up * body_.mass / (1000.0f * 9.82f);
+            std::fprintf(stderr,
+                         "hull: %zu panels, %d wet, submerged %.3f, dv %.3f %.3f %.3f"
+                         "  -> displaces %.1f m3 (floats at %.1f)\n",
                          tris.size(), wet_tris, wet_norm > 0.0f ? wet_sum / wet_norm : 0.0f,
-                         (s.v[0] - before.v[0]) / dt, (s.v[1] - before.v[1]) / dt,
-                         (s.v[2] - before.v[2]) / dt);
+                         (s.v[0] - before.v[0]) / dt, up, (s.v[2] - before.v[2]) / dt,
+                         volume, body_.mass / 1000.0f);
+        }
         return true;
     }
     if (key == kCurveKeyed) {

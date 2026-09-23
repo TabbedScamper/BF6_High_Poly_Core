@@ -54,12 +54,15 @@ public:
 
     /* How many distinct names this host actually served, for measurement. */
     const std::map<std::string, uint32_t>& served() const { return served_; }
+    /* Which record is being served, so a rule can be bisected to one call site. */
+    void set_current_record(uint32_t record_offset) override { cur_record_ = record_offset; }
 
 private:
     const std::string* name_for(uint32_t key) const;
 
     std::map<uint32_t, std::string> names_;
     std::map<std::string, uint32_t> served_;
+    uint32_t cur_record_ = 0;
 };
 
 /* OPERATORS RECOVERED FROM THE EXECUTABLE'S OWN CODE, keyed by operator key.

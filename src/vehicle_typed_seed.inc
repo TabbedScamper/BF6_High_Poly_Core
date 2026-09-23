@@ -224,6 +224,57 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
         }
     }
 
+    /* A TYPE WITH NO PLACEMENT AT ALL. Placements are the right pairing and the only one
+     * used when they exist: two count-based pairings broke cars before placements were
+     * found. But a boat's two keyed curves have no wrapper - its placement offsets skip
+     * straight over the curves' pool words (2648 then 2728, with the curves at 2680 and
+     * 2688) - so they were never bound, the curve operator refused on the 0x000FFFFF
+     * handle, and that refusal took the whole hull force vector down with it.
+     *
+     * For a type where NO slot has a placement, document order is the only link either
+     * side offers, and it is used under two guards that keep it away from anything that
+     * already works: every slot of the type must be unplaced, and the count of unplaced
+     * pool words must equal the count of that type's values no placement already holds.
+     * The k-th pool word by offset takes the k-th value in document order.
+     * BF6_SEED_NO_ORDER=1 turns it off for comparison. */
+    if (!std::getenv("BF6_SEED_NO_ORDER")) {
+        std::set<const bf6::EbxValue*> placed;
+        std::set<uint32_t> placed_pool;
+        for (const auto& pl : places) { placed.insert(pl.value); placed_pool.insert(pl.pool_offset); }
+        std::map<uint32_t, std::vector<uint32_t>> pools_of_type;    /* type -> pool words */
+        std::set<uint32_t> type_has_placement;
+        for (const auto& kv : slot_of_pool) {
+            const auto ty = slot_type.find(kv.second);
+            if (ty == slot_type.end()) continue;
+            if (placed_pool.count(kv.first)) type_has_placement.insert(ty->second);
+            else pools_of_type[ty->second].push_back(kv.first);
+        }
+        for (auto& kv : pools_of_type) {
+            if (type_has_placement.count(kv.first)) continue;
+            bf6::TypeGuid g{};
+            if (!ctx->types->guid_by_name_hash(kv.first, g)) continue;
+            std::vector<const bf6::EbxValue*> vals;
+            for (const auto& v : kept) bf6__collect_typed(v, g, vals, 0);
+            std::vector<const bf6::EbxValue*> free_vals;
+            for (const auto* v : vals) if (!placed.count(v)) free_vals.push_back(v);
+            std::sort(kv.second.begin(), kv.second.end());
+            if (free_vals.size() != kv.second.size() || free_vals.empty()) {
+                if (dbg)
+                    std::fprintf(stderr, "seed: type %08X has %zu unplaced pool word(s) and %zu"
+                                         " free value(s): counts differ, not paired\n",
+                                 kv.first, kv.second.size(), free_vals.size());
+                continue;
+            }
+            for (size_t i = 0; i < free_vals.size(); ++i) {
+                places.push_back({kv.second[i], free_vals[i]});
+                if (dbg)
+                    std::fprintf(stderr, "seed: type %08X pool 0x%X <- value %zu of %zu"
+                                         " (document order, no placement exists)\n",
+                                 kv.first, kv.second[i], i, free_vals.size());
+            }
+        }
+    }
+
     /* THE FIELD OFFSET EACH ADDRESS CALL WANTS.
      *
      * 0x88030F01 is `object + *(dword*)selector`, and the selector is a pool word the

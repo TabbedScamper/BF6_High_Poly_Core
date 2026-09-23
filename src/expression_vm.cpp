@@ -47,6 +47,20 @@ struct Slots {
      * fix the ah64e, and raising five aircraft on a wing with no stall curve is not a
      * change worth blessing while it cannot be judged. */
     bool zero_untouched_bools = std::getenv("BF6_ZERO_UNTOUCHED_BOOLS") != nullptr;
+    /* BF6_ZERO_UNTOUCHED_WIDE=1: the same credit for WIDE reads, EXCEPT inside a slot the
+     * graph declares in its typed groups. Crediting every untouched wide byte took the f16
+     * from 67 m/s to 0.12 m/s while making the boat move for the first time, so something
+     * in those reads must stay unknown. The hypothesis this tests: the reads that must stay
+     * unknown are exactly the ones the ENGINE fills at load - which the graph itself lists
+     * as typed slot values and which this VM never seeds - and every other untouched
+     * accumulator really is the fresh buffer's zero. */
+    bool zero_untouched_wide = std::getenv("BF6_ZERO_UNTOUCHED_WIDE") != nullptr;
+    /* BF6_ZERO_WIDE_RANGE=<lo hex>:<hi hex>: restrict that credit to one byte range, so the
+     * slots the aircraft need left unknown can be found by BISECTION rather than argued.
+     * Guessing which reads matter has already been wrong once here (the typed groups). */
+    uint32_t zero_wide_lo = 0, zero_wide_hi = 0xFFFFFFFFu;
+    /* Per byte: inside a typed slot the engine fills from the graph's own data at load. */
+    std::vector<uint8_t> typed;
 
     /* ARRAY HEAP. Expression arrays are an 8-byte data pointer with the element
      * count at data-4 (research: expression-lerp-array-iteration-and-context-nodes).
@@ -120,7 +134,11 @@ struct Slots {
                   * boat's own gap and not something to buy with six aircraft. */
                  (width == 1 && zero_untouched_bools && untouched_prev &&
                   offset + i < untouched_prev->size() &&
-                  (*untouched_prev)[offset + i])))
+                  (*untouched_prev)[offset + i]) ||
+                 (width > 1 && zero_untouched_wide && untouched_prev &&
+                  offset + i >= zero_wide_lo && offset + i < zero_wide_hi &&
+                  offset + i < untouched_prev->size() && (*untouched_prev)[offset + i] &&
+                  !(offset + i < typed.size() && typed[offset + i]))))
                 v.known_bytes[i] = 1;
         for (uint32_t i = 0; i < width; ++i) {
             const bool byte_known = v.known_bytes[i] != 0;
@@ -730,6 +748,31 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
             const auto next = written_slots.upper_bound(off);
             if (next != written_slots.end()) slot_stride[off] = *next - off;
         }
+    /* The full extent of every typed slot: the type's own size where the executable's
+     * reflection gives one, bounded by the next written slot exactly as the typed copy is,
+     * and 16 bytes when neither is known. Over-marking only keeps a byte unknown, which is
+     * the old behaviour, so erring wide here is the safe direction. */
+    if (const char* r = std::getenv("BF6_ZERO_WIDE_RANGE")) {
+        char* e = nullptr;
+        slots.zero_wide_lo = (uint32_t)std::strtoul(r, &e, 16);
+        if (e && *e == ':') slots.zero_wide_hi = (uint32_t)std::strtoul(e + 1, nullptr, 16);
+    }
+    if (slots.zero_untouched_wide) {
+        slots.typed.assign(slots.bytes.size(), 0);
+        for (const auto& kv : slot_type) {
+            uint32_t size = 0;
+            if (instance) {
+                const auto sz = instance->type_sizes.find(kv.second);
+                if (sz != instance->type_sizes.end()) size = sz->second;
+            }
+            const auto st = slot_stride.find(kv.first);
+            if (st != slot_stride.end() && st->second && (size == 0 || st->second < size))
+                size = st->second;
+            if (size == 0 || size > 4096) size = 16;
+            for (uint32_t b = 0; b < size && kv.first + b < slots.typed.size(); ++b)
+                slots.typed[kv.first + b] = 1;
+        }
+    }
 
     /* AN ACCUMULATOR SEED IS ZERO, AND KNOWN.
      *

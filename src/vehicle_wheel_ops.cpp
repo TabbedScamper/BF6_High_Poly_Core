@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 
 namespace bf6 {
@@ -667,43 +668,113 @@ void WheelOps::cast_wheel_ray(const float at[3], float radius, float spring,
     wu(out, 0x38, 1u);
 }
 
-/* FUN_1405626E0, the keyed-curve evaluation, over `n` keys of seven floats:
- * x, mode, in-tangent x, in-tangent y, out-tangent x, y, out-tangent y.
+/* FUN_140562100: the parameter t at which a cubic Bezier's X reaches `x`, by Newton.
  *
- * Modes 1, 2 and 3 are smoothstep, linear and a step at the halfway point. Mode 0
- * is a cubic solved by Newton and is NOT served: the decompiler reassociates that
- * arm and a curve built from a misread expression is a wrong number with no
- * symptom. False means exactly that, and the caller says so. */
+ * Transcribed from the listing and checked against the Bernstein polynomial term by
+ * term rather than trusted: with a..d the four control X values, the listing's
+ * fVar4 is d - 3c + 3b - a (cubic), fVar10 is 3(a - 2b + c) (quadratic), fVar5 is
+ * 3(b - a) (linear), and fVar7 / fVar8 are 3x and 2x the first two - the derivative.
+ * The body is unrolled eight times with a remainder loop, which for n = 10 is exactly
+ * ten iterations of the loop below. Two details are the native's own and easy to lose:
+ * the control points are pulled inside [a, d] first, and on convergence it returns
+ * the value from BEFORE the step, not the step's result. The arithmetic keeps the
+ * listing's grouping; the reassociation the decompiler is known for moves rounding by
+ * an ulp, it does not change the polynomial. */
+static float bezier_t_for_x(float p0, float p1, float p2, float p3, float x, int n) {
+    if (p3 < p1) p1 = p3 - 0.01f;
+    if (p2 < p0) p2 = p0 + 0.01f;
+    float t = (x - p0) / (p3 - p0);
+    const float f6 = (p1 - p2) * 3.0f;
+    const float c1 = (p1 - p0) * 3.0f;                       /* fVar5  */
+    const float d2 = (f6 * 3.0f - p0 * 3.0f) + p3 * 3.0f;    /* fVar7  */
+    const float f9 = (p0 - (p1 + p1)) + p2;                  /* fVar9  */
+    const float d1 = f9 * 6.0f;                              /* fVar8  */
+    const float c2 = f9 * 3.0f;                              /* fVar10 */
+    const float c3 = (f6 - p0) + p3;                         /* fVar4  */
+    const float c0 = p0 - x;                                 /* fVar11 */
+    for (int i = 0; i < n; ++i) {
+        const float d = (d2 * t + d1) * t + c1;
+        if (std::fabs(d) < 1e-06f) return t;
+        const float tn = t - (((c3 * t + c2) * t + c1) * t + c0) / d;
+        if (std::fabs(tn - t) < 0.0001f) return t;
+        t = tn;
+    }
+    return t;
+}
+
+/* FUN_1405626E0, the keyed-curve evaluation, over `n` keys of seven floats. By index,
+ * as the native reads them: [0] x, [1] mode, [2] and [4] the X tangents (entering and
+ * leaving), [3] and [6] the Y tangents, [5] y. A segment from key k to k+1 in mode 0 is
+ * the cubic Bezier with X control points (x0, x0+k[4], x1+(k+1)[2], x1) and Y control
+ * points (y0, y0+k[3], y1+(k+1)[6], y1); the listing's expression for it expands to
+ * a + 3(b-a)t + 3(a-2b+c)t^2 + (d-3c+3b-a)t^3, which is the Bernstein form exactly.
+ *
+ * MODE 0 WAS REFUSED until now, for fear that a misread expression would give a wrong
+ * number with no symptom. It carries its own falsifier instead: at every key's own x the
+ * curve must return that key's y, and BF6_CURVE_SELFTEST checks it.
+ *
+ * THE SEGMENT SEARCH WAS WRONG, independently. The native ends its binary search on
+ * `hi`; this ended on the last index it assigned, which is hi + 1 whenever the final
+ * step moves right. Keys at 0,10,20,30,40,50 and x = 12 evaluated the [20,30] segment
+ * at t = -0.8 - an extrapolation, silently - where the native uses [10,20]. That bit
+ * modes 1-3 as well. Now the native's search, line for line.
+ *
+ * An unrecognised mode returns false rather than the native's 0: a mode that is not
+ * 0-3 here means the key layout was misread, and that should be loud. */
 bool curve_eval_keyed(const float* k, uint32_t n, float x, float& y) {
     auto K = [&](uint32_t i, uint32_t f) { return k[(size_t)i * 7 + f]; };
-    if (n == 0) return false;
+    auto mode_of = [&](uint32_t i) { uint32_t m = 0; const float f = K(i, 1); std::memcpy(&m, &f, 4); return m; };
+    if (n == 0) { y = 0.0f; return true; }
     if (n == 1) { y = K(0, 5); return true; }
     if (x < K(0, 0) && K(0, 1) != 0.0f) { y = K(0, 5); return true; }
-    if (K(n - 1, 0) < x) {
-        if (K(n - 1, 1) == 0.0f && std::fabs(K(n - 1, 2)) > 1e-06f)
-            y = ((x - K(n - 1, 0)) * K(n - 1, 6)) / K(n - 1, 2) + K(n - 1, 5);
+    const uint32_t last = n - 1;
+    if (K(last, 0) < x) {
+        if (K(last, 1) == 0.0f && std::fabs(K(last, 2)) > 1e-06f)
+            y = ((x - K(last, 0)) * K(last, 6)) / K(last, 2) + K(last, 5);
         else
-            y = K(n - 1, 5);
+            y = K(last, 5);
         return true;
     }
-    uint32_t i = 0;
-    int lo = 0, hi = (int)n - 2;
-    while (lo <= hi) {
-        i = (uint32_t)((lo + hi) / 2);
-        if (x == K(i, 0)) break;
-        if (K(i, 0) <= x) { lo = (int)i + 1; i = (uint32_t)lo; }
-        else { hi = (int)i - 1; i = (uint32_t)(hi < 0 ? 0 : hi); }
+    int seg = 0;
+    if (n > 2) {
+        int hi = (int)n - 2, lo = 0;
+        bool found = false;
+        while (lo <= hi) {
+            const int mid = (hi + lo) / 2;
+            if (x == K((uint32_t)mid, 0)) { seg = mid; found = true; break; }
+            int nhi = mid - 1;
+            if (K((uint32_t)mid, 0) <= x) { lo = mid + 1; nhi = hi; }
+            hi = nhi;
+        }
+        if (!found) seg = hi >= 0 ? hi : lo;
     }
-    if (i > n - 2) i = n - 2;
-    const float x0 = K(i, 0), x1 = K(i + 1, 0);
-    if (x1 - x0 <= 0.0f) { y = (K(i + 1, 5) + K(i, 5)) * 0.5f; return true; }
-    const float t = (x - x0) / (x1 - x0);
-    const float mode = K(i, 1);
-    uint32_t m = 0;
-    std::memcpy(&m, &mode, 4);
-    if (m == 1u) { y = (3.0f - (t + t)) * (K(i + 1, 5) - K(i, 5)) * t * t + K(i, 5); return true; }
-    if (m == 2u) { y = (K(i + 1, 5) - K(i, 5)) * t + K(i, 5); return true; }
-    if (m == 3u) { y = t >= 0.5f ? K(i + 1, 5) : K(i, 5); return true; }
+    const uint32_t a = (uint32_t)seg, b = a + 1;
+    const float x0 = K(a, 0), x1 = K(b, 0);
+    if (x1 - x0 <= 0.0f) { y = (K(b, 5) + K(a, 5)) * 0.5f; return true; }
+    const float u = (x - x0) / (x1 - x0);
+    const uint32_t m = mode_of(a);
+    if (m == 0u) {
+        const float y0 = K(a, 5);
+        float r;
+        if (x0 <= x) {
+            if (x1 <= x && x != x1) {
+                y = ((x - x1) * K(b, 6)) / K(b, 2) + K(b, 5);
+                return true;
+            }
+            const float t = bezier_t_for_x(x0, x0 + K(a, 4), x1 + K(b, 2), x1, x, 10);
+            const float bb = K(a, 3) + y0;
+            const float cd = K(b, 5) + K(b, 6);
+            r = ((((y0 - (bb + bb)) + K(b, 5) + K(b, 6)) * 3.0f +
+                  (((bb - cd) * 3.0f - y0) + K(b, 5)) * t) * t + K(a, 3) * 3.0f) * t;
+        } else {
+            r = ((x - x0) * K(a, 3)) / K(a, 4);
+        }
+        y = r + y0;
+        return true;
+    }
+    if (m == 1u) { y = (3.0f - (u + u)) * (K(b, 5) - K(a, 5)) * u * u + K(a, 5); return true; }
+    if (m == 2u) { y = (K(b, 5) - K(a, 5)) * u + K(a, 5); return true; }
+    if (m == 3u) { y = u >= 0.5f ? K(b, 5) : K(a, 5); return true; }
     return false;
 }
 
@@ -2252,9 +2323,30 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             const std::vector<float>& kv = curves_[idx];
             if (kv.size() < 7) return no("the bound curve has no keys");
             const uint32_t n = (uint32_t)(kv.size() / 7);
+            /* BF6_CURVE_SELFTEST=1: the falsifier the cubic arm was admitted on. Every key
+             * must return its own y at its own x - t is 0 or 1 there, where a Bezier meets
+             * its end points exactly - so a misread control point or a wrong segment shows
+             * up here as a mismatch instead of as a quietly wrong force. Once per curve. */
+            if (std::getenv("BF6_CURVE_SELFTEST")) {
+                static std::set<size_t> checked;
+                if (checked.insert(idx).second) {
+                    int bad = 0;
+                    for (uint32_t i = 0; i < n; ++i) {
+                        float yy = 0.0f;
+                        const bool ok = curve_eval_keyed(kv.data(), n, kv[(size_t)i * 7], yy);
+                        const float want = kv[(size_t)i * 7 + 5];
+                        if (!ok || std::fabs(yy - want) > 1e-4f * (1.0f + std::fabs(want))) {
+                            ++bad;
+                            std::fprintf(stderr, "curve selftest %zu key %u: x %g gave %g, key says %g\n",
+                                         idx, i, kv[(size_t)i * 7], yy, want);
+                        }
+                    }
+                    std::fprintf(stderr, "curve selftest %zu: %u keys, %d mismatch(es)\n", idx, n, bad);
+                }
+            }
             const float x = rf(a[0], 0);
             float y = 0.0f;
-            if (!curve_eval_keyed(kv.data(), n, x, y)) return no("the cubic arm");
+            if (!curve_eval_keyed(kv.data(), n, x, y)) return no("a key mode outside 0-3: the key layout is misread");
             out.bytes.assign(4, 0);
             wf(out.bytes, 0, y);
             out.known = true;

@@ -1029,11 +1029,53 @@ int main(int argc, char** argv)
             std::printf("  [%3zu] u32 %-12u\n", i, u);
     }
 
+    /* BF6_POOL_DUMP=<start>:<end>: the constant pool as floats over a byte range.
+     * The record listing resolves only the offsets an operand names, so a structure
+     * the graph copies wholesale - a 112-byte WheelConfig, say - shows up as its first
+     * dword and nothing else. Whether a gear's lateral offset sits at one pool offset
+     * or the next decides which side of the aircraft it is on, and that is not a
+     * question the per-operand view can answer. */
+    if (const char* pd = std::getenv("BF6_POOL_DUMP")) {
+        unsigned long a = std::strtoul(pd, nullptr, 0), b = a + 128;
+        if (const char* colon = std::strchr(pd, ':')) b = std::strtoul(colon + 1, nullptr, 0);
+        std::printf("\n--- constant pool %lu..%lu of %zu bytes ---\n", a, b,
+                    g.constant_pool.size());
+        for (unsigned long at = a; at + 4 <= b && at + 4 <= g.constant_pool.size(); at += 4) {
+            float f = 0.f;
+            uint32_t u = 0;
+            std::memcpy(&f, g.constant_pool.data() + at, 4);
+            std::memcpy(&u, g.constant_pool.data() + at, 4);
+            if (at % 16 == 0) std::printf("\n%6lu:", at);
+            const float m = f < 0 ? -f : f;
+            if (f == 0.0f) std::printf("  %12s", ".");
+            else if (m >= 1e-4f && m <= 1e6f) std::printf("  %12g", (double)f);
+            else std::printf("  %12s", ("0x" + std::to_string(u)).c_str());
+        }
+        std::printf("\n");
+    }
+
     /* The program. */
     std::printf("\n--- records ---\n");
     for (size_t i = 0; i < g.records.size(); ++i) {
         const bf6::expression::Record& r = g.records[i];
-        std::printf("[%3zu] @%-6u kind 0x%02x len %-4u", i, r.offset, r.kind, r.byte_length);
+        /* NEXT IS NOT THE NEXT RECORD BY ADDRESS. The header's first dword is
+         * `kind | next << 8`, and the interpreter sequences by that field, so a record
+         * can skip over the one that follows it in memory. Printing the listing in
+         * address order without it hid a two-armed write whose arms looked like they
+         * both ran: `next` is the whole reason only one of them does. */
+        std::printf("[%3zu] @%-6u kind 0x%02x len %-4u next @%-6u", i, r.offset, r.kind,
+                    r.byte_length, r.next);
+        if (r.kind == 0x2a && !r.operands.empty()) {
+            /* 0x2A IS TARGET-FIRST, unlike every operand-first kind: u32 callee at +4,
+             * then the one-shot flag's region at +8 and its offset at +12. The generic
+             * operand walk pairs (+4,+8) and calls (+12) an immediate, which fuses the
+             * callee with the flag's region into a register that does not exist - it
+             * printed "(r88316+2) imm=0x8368" for a call to @88316 on flag (r2+0x8368). */
+            std::printf("  call @%u  if one-shot (r%u+%u)", r.operands[0].region,
+                        r.operands[0].offset, r.trailing_dword);
+            std::printf("\n");
+            continue;
+        }
         if (r.has_operator) {
             auto it = named.find(r.operator_key);
             auto si = signature.find(r.operator_key);

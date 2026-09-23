@@ -860,8 +860,39 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
              * to 0.24 m/s on the ground), because value reads rely on unknown propagating.
              * So this applies to the BRANCH DECISION only, where the alternative is a
              * guess rather than a computation. */
+            /* BF6_COND_REPORT=1: every branch condition, where it was read from, whether
+             * it was known, and which arm ran. The mirror/primary selection for a wheel
+             * is one of these, so a wheel on the wrong side of the aircraft is visible
+             * here and nowhere else. */
+            if (std::getenv("BF6_COND_REPORT")) {
+                char line[192];
+                std::snprintf(line, sizeof line,
+                              "cond @%u (r%u+%u = 0x%x) %s%u -> %s @%u",
+                              record.offset, record.operands[0].region,
+                              record.operands[0].offset, record.operands[0].offset,
+                              condition.known ? "" : "UNKNOWN ",
+                              condition.known ? (unsigned)condition.bytes[0] : 0u,
+                              (condition.known && !condition.as_bool()) ? "primary" : "MIRROR",
+                              (condition.known && !condition.as_bool())
+                                  ? record.control_target : record.next);
+                std::fprintf(stderr, "%s\n", line);
+            }
+            /* BF6_COND_FLIP=<hex rec>[,...]: take the OTHER arm at these records even when
+             * the condition is known. Not every one-byte flag in the 0x83xx array is
+             * seeded, and an unseeded byte reads a known zero that is indistinguishable
+             * from an authored zero - so which arm is right cannot be settled by reading
+             * the flag. This makes the alternative measurable. */
+            bool flip = false;
+            if (const char* fl = std::getenv("BF6_COND_FLIP"))
+                for (const char* p = fl; *p;) {
+                    char* e = nullptr;
+                    const unsigned long v = std::strtoul(p, &e, 16);
+                    if (e == p) break;
+                    if ((uint32_t)v == record.offset) { flip = true; break; }
+                    p = *e ? e + 1 : e;
+                }
             if (condition.known) {
-                if (!condition.as_bool()) next = record.control_target;
+                if (!condition.as_bool() != flip) next = record.control_target;
             } else {
                 ++result.guessed_branches;
                 /* BF6_GUESS_TAKE=<hex rec>[,<hex rec>...]: take the branch at these
@@ -925,6 +956,12 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 last_written.tainted = true;
                 take = true;
             }
+            if (std::getenv("BF6_COND_REPORT"))
+                std::fprintf(stderr, "call @%u -> @%u  one-shot (r%u+0x%x) %s%u  %s\n",
+                             record.offset, target, flag.region, flag.offset,
+                             f.known ? "" : "UNKNOWN ",
+                             f.known ? (unsigned)f.bytes[0] : 0u,
+                             take ? "FIRES" : "skipped");
             if (take) {
                 if (records.find(target) != records.end() && call_stack.size() < 64) {
                     if (flag.region == 2) slots.write(flag.offset, 1, Value::from_bool(false));

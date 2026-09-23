@@ -3155,6 +3155,75 @@ BF6_API int bf6_res_chunks(bf6_ctx*, const char* res_name, char* out, int out_ma
  * receives the measurement so a caller can print it rather than assert it. */
 BF6_API int bf6_typeinfo_readable(const char* exe_path, double* bits);
 
+/* A reflected type's declared instance size by its NAME HASH, read from this
+ * install's executable (the u16 at +6 of the native type record). 0 when the
+ * hash names no type or the schema is unreadable. The expression VM needs it for
+ * width-less typed copies, e.g. ExpressionBoneId 0x444908CB. */
+BF6_API uint32_t bf6_type_size_by_hash(bf6_ctx*, uint32_t name_hash);
+
+/* A DiceExpression graph's CHANNEL BINDINGS, from its own EBX: which public
+ * channel (by hash and name) the engine writes into which constant-pool entry at
+ * load. Those entries are operand 0 of the channel read/write operators (the ones
+ * EngineNodes files as "evaluation context" accessors), zero on disk. Offline, a
+ * caller patches each entry with the channel hash (Instance::pool_patches) and the
+ * host serves channels by hash. Returns the binding count (writes up to out_max),
+ * or -1 when the EBX cannot be read. */
+typedef struct {
+    int32_t  region;          /* 0 in every measured binding                  */
+    uint32_t pool_offset;     /* byte offset into the graph's constant pool   */
+    uint32_t channel_hash;    /* the channel record's own hash                */
+    char     channel_name[64];/* e.g. "SpringCompression_A1", "RootTransform" */
+    int32_t  kind;            /* 0 public channel, 1 BONE channel: the entry is
+                                 an ExpressionBoneId, e.g. "LeftRearWheelHub"; 2
+                                 TWEAKABLE: a record in a tweakables database
+                                 (e.g. mutatordatabase_*), read by
+                                 __GetTweakableFloat/Bool with this hash          */
+    uint32_t default_bits;    /* kind 2: the record's authored default (field
+                                 0x42c8b257) as float bits, or 0/1 for a bool    */
+    int32_t  default_is_bool; /* kind 2: the default was a bool                  */
+} bf6_channel_binding;
+
+BF6_API int bf6_expression_channel_bindings(bf6_ctx*, const char* ebx_name,
+                                            bf6_channel_binding* out, int out_max);
+
+/* The inline VALUES the same binding arrays carry (authored curves, constants),
+ * flattened into constant-pool dwords: offsets[i] <- values[i]. Returns the dword
+ * count (writes up to out_max), -1 when the EBX cannot be read. */
+BF6_API int bf6_expression_pool_values(bf6_ctx*, const char* ebx_name, uint32_t* offsets,
+                                       uint32_t* values, int out_max);
+
+/* A skeleton's bone-channel table: for each bone channel hash (a kind-1 binding's
+ * channel_hash), the rig bone index it drives. Pairs are written to hashes[i] /
+ * bones[i]; returns the count, or -1 when the skeleton cannot be read. */
+BF6_API int bf6_skeleton_channel_bones(bf6_ctx*, const char* ske_ebx, uint32_t* hashes,
+                                       int32_t* bones, int out_max);
+
+/* DRIVABLE VEHICLES. Runs a vehicle's own expression graphs (drivetrain + suspension)
+ * every step and closes the loop with a rigid-body step that feeds back what native
+ * code supplies in the game (wheel spin and contact, velocities, root transform).
+ * The wheel/tyre/engine-torque step is a stand-in until the native model is read;
+ * throttle, brake, gear changes, clutch, RPM, steering and suspension are the game's.
+ *   vehicle_dir  e.g. "common/hardware/vehicles/car/flyer60" (.../<class>/<vehicle>)
+ *   tris         ground triangles, world space, 3 floats per vertex, core frame
+ *                (metres, Y up, vehicle forward +Z); vert_count a multiple of 3
+ *   step in[6]   throttle 0..1, brake 0..1, steer -1..1, handbrake 0/1, dt, reserved
+ *   step out[33] pos3 quat4(xyzw) vel3 angvel3 speed rpm gear_ratio clutch
+ *                throttle brake steer omega4 compression4 fz4 steer_rad
+ *                (returns the count written, 0 on a bad handle) */
+typedef struct bf6_vehicle bf6_vehicle;
+BF6_API bf6_vehicle* bf6_vehicle_open(bf6_ctx*, const char* vehicle_dir, const float* tris,
+                                      int32_t vert_count, char* err, int32_t err_len);
+BF6_API void bf6_vehicle_set_pose(bf6_vehicle*, const float pos[3], const float quat[4]);
+/* THE WATER SURFACE, for anything that floats. A boat's hull, and the buoyancy
+ * every other class carries, ask the world for the water height under the body;
+ * offline the caller supplies it. `present` 0 means there is no water here, which
+ * is what a land map is and what the functions' own above-water path expects.
+ * Flat, because a map's water IS a level in the game (a plane per water body);
+ * waves are not modelled and a caller that has them can move the height. */
+BF6_API void bf6_vehicle_set_water(bf6_vehicle*, float height, int32_t present);
+BF6_API int32_t bf6_vehicle_step(bf6_vehicle*, const float* in, float* out);
+BF6_API void bf6_vehicle_close(bf6_vehicle*);
+
 /* One EBX partition, read THROUGH THE REFLECTION, formatted as a readable
  * tree. Returns the byte length the text needs (including the terminator), or
  * -1 with a reason written into `out`.
@@ -3166,6 +3235,11 @@ BF6_API int bf6_typeinfo_readable(const char* exe_path, double* bits);
  * plausible integer. The schema already knows the difference.
  *
  * max_depth <= 0 means 3, which is deep enough to see an array of structs. */
+/* Instance type guids of a partition, one per line, no instance decoded.
+ * Returns the instance count or -1. */
+BF6_API int bf6_ebx_instance_types(bf6_ctx*, const char* name, char* out, int out_len);
+/* Embedded struct types: "<instance> <guid>" per distinct pair. Returns the count or -1. */
+BF6_API int bf6_ebx_struct_types(bf6_ctx*, const char* name, char* out, int out_len);
 BF6_API int64_t bf6_ebx_dump(bf6_ctx*, const char* name, int max_depth,
                              char* out, int out_len);
 
@@ -5173,6 +5247,10 @@ BF6_API int bf6_ant_resolve_for_weapon(bf6_ctx*, const char* asset, int32_t spec
                                        int32_t weapon_type, char* out, int out_len);
 /* Advance by `seconds`. Returns 1, or 0 if the runtime has nothing to run. */
 BF6_API int  bf6_ant_runtime_update(bf6_ant_runtime*, float seconds);
+/* The pose a LAYER machine sits on: 7 floats per bone, quaternion xyzw then
+ * translation. Null or bones=0 clears it. Without it a machine that drives only
+ * part of the body writes bind over the rest and destroys the pose underneath. */
+BF6_API void bf6_ant_runtime_set_parent_pose(bf6_ant_runtime*, const float* qt, int bones);
 /* The current pose: 12 floats per bone into out (bone_max bones). Returns the
  * bone count. */
 BF6_API int  bf6_ant_runtime_pose(const bf6_ant_runtime*, float* out, int bone_max);
@@ -5477,14 +5555,11 @@ typedef enum {
     BF6_GM_OBJECTIVE     = 6,  /* ObjectiveData                                */
     BF6_GM_VEHICLE_SPAWN = 7,  /* VehicleSpawnReferenceObjectData, or a placed vehiclespawner gem */
     BF6_GM_SOLDIER_SPAWN = 8,  /* SoldierSpawnReferenceObjectData              */
-    /* THE GEM SLOT. ee2bf4d0-c3fd-b131-1c29-78b6dd42672e is a generic 160-byte
+    /* THE GEM SLOT. ee2bf4d0-c3fd-b131-1c29-78b6dd42672e is a generic
      * game-element instance: vehicle pads, resupply stations, MCOMs, bomb
-     * pickups, HQ/flag logic and emplacements all share it. Its byte-132
-     * import link names a TEMPLATE (gem_vehiclespawner, gem_objective_mcom,
-     * gem_bomb_pickup, gem_specialcombatarea, vectorshapeasset ...) and is
-     * absent on roughly half of them; that word is in gem_link. The value
-     * word is NOT a vehicle type (the same number sits on a gun and a tank
-     * pad); it is in gem_value for the record. */
+     * pickups, HQ/flag logic and emplacements all share it. Field 0xCBD4EB97
+     * is the imported GEM template (gem_vehiclespawner, gem_objective_mcom,
+     * gem_bomb_pickup, gem_specialcombatarea, vectorshapeasset ...). */
     BF6_GM_GEM           = 9
 } bf6_gm_kind;
 
@@ -5496,6 +5571,8 @@ typedef struct {
     const char* blueprint;     /* gem/prefab placements: the blueprint path; else NULL */
     int32_t     kind;          /* bf6_gm_kind                                  */
     int32_t     instance;      /* instance index within `partition`, -1 for a placement */
+    int32_t     root_order;    /* index in root Objects[], -1 when not listed  */
+    const char* instance_guid; /* exported instance identity, or NULL for internal rows */
     float       xform[12];     /* world, 3x4 row-major, game space             */
     uint8_t     has_own_transform; /* 1 when the entity declared a LinearTransform that was composed in */
     int32_t     team;          /* TeamId enum; 0 = no side stated              */
@@ -5520,13 +5597,16 @@ typedef struct {
      * owner maps to (BF6_GM_COMBAT for a combat area) or -1. */
     const char*     owner_type;
     int32_t         owner_kind;
-    /* GEMS ONLY (kind BF6_GM_GEM). gem_link is the leaf name of the partition
-     * the instance's byte-132 word imports ("gem_vehiclespawner"), "" when the
-     * word is 0xFFFFFFFF (no link), "?" when it indexes past the import
-     * table. gem_value is the sole int of the 5389A5F9 parameter struct, or
-     * -1. Both NULL/-1 on every other kind. */
+    /* GEMS ONLY (kind BF6_GM_GEM). gem_link is the leaf name imported by the
+     * 0xCBD4EB97 Blueprint PointerRef ("gem_vehiclespawner"), or "" when it is
+     * null. gem_value is field 0x783E16EC; for gem_vehiclespawner this is the
+     * game-authored ModBuilder vehicle selector. Both NULL/-1 on other kinds. */
     const char*     gem_link;
     int32_t         gem_value;
+    /* Imported spatial asset bound through the GEM's InstanceParameters.
+     * Capture points use property 0x5C3A072B for their exact vector shape. */
+    const char*     gem_shape;
+    uint32_t        gem_shape_property;
 } bf6_gm_entity;
 
 typedef struct {

@@ -184,6 +184,20 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
     for (const auto& v : kept) bf6__collect_placements(v, places, 0);
     if (dbg) std::fprintf(stderr, "seed: %zu placement(s) declared by %s\n",
                           places.size(), name.c_str());
+    /* The reflected layout of any type this graph names. A struct BUILDER writes its
+     * i-th argument at the i-th entry of an offsets array the loader hands it, and for
+     * a struct that array is the type's own field table - so the field order here is
+     * what such a builder can be checked against. */
+    if (std::getenv("BF6_TYPE_LAYOUT"))
+        for (const auto& grp : gr->slot_values) {
+            bf6::TypeGuid g{};
+            if (!ctx->types->guid_by_name_hash(grp.data_type_id, g)) continue;
+            const bf6::TypeLayout& l = ctx->types->layout_full(g);
+            std::fprintf(stderr, "type %08X size %u, %zu field(s):", grp.data_type_id,
+                         l.size, l.fields.size());
+            for (const auto& f : l.fields) std::fprintf(stderr, " %08X@%u", f.name_hash, f.offset);
+            std::fprintf(stderr, "\n");
+        }
 
     /* Which pool offsets this graph's typed copies actually read, and the slot each
      * one feeds. A placement naming an offset no copy reads is for a region this

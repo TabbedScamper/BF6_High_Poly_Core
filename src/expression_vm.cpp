@@ -931,6 +931,8 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     tr.inputs[0] = record.operands[0].offset;
                     tr.inputs[1] = record.operands[1].offset;
                     tr.inputs[2] = record.operands[2].offset;
+                    for (int q = 0; q < 3; ++q)
+                        tr.in_region[q] = (uint8_t)record.operands[(size_t)q].region;
                     tr.n_inputs = 3;
                     instance->trace.push_back(tr);
                 }
@@ -1070,6 +1072,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     /* A move's single source, so the backward walk does not stop dead at
                      * the copies - which is exactly where every hand-trace stalled. */
                     tr.inputs[0] = source.offset;
+                    tr.in_region[0] = (uint8_t)source.region;
                     tr.n_inputs = 1;
                     instance->trace.push_back(tr);
                 }
@@ -1380,11 +1383,16 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     if (instance && instance->trace_records) {
                         uint32_t in[8] = {0, 0, 0, 0, 0, 0, 0, 0};
                         uint8_t n = 0;
+                        uint8_t reg[8] = {0, 0, 0, 0, 0, 0, 0, 0};
                         for (size_t i = 0; i < call.inputs.size() && n < 8; ++i)
-                            if (call.inputs[i]) in[n++] = call.inputs[i]->offset;
+                            if (call.inputs[i]) {
+                                reg[n] = (uint8_t)call.inputs[i]->region;
+                                in[n++] = call.inputs[i]->offset;
+                            }
                         const bool trunc = call.inputs.size() > 8;
                         for (size_t i = instance->trace.size(); i-- > 0;) {
                             if (instance->trace[i].record_offset != record.offset) break;
+                            std::memcpy(instance->trace[i].in_region, reg, sizeof reg);
                             std::memcpy(instance->trace[i].inputs, in, sizeof in);
                             instance->trace[i].n_inputs = n;
                             instance->trace[i].inputs_truncated = trunc;

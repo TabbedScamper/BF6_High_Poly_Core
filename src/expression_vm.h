@@ -152,6 +152,13 @@ struct Instance {
          * the walk is mechanical. Eight is enough for every operator that has ever
          * needed explaining; a wider one is truncated and says so. */
         uint32_t inputs[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        /* THE REGION OF EACH INPUT, because an offset alone does not identify storage.
+         * Region 0 is the constant pool and region 2 the slots, and they share the
+         * number space: a backward walk that took pool 0x420 for slot 0x420 followed a
+         * vector that had nothing to do with the value being explained, and reported a
+         * move whose source and destination disagreed - which is impossible, and was the
+         * tell. Without the region the walk invents plausible chains. */
+        uint8_t in_region[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         uint8_t n_inputs = 0;
         bool inputs_truncated = false;
     };

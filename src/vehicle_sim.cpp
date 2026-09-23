@@ -103,6 +103,25 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             std::vector<uint32_t> po(4096), pv(4096);
             const int nv = bf6_expression_pool_values(ctx, name.c_str(), po.data(), pv.data(), 4096);
             for (int i = 0; i < nv && i < 4096; ++i) g->inst.pool_patches[po[(size_t)i]] = pv[(size_t)i];
+            /* BF6_POOL_AT=<hex>: whether one pool word is among the authored values the
+             * engine writes at load, and what it holds. A pool word nobody patches keeps
+             * its on-disk placeholder, usually zero, and an unpatched zero is
+             * indistinguishable from an authored zero without asking this question. */
+            if (const char* at = std::getenv("BF6_POOL_AT")) {
+                const uint32_t want = (uint32_t)std::strtoul(at, nullptr, 16);
+                bool found = false;
+                for (int i = 0; i < nv && i < 4096; ++i)
+                    if (po[(size_t)i] == want) {
+                        float f;
+                        std::memcpy(&f, &pv[(size_t)i], 4);
+                        std::fprintf(stderr, "pool 0x%X in %s: PATCHED to 0x%08X (%g)\n",
+                                     want, name.c_str(), pv[(size_t)i], f);
+                        found = true;
+                    }
+                if (!found)
+                    std::fprintf(stderr, "pool 0x%X in %s: NOT among the %d authored values,"
+                                         " keeps its on-disk placeholder\n", want, name.c_str(), nv);
+            }
         }
         /* Relocated pointers (e.g. a PUSH's feature-path pointer) get their pool
          * target, so each pushed feature has its own state identity. */
@@ -635,42 +654,66 @@ void VehicleSim::tick() {
             if (tick == at_tick) {
                 std::fprintf(stderr, "why slot 0x%X in %s at tick %ld:\n",
                              slot, g->name.c_str(), at_tick);
-                /* Last writer wins: a slot written more than once in a tick is explained
-                 * by the write that the readers downstream of it actually saw. */
-                std::map<uint32_t, const expression::Instance::TraceRow*> last;
-                for (const auto& t : g->inst.trace) last[t.slot] = &t;
+                /* CAUSALLY ORDERED, not last-writer-wins. The trace is in execution
+                 * order, so the write that a consumer at index i actually read is the
+                 * last write to that slot BEFORE i. A global last-writer map instead
+                 * reports each slot's end-of-tick value, which produced chains that
+                 * cannot be true - a move whose source and destination disagree - and
+                 * sent one investigation down a vector that had nothing to do with the
+                 * value being explained. A tool that invents plausible chains is worse
+                 * than no tool, so the walk carries the index it is allowed to look
+                 * before. */
+                const auto& tr = g->inst.trace;
+                auto writer_before = [&tr](uint32_t s, size_t before) -> size_t {
+                    for (size_t i = before; i-- > 0;)
+                        if (tr[i].slot == s) return i;
+                    return (size_t)-1;
+                };
                 std::set<uint32_t> seen;
                 struct Walk {
-                    const std::map<uint32_t, const expression::Instance::TraceRow*>& last;
+                    const std::vector<expression::Instance::TraceRow>& tr;
+                    const std::function<size_t(uint32_t, size_t)>& writer_before;
                     std::set<uint32_t>& seen;
                     long max_depth;
-                    void go(uint32_t s, long depth) const {
+                    void go(uint32_t s, size_t before, long depth) const {
                         std::string pad((size_t)depth * 2, ' ');
-                        const auto it = last.find(s);
-                        if (it == last.end()) {
+                        const size_t idx = writer_before(s, before);
+                        if (idx == (size_t)-1) {
                             std::fprintf(stderr, "%s0x%X <- NOTHING WROTE IT this tick"
                                                  " (a seeded constant, or an unseeded cell"
                                                  " read as zero)\n", pad.c_str(), s);
                             return;
                         }
-                        const auto* t = it->second;
+                        const auto& t = tr[idx];
                         float l[4];
-                        std::memcpy(l, t->lanes, 16);
-                        const int n = t->width >= 16 ? 4 : 1;
+                        std::memcpy(l, t.lanes, 16);
+                        const int n = t.width >= 16 ? 4 : 1;
                         std::fprintf(stderr, "%s0x%X = ", pad.c_str(), s);
                         for (int i = 0; i < n; ++i) std::fprintf(stderr, "%g ", l[i]);
-                        std::fprintf(stderr, "%s <- rec 0x%X %s", t->known ? "" : "UNKNOWN",
-                                     t->record_offset,
-                                     t->key ? "op" : "move/select");
-                        if (t->key) std::fprintf(stderr, " %08X", t->key);
-                        if (t->inputs_truncated) std::fprintf(stderr, " (inputs truncated)");
+                        std::fprintf(stderr, "%s <- rec 0x%X %s", t.known ? "" : "UNKNOWN",
+                                     t.record_offset, t.key ? "op" : "move/select");
+                        if (t.key) std::fprintf(stderr, " %08X", t.key);
+                        if (t.inputs_truncated) std::fprintf(stderr, " (inputs truncated)");
                         std::fprintf(stderr, "\n");
                         if (depth + 1 > max_depth || !seen.insert(s).second) return;
-                        for (uint8_t i = 0; i < t->n_inputs; ++i)
-                            go(t->inputs[i], depth + 1);
+                        for (uint8_t i = 0; i < t.n_inputs; ++i) {
+                            /* ONLY SLOTS ARE IN THE TRACE. Region 0 is the constant pool
+                             * and shares the number space with the slots, so following a
+                             * pool offset into the slot trace reports an unrelated value -
+                             * which it did, and the giveaway was a move whose source and
+                             * destination disagreed. Name the region and stop there. */
+                            if (t.in_region[i] != 2) {
+                                std::string p2((size_t)(depth + 1) * 2, ' ');
+                                std::fprintf(stderr, "%sr%u+0x%X (a %s, not a slot)\n",
+                                             p2.c_str(), t.in_region[i], t.inputs[i],
+                                             t.in_region[i] == 0 ? "POOL CONSTANT" : "bound operand");
+                                continue;
+                            }
+                            go(t.inputs[i], idx, depth + 1);   /* only writes BEFORE this one */
+                        }
                     }
                 };
-                Walk{last, seen, max_depth}.go(slot, 1);
+                Walk{tr, writer_before, seen, max_depth}.go(slot, tr.size(), 1);
             }
         }
         /* BF6_UNSEEDED_REPORT=1: the per-part state cells this graph READ and nothing

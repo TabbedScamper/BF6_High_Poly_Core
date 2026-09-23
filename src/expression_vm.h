@@ -195,6 +195,10 @@ struct Instance {
      * the vehicle graphs; ExpressionBoneId 0x444908CB = 16 is most of them). A type
      * missing here leaves that copy unperformed, as before. */
     std::map<uint32_t, uint32_t> type_sizes;
+    /* Each type's field offsets, ascending, from the same reflection. A typed copy
+     * whose destination is a FIELD inside a typed slot (not the slot's start) has
+     * no slot type of its own; its width is that field's, the gap to the next. */
+    std::map<uint32_t, std::vector<uint32_t>> type_fields;
     /* CONSTANT-POOL PATCHES, byte offset -> u32, laid over the pool for every read.
      * The engine writes channel handles into zero-on-disk pool entries at load
      * (bf6_expression_channel_bindings names which channel goes where); offline the

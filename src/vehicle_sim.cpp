@@ -10,6 +10,8 @@
 #include <set>
 #include <cctype>
 
+extern "C" uint32_t bf6__type_field_offsets_by_hash(bf6_ctx*, uint32_t, uint32_t*, uint32_t);
+
 namespace bf6 {
 
 bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<std::string>& graphs,
@@ -134,6 +136,12 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                 it = type_size_cache.emplace(grp.data_type_id,
                                              bf6_type_size_by_hash(ctx, grp.data_type_id)).first;
             if (it->second) g->inst.type_sizes[grp.data_type_id] = it->second;
+            if (!g->inst.type_fields.count(grp.data_type_id)) {
+                uint32_t offs[256];
+                const uint32_t n = bf6__type_field_offsets_by_hash(ctx, grp.data_type_id, offs, 256);
+                if (n && n <= 256)
+                    g->inst.type_fields[grp.data_type_id].assign(offs, offs + n);
+            }
         }
         /* Operator names from the executable. */
         std::set<uint32_t> keyset;

@@ -59,7 +59,9 @@ struct bf6__placement {
 };
 
 void bf6__collect_placements(const bf6::EbxValue& v,
-                             std::vector<bf6__placement>& out, int depth)
+                             std::vector<bf6__placement>& out, int depth,
+                             const std::vector<bf6::EbxValue>* all = nullptr,
+                             std::vector<bf6__placement>* refs = nullptr)
 {
     if (depth > 24) return;
     const bf6::EbxValue* desc = v.field(kPlacementDesc);
@@ -75,10 +77,20 @@ void bf6__collect_placements(const bf6::EbxValue& v,
                 if (kv.first != kPlacementDesc &&
                     kv.second.kind == bf6::EbxValue::Kind::Struct)
                     out.push_back({at, &kv.second});
+            /* ...or a REFERENCE to another instance of the same partition, which is
+             * how an aircraft's binding table names its keyed curves. Those go to a
+             * separate list: they are bound only where an operator reads the pool
+             * word directly as a handle (CURVE HANDLES READ STRAIGHT FROM THE POOL). */
+            if (refs && all)
+                for (const auto& kv : v.fields)
+                    if (kv.first != kPlacementDesc &&
+                        kv.second.kind == bf6::EbxValue::Kind::InstanceRef &&
+                        kv.second.instance >= 0 && (size_t)kv.second.instance < all->size())
+                        refs->push_back({at, &(*all)[(size_t)kv.second.instance]});
         }
     }
-    for (const auto& kv : v.fields) bf6__collect_placements(kv.second, out, depth + 1);
-    for (const auto& it : v.items) bf6__collect_placements(it, out, depth + 1);
+    for (const auto& kv : v.fields) bf6__collect_placements(kv.second, out, depth + 1, all, refs);
+    for (const auto& it : v.items) bf6__collect_placements(it, out, depth + 1, all, refs);
 }
 
 /* One number, as the four bytes the field holds.
@@ -180,8 +192,8 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
     std::vector<bf6::EbxValue> kept;
     kept.reserve(e.instance_count());
     for (size_t i = 0; i < e.instance_count(); ++i) kept.push_back(e.read_instance(i));
-    std::vector<bf6__placement> places;
-    for (const auto& v : kept) bf6__collect_placements(v, places, 0);
+    std::vector<bf6__placement> places, ref_places;
+    for (const auto& v : kept) bf6__collect_placements(v, places, 0, &kept, &ref_places);
     if (dbg) std::fprintf(stderr, "seed: %zu placement(s) declared by %s\n",
                           places.size(), name.c_str());
     /* The reflected layout of any type this graph names. A struct BUILDER writes its
@@ -250,7 +262,14 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             else pools_of_type[ty->second].push_back(kv.first);
         }
         for (auto& kv : pools_of_type) {
-            if (type_has_placement.count(kv.first)) continue;
+            if (type_has_placement.count(kv.first)) {
+                if (dbg)
+                    for (uint32_t p : kv.second)
+                        std::fprintf(stderr, "seed: type %08X is partly placed; pool 0x%X (slot 0x%X)"
+                                             " has no placement and stays unbound\n",
+                                     kv.first, p, slot_of_pool[p]);
+                continue;
+            }
             bf6::TypeGuid g{};
             if (!ctx->types->guid_by_name_hash(kv.first, g)) continue;
             std::vector<const bf6::EbxValue*> vals;
@@ -412,7 +431,12 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
     size_t written = 0;
     for (const bf6__placement& pl : places) {
         const auto slot = slot_of_pool.find(pl.pool_offset);
-        if (slot == slot_of_pool.end()) continue;      /* this graph does not read it */
+        if (slot == slot_of_pool.end()) {              /* this graph does not read it */
+            if (dbg)
+                std::fprintf(stderr, "  pool 0x%X: placed value type %08X, no typed copy reads it\n",
+                             pl.pool_offset, ctx->types->layout_full(pl.value->guid).name_hash);
+            continue;
+        }
         const bf6::TypeLayout& lay = ctx->types->layout_full(pl.value->guid);
         if (!lay.valid || !lay.size) {
             if (dbg)
@@ -443,4 +467,54 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
         }
     }
     if (dbg) std::fprintf(stderr, "seed: %zu placement(s) written\n", written);
+
+    /* CURVE HANDLES READ STRAIGHT FROM THE POOL.
+     *
+     * An aircraft graph passes its keyed curves to the curve operator (9AFB0561) as
+     * 8-byte pool words - 0xED0..0xEF0 on the f16 - with no typed copy in between, so
+     * nothing above ever looked at them. They stayed zero, the operator read 40 bytes
+     * from the handle, took +0x18 as the keys pointer and landed in the relocation
+     * table ("key count out of range"). The two refused curves feed the flap command
+     * of two wings, and each refused wing zeroed the whole AngularAcceleration channel.
+     *
+     * The graph's binding table names each curve by INSTANCE REFERENCE (a placement
+     * whose value is an InstanceRef, not an inline struct, which the collector used
+     * to drop). On the f16 all five resolve, and the one curve over a 0..1 domain
+     * lands on the thrust call's handle, the only call fed a throttle. The handle is
+     * written with the 0xC0DF tag, not 0xC0DE, because the operator's inline-struct
+     * fallback reads +0x18, which for a handle is the NEXT handle. */
+    {
+        std::set<uint32_t> direct;
+        for (const auto& rec : gr->records)
+            if (rec.has_operator && rec.operator_key == 0x9AFB0561u)
+                for (const auto& op : rec.operands)
+                    if (op.region == 0 && !slot_of_pool.count(op.offset)) direct.insert(op.offset);
+        if (!direct.empty()) {
+            std::map<uint32_t, uint32_t> patches;
+            auto bind = [&](uint32_t pool, const bf6::EbxValue& val, const char* how) {
+                const bf6::TypeLayout& lay = ctx->types->layout_full(val.guid);
+                if (!lay.valid || !lay.size) return false;
+                std::map<uint32_t, uint32_t> fields;
+                bf6__seed_value(*ctx->types, lay, val, 0, fields, 0, &sim.wheel_ops());
+                for (const auto& f : fields)
+                    if ((f.second & 0xFFFF0000u) == 0xC0DE0000u) {
+                        patches[pool] = 0xC0DF0000u | (f.second & 0xFFFFu);
+                        if (dbg) std::fprintf(stderr, "seed: curve handle pool 0x%X <- instance [%td],"
+                                                      " curve %u (%s)\n",
+                                              pool, &val - kept.data(), f.second & 0xFFFFu, how);
+                        return true;
+                    }
+                return false;
+            };
+            for (const auto& pl : ref_places)
+                if (direct.count(pl.pool_offset)) bind(pl.pool_offset, *pl.value, "binding table");
+            if (dbg)
+                for (uint32_t p : direct)
+                    if (!patches.count(p))
+                        std::fprintf(stderr, "seed: curve handle pool 0x%X: no binding\n", p);
+            /* BF6_DIRECT_CURVES_OFF=1: leave these handles unbound, for A/B. */
+            if (!patches.empty() && !std::getenv("BF6_DIRECT_CURVES_OFF"))
+                sim.add_pool_patches(name, patches);
+        }
+    }
 }

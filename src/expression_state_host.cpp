@@ -420,13 +420,27 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         served_[key] += 1;
         if (ch->write) {
             const Value& v = args.back();
-            if (v.known) channels_[ck] = std::vector<uint8_t>(v.bytes.begin(),
-                                            v.bytes.begin() + std::min<size_t>(v.bytes.size(), ch->width));
-            else channels_.erase(ck);
+            /* AN UNKNOWN WRITE USED TO ERASE THE CHANNEL, and a read of an absent
+             * channel returns a KNOWN zero - so one refused contribution to an
+             * accumulated channel wiped everything summed before it and handed the
+             * rest of the graph a trusted 0. Every aircraft read AngularAcceleration
+             * as exactly (0,0,0) that way: 17.7 of gear torque, then a refused wing,
+             * then zero. The channel now stays UNKNOWN until the
+             * next known write. BF6_CHANNEL_LAUNDER=1 restores the old erase, for A/B. */
+            static const bool honest = std::getenv("BF6_CHANNEL_LAUNDER") == nullptr;
+            if (v.known) {
+                channels_[ck] = std::vector<uint8_t>(v.bytes.begin(),
+                                v.bytes.begin() + std::min<size_t>(v.bytes.size(), ch->width));
+                unknown_channels_.erase(ck);
+            } else {
+                channels_.erase(ck);
+                if (honest) unknown_channels_.insert(ck);
+            }
             channel_writes_[ck] += 1;
             out = Value{};
             return true;
         }
+        if (unknown_channels_.count(ck)) return false;   /* honest: still unknown */
         const auto it = channels_.find(ck);
         out.bytes.assign(ch->width, 0);
         if (it != channels_.end())

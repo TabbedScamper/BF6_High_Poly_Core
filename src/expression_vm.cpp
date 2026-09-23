@@ -1222,6 +1222,33 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                         st->second <= 4096)
                         width = st->second;
                 }
+                /* A COPY INTO A FIELD of a typed slot. The graph rebuilds an aircraft
+                 * wing's config (871044B0, 128 bytes) field by field, and the three
+                 * 8-byte fields at +64/+72/+80 arrive by typed copies whose destination
+                 * is inside the struct, not at a slot start - so no slot type, width 0,
+                 * nothing copied, and the wing refused on those 24 unknown bytes. Its
+                 * width is the field's: the gap to the next field of the enclosing
+                 * type. Only an exact field boundary qualifies.
+                 * BF6_FIELD_COPY_OFF=1 restores the old behaviour for A/B. */
+                static const bool field_copy_off = std::getenv("BF6_FIELD_COPY_OFF") != nullptr;
+                if (!width && ty == slot_type.end() && !field_copy_off && !slot_type.empty()) {
+                    auto enc = slot_type.upper_bound(output->offset);
+                    if (enc != slot_type.begin()) {
+                        --enc;
+                        const auto sz = instance->type_sizes.find(enc->second);
+                        const auto fl = instance->type_fields.find(enc->second);
+                        const uint32_t f = output->offset - enc->first;
+                        if (sz != instance->type_sizes.end() && fl != instance->type_fields.end() &&
+                            f > 0 && f < sz->second) {
+                            const auto& offs = fl->second;
+                            const auto at = std::lower_bound(offs.begin(), offs.end(), f);
+                            if (at != offs.end() && *at == f) {
+                                const uint32_t end = (at + 1) != offs.end() ? *(at + 1) : sz->second;
+                                if (end > f && end - f <= 4096) width = end - f;
+                            }
+                        }
+                    }
+                }
                 if (std::getenv("BF6_MOVE_DEBUG")) {
                     std::fprintf(stderr, "typed copy @%u src r%u+%u -> slot 0x%X: type %08X width %u\n",
                                  record.offset, record.operands.front().region,
@@ -1619,6 +1646,18 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                         diagnostic += arg.known ? " known" : " unknown";
                         if (arg.tainted) diagnostic += "/tainted";
                         diagnostic += "/" + std::to_string(arg.bytes.size());
+                        /* which bytes: a wide config is usually missing one field, not all */
+                        if (!arg.known && arg.known_bytes.size() == arg.bytes.size() && arg.bytes.size() > 4) {
+                            std::string rng;
+                            for (size_t b = 0; b < arg.known_bytes.size();) {
+                                if (arg.known_bytes[b]) { ++b; continue; }
+                                size_t e = b;
+                                while (e < arg.known_bytes.size() && !arg.known_bytes[e]) ++e;
+                                rng += (rng.empty() ? "" : ",") + std::to_string(b) + "-" + std::to_string(e);
+                                b = e;
+                            }
+                            diagnostic += "[" + rng + "]";
+                        }
                     }
                     result.diagnostics.push_back(diagnostic);
                     last_written.tainted = true;

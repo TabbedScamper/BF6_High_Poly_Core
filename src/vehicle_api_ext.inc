@@ -278,9 +278,9 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * set_float and set_bool can reach. Guessing a name here silently does nothing, so the
      * list has to be printable. */
     if (std::getenv("BF6_LIST_CHANNELS") && v->time < 0.02) {
-        const std::vector<std::string> ch = s.channel_names();
+        const std::map<uint32_t, std::string> ch = s.channel_name_map();
         std::fprintf(stderr, "bound channels (%zu):\n", ch.size());
-        for (const std::string& c : ch) std::fprintf(stderr, "  %s\n", c.c_str());
+        for (const auto& kv : ch) std::fprintf(stderr, "  %08X %s\n", kv.first, kv.second.c_str());
     }
     s.set_float("InputThrottle", throttle);
     s.set_float("InputBrake", brake);

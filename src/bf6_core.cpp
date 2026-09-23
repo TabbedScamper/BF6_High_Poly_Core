@@ -4912,6 +4912,27 @@ uint32_t bf6_type_size_by_hash(bf6_ctx* c, uint32_t name_hash)
     if (!ensure_types(c, e)) return 0;
     return c->types->size_by_name_hash(name_hash);
 }
+
+/* Internal: a reflected type's field offsets by name hash, ascending, for the
+ * expression VM's typed copies into the middle of a struct. Returns the count
+ * (which may exceed cap) or 0. */
+extern "C" uint32_t bf6__type_field_offsets_by_hash(bf6_ctx* c, uint32_t name_hash,
+                                                     uint32_t* out, uint32_t cap)
+{
+    if (!c) return 0;
+    std::string e;
+    if (!ensure_types(c, e)) return 0;
+    bf6::TypeGuid g{};
+    if (!c->types->guid_by_name_hash(name_hash, g)) return 0;
+    const bf6::TypeLayout& l = c->types->layout_full(g);
+    if (!l.valid) return 0;
+    std::vector<uint32_t> offs;
+    for (const auto& f : l.fields) offs.push_back(f.offset);
+    std::sort(offs.begin(), offs.end());
+    offs.erase(std::unique(offs.begin(), offs.end()), offs.end());
+    for (uint32_t i = 0; i < offs.size() && i < cap; ++i) out[i] = offs[i];
+    return (uint32_t)offs.size();
+}
 // The soldier's authored movement values, read from the player's own install
 // rather than baked into a constants block. Sits after raw_ext.inc because it
 // mounts through those helpers.

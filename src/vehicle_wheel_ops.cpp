@@ -2307,7 +2307,11 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * seeded tag decides which one this is rather than an assumption. */
         uint32_t at = 0;
         std::memcpy(&at, C.bytes.data(), 4);
-        if (C.bytes.size() >= 0x1C) {
+        /* 0xC0DF: a handle the seeder wrote into a pool word the graph passes straight
+         * to this operator (an aircraft's curves). Unambiguous: +0x18 of a handle is
+         * the NEXT handle, so the inline fallback below must not run. */
+        if ((at & 0xFFFF0000u) == 0xC0DF0000u) at = 0xC0DE0000u | (at & 0xFFFFu);
+        else if (C.bytes.size() >= 0x1C) {
             uint32_t inl = 0;
             std::memcpy(&inl, C.bytes.data() + 0x18, 4);
             if ((at & 0xFFFF0000u) != 0xC0DE0000u || (inl & 0xFFFF0000u) == 0xC0DE0000u) at = inl;

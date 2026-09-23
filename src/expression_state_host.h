@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -167,6 +168,7 @@ public:
      * graph OUTPUT (e.g. SpringCompression_A1). */
     void set_channel(uint32_t hash, const std::vector<uint8_t>& bytes, uint32_t mode = 0) {
         channels_[((uint64_t)mode << 32) | hash] = bytes;
+        unknown_channels_.erase(((uint64_t)mode << 32) | hash);
     }
     const std::map<uint64_t, std::vector<uint8_t>>& channels() const { return channels_; }
     const std::map<uint64_t, uint32_t>& channel_writes() const { return channel_writes_; }
@@ -292,6 +294,8 @@ private:
     std::map<uint64_t, std::vector<uint8_t>> channels_;
     std::map<uint64_t, uint32_t> channel_writes_;
     std::map<uint64_t, uint32_t> unsupplied_channels_;
+    /* Channels whose last write was UNKNOWN (reads refuse until a known write). */
+    std::set<uint64_t> unknown_channels_;
     std::map<PartKey, std::vector<uint8_t>> part_transforms_;
     std::map<PartKey, uint32_t> unsupplied_parts_;
     std::map<uint64_t, std::vector<uint8_t>> bone_poses_;

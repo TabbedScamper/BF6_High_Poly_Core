@@ -462,8 +462,19 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     }
     if (n == "NormalizeFloat3") {
         vec3(a[0], u);
+        /* The native (0x142493da7) returns zero when every lane is within the per-lane
+         * eps at 0x14931f710 (1.19e-7), as MagnitudeFloat3 does. Refusing instead made
+         * an aircraft at rest - relative wind exactly zero - lose every wing's angle
+         * of attack and with it the whole AngularAcceleration channel.
+         * BF6_NORMALIZE_REFUSE_ZERO=1 restores the old refusal for A/B. */
+        static const bool refuse_zero = std::getenv("BF6_NORMALIZE_REFUSE_ZERO") != nullptr;
+        const float eps = 1.19209290e-7f;
+        if (std::fabs(u[0]) <= eps && std::fabs(u[1]) <= eps && std::fabs(u[2]) <= eps) {
+            if (refuse_zero) return false;
+            const float z[3] = {0.f, 0.f, 0.f};
+            out = put_vec3(z); return true;
+        }
         const float m = std::sqrt(u[0]*u[0] + u[1]*u[1] + u[2]*u[2]);
-        if (m == 0.f) return false;   /* no direction to report */
         const float r[3] = {u[0]/m, u[1]/m, u[2]/m};
         out = put_vec3(r); return true;
     }

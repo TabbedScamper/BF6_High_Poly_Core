@@ -1629,8 +1629,40 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         };
         /* The application point, offset by the cyclic exactly as the kernel does. */
         float point[3] = {body_.com[0], body_.com[1], body_.com[2]};
-        point[0] += roll * c(0xA4);
-        point[2] -= pitch * c(0xA0);
+        /* THE CYCLIC'S AUTHORITY FALLS AWAY AS THE DISC TILTS, and leaving that out is
+         * what let three helicopters roll themselves over. The kernel reads
+         *
+         *     fVar17 = clamp(state[0x11] + cfg[0x84], 0, 1)
+         *
+         * and scales BOTH cyclic offsets by fVar17 SQUARED:
+         *
+         *     point.x = pt.x + fVar17^2 * Roll  * cfg[0xA4]
+         *     point.z = pt.z - (fVar17^2 * Pitch * cfg[0xA0] + fVar4 * 0.005)
+         *
+         * `state[0x10..0x12]` is the MAST AXIS - basis column 1 of the body's rotation
+         * matrix, the same block the jet engine reads - so `state[0x11]` is the mast's
+         * world-space Y: 1 level, 0 on its side, negative inverted. So cyclic authority
+         * is full when level and vanishes as the aircraft goes over, which is a damping
+         * term, and without it the cyclic keeps full authority all the way round.
+         *
+         * THE SIGNS ARE THE LISTING'S: plus on the roll offset, minus on the pitch one.
+         * They were nearly flipped on the strength of a trial that fixed the ah6m and
+         * left the ah64e worse; reading the kernel showed the flip would have been
+         * wrong, which is why it was read instead of tried again.
+         *
+         * `fVar4` is a fifteen-pair curve at config 0x00 keyed on speed * 3.6, so the
+         * pitch offset also carries a speed-dependent bias of 0.005 times it. */
+        const float mast_y = 1.0f - 2.0f * (body_.quat[0] * body_.quat[0] +
+                                            body_.quat[2] * body_.quat[2]);
+        float auth = mast_y + c(0x84);
+        if (auth <= 0.0f) auth = 0.0f;
+        if (1.0f <= auth) auth = 1.0f;
+        const float auth2 = auth * auth;
+        const float sp = std::sqrt(body_.v[0] * body_.v[0] + body_.v[1] * body_.v[1] +
+                                   body_.v[2] * body_.v[2]);
+        const float fv4 = table15(cfg, 0x00, 15, sp * 3.6f);
+        point[0] += auth2 * roll * c(0xA4);
+        point[2] -= auth2 * pitch * c(0xA0) + fv4 * 0.005f;
         push(base * c(0x9C) * collective, up, point);            /* the main lift */
         push(base * (collective < 0.0f ? c(0x7C) : c(0xA8)) * collective, up,
              body_.com);                                         /* the torque path */

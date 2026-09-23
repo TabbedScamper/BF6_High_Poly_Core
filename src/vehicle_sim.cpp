@@ -585,6 +585,33 @@ void VehicleSim::tick() {
                     std::fprintf(stderr, "\n");
                 }
         }
+        /* ANSWER THE WHEEL STATUS CELL, which is what the header of
+         * unseeded_frame_reads() describes: "the cell the engine would have written",
+         * kept in read order so a caller can answer it next tick, with set_cell_raw
+         * provided for exactly that. Nothing had ever answered one.
+         *
+         * WHICH CELL AND WHY 1 IS NOT A GUESS. The airplane graphs read kind 0 field 0
+         * of a bound part and test it against zero, treating equality as the wheel
+         * brake being applied; that pinned four aircraft to about 1.6 m/s. Reading the
+         * f22's own StateListDescriptor names that field: its per-wheel entries are
+         * Wheel Status at offset 1, AverageSlipRatioSum at 6, AverageSlipAngleSum at
+         * 10, Wheel Angular Velocity at 14 and SpringCompression at 18, so ranked by
+         * offset field 0 is **Wheel Status** - and the ranking is corroborated because
+         * field 3 lands on Wheel Angular Velocity, which is what this host already
+         * serves for field 3.
+         *
+         * The VALUE comes from the game too, not from taste: the tyre operator
+         * 45A17BD8 takes a status operand and returns one, and on every gear of every
+         * tick both are exactly 1. So the cell should hold 1, and the graph already
+         * carries that 1 in its own slots - it is only the state cell that nothing
+         * seeded.
+         *
+         * Narrow on purpose: kind 0, field 0, and a path whose low byte names a
+         * particular part. A car's equivalent reads carry the all-ones sentinel and are
+         * untouched. */
+        for (const auto& fr : state_.unseeded_frame_reads())
+            if (fr.kind == 0 && fr.field == 0 && (fr.path & 0xFFu) != 0xFFu)
+                state_.set_cell_raw(fr.key, 1);
         /* BF6_UNSEEDED_REPORT=1: the per-part state cells this graph READ and nothing
          * ever wrote, which the host is meant to answer - the header calls each one
          * "the cell the engine would have written", and set_cell_raw exists for

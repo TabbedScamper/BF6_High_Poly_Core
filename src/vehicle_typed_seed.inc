@@ -258,17 +258,32 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             if (!lay.valid || lay.fields.empty()) continue;
             std::sort(kv.second.begin(), kv.second.end(),
                       [](const Call& a, const Call& b) { return a.selector < b.selector; });
-            /* More calls than the type has fields would mean the order is not what it
-             * looks like, so nothing is patched rather than some of it. */
-            if (kv.second.size() > lay.fields.size()) {
+            /* ONLY THE FIELDS THAT COME THROUGH AN ADDRESS. A field too wide to pass
+             * by value - a rotor config's embedded curve is 120 bytes - reaches the
+             * struct builder as a BOUND REFERENCE instead and has no address call of
+             * its own. Counting it here shifted every assignment past it along by one,
+             * which put the curve's offset where a gain belonged and left every gain
+             * reading zero. A field's width is the gap to the next in offset order. */
+            std::vector<uint32_t> sorted_off;
+            for (const auto& f : lay.fields) sorted_off.push_back(f.offset);
+            std::sort(sorted_off.begin(), sorted_off.end());
+            std::vector<uint32_t> narrow;
+            for (const auto& f : lay.fields) {
+                const auto nx = std::upper_bound(sorted_off.begin(), sorted_off.end(), f.offset);
+                const uint32_t end = nx == sorted_off.end() ? lay.size : *nx;
+                if (end - f.offset <= 8) narrow.push_back(f.offset);
+            }
+            /* More calls than there are addressable fields would mean the order is not
+             * what it looks like, so nothing is patched rather than some of it. */
+            if (kv.second.size() > narrow.size()) {
                 if (dbg)
                     std::fprintf(stderr, "seed: slot 0x%X has %zu field calls for %zu"
-                                         " field(s): left alone\n",
-                                 kv.first, kv.second.size(), lay.fields.size());
+                                         " addressable field(s): left alone\n",
+                                 kv.first, kv.second.size(), narrow.size());
                 continue;
             }
             for (size_t i = 0; i < kv.second.size(); ++i)
-                sel_patch[kv.second[i].selector] = lay.fields[i].offset;
+                sel_patch[kv.second[i].selector] = narrow[i];
             if (dbg)
                 std::fprintf(stderr, "seed: slot 0x%X type %08X, %zu field address(es)\n",
                              kv.first, ty->second, kv.second.size());

@@ -981,6 +981,15 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (std::getenv("BF6_BUILD_DEBUG"))
             std::fprintf(stderr, "struct build: %zu field(s) into %u bytes, known %d\n",
                          b->offsets.size(), b->size, (int)out.known);
+        if (std::getenv("BF6_BUILD_DUMP")) {
+            std::fprintf(stderr, "built struct:");
+            for (size_t o = 0; o + 4 <= out.bytes.size(); o += 4) {
+                float f = 0.0f;
+                std::memcpy(&f, out.bytes.data() + o, 4);
+                if (f != 0.0f) std::fprintf(stderr, " 0x%zX=%g", o, f);
+            }
+            std::fprintf(stderr, "\n");
+        }
         return true;
     }
     if (key == kMotionDamping) {

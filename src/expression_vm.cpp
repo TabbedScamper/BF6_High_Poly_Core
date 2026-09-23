@@ -214,7 +214,20 @@ static Value materialize(const Graph& graph, const Instance* instance,
                 if (operand.offset == off) return unknown(width);
         return v;
     }
-    if (operand.region == 2) return slots.read(operand.offset, width);
+    if (operand.region == 2) {
+        /* A SLOT HOLDING A REFERENCE READS THROUGH IT. The engine passes addresses
+         * where this VM passes values, so a slot that a field-address operator filled
+         * holds a pointer and every consumer dereferences it: the struct builder that
+         * copies a rotor config reads fourteen of them, and reading the pointer slots
+         * themselves gave it fourteen zeros. A reference to a whole object (offset
+         * zero into it) is left alone, because those are consumed by a kind 0x2E bind
+         * and reading through them here would change what the bind sees. */
+        const auto ref = slots.refs.find(operand.offset);
+        if (ref != slots.refs.end() && ref->second.region == 2 &&
+            ref->second.offset != 0)
+            return slots.read(ref->second.offset, width);
+        return slots.read(operand.offset, width);
+    }
     if (operand.region >= kHeapRegion) {
         const uint32_t b = operand.region - kHeapRegion;
         if (b >= slots.heap.size()) return unknown(width);

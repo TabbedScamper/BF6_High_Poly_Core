@@ -795,6 +795,23 @@ void VehicleSim::tick() {
             }
             report_ += ul + "\n";
         }
+        /* REFUSED IS NOT UNRESOLVED. A refused call means the operator is known and
+         * described but its INPUTS were not, so it is a knownness frontier rather than a
+         * missing capability. Reported as one list the two were indistinguishable, and
+         * MultiplyFloatFloatFloat, SubtractFloat and logical And sitting in "unresolved"
+         * read as missing operators - which sent more than one investigation after a
+         * capability that was already implemented. */
+        if (!r.refused_keys.empty()) {
+            std::map<uint32_t, int> rk;
+            for (uint32_t k : r.refused_keys) ++rk[k];
+            std::string rl = "  refused (known op, unknown input):";
+            for (const auto& kv : rk) {
+                char kb[32];
+                std::snprintf(kb, sizeof kb, " %08X x%d", kv.first, kv.second);
+                rl += kb;
+            }
+            report_ += rl + "\n";
+        }
         for (const auto& d : r.diagnostics)
             if (d.find(" @") != std::string::npos) {
                 const unsigned long off = std::stoul(d.substr(d.rfind('@') + 1));

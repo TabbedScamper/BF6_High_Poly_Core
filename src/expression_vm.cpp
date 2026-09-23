@@ -411,6 +411,12 @@ static uint32_t move_width(const Record& record) {
     return 0;
 }
 
+static void add_refused(Evaluation& result, uint32_t key) {
+    if (key && std::find(result.refused_keys.begin(), result.refused_keys.end(), key) ==
+               result.refused_keys.end())
+        result.refused_keys.push_back(key);
+}
+
 static void add_unresolved(Evaluation& result, uint32_t key) {
     if (key && std::find(result.unresolved_keys.begin(),
                          result.unresolved_keys.end(), key) ==
@@ -1562,7 +1568,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                                 instance->trace.push_back({record.offset, record.operator_key,
                                                            eo->offset, 0u, false});
                     }
-                    add_unresolved(result, record.operator_key);
+                    add_refused(result, record.operator_key);
                     std::string diagnostic = "host invoke failed at record " +
                         std::to_string(record.offset) + " key " +
                         std::to_string(record.operator_key) + " inputs";

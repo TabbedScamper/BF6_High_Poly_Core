@@ -221,7 +221,14 @@ struct Evaluation {
     uint32_t last_record = 0;
     uint32_t guessed_branches = 0;
     uint32_t approximated_indirect_jumps = 0;
+    /* An operator whose SIGNATURE the host cannot describe: a real capability gap. */
     std::vector<uint32_t> unresolved_keys;
+    /* An operator that IS known and described but whose call was refused, which for
+     * PureOps and RecoveredOps means an unknown INPUT. These two were reported as one
+     * list for a long time, so basic arithmetic showed up looking like a missing
+     * operator and sent more than one investigation after a capability that was
+     * already there. A refused call is a knownness frontier, not a gap. */
+    std::vector<uint32_t> refused_keys;
     std::vector<std::string> diagnostics;
 };
 

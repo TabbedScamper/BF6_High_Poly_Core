@@ -182,6 +182,21 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
         fr.kind = cur_kind_;
         fr.field = cur_field_;
         if (unseeded_frame_reads_.size() < 256) unseeded_frame_reads_.push_back(fr);
+        /* BF6_UNSEEDED_ONE=1 makes an unseeded per-part state read return 1 instead of
+         * 0. DIAGNOSTIC: the airplane graphs ask a per-part question and take a ZERO
+         * answer as "the wheel brake is applied" - they test the cell against zero
+         * (17B8026A) and feed the result into the wheel-spin resistance - so the value
+         * this returns decides whether an aircraft can roll at all. A car never binds
+         * these paths (its descriptor is the all-ones sentinel) and reaches brake = 0
+         * by another route, so this measures the aircraft path without touching cars. */
+        if (std::getenv("BF6_UNSEEDED_ONE")) { out = 1; return true; }
+        /* BF6_UNSEEDED_BOUND_ONE=1 narrows that to the reads whose path names a
+         * PARTICULAR part - low byte not the all-ones sentinel - at field 0, which is
+         * exactly the shape the aircraft brake test uses (paths FFFFFF00, FFFFFF03,
+         * FFFFFF04 at frame 001479 on an f22). A car's equivalent reads carry the
+         * unbound FFFFFFFF, so they are untouched by this. */
+        if (std::getenv("BF6_UNSEEDED_BOUND_ONE") && cur_field_ == 0 &&
+            (path & 0xFFu) != 0xFFu) { out = 1; return true; }
     }
     out = 0;
     return true;

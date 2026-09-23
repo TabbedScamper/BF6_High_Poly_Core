@@ -1269,8 +1269,16 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                              * four bytes reported every one-byte flag as 0, and a flag
                              * written TRUE then read as 0 sent a whole investigation
                              * the wrong way. A narrow value prints as its integer. */
-                            char v[32] = "?";
-                            if (args[i].bytes.size() >= 4) {
+                            char v[96] = "?";
+                            /* A 16-byte operand is a state DESCRIPTOR, and its four
+                             * dwords are what the cell key is built from, so print it
+                             * whole: the first lane alone cannot identify a cell. */
+                            if (args[i].bytes.size() == 16) {
+                                uint32_t d[4];
+                                std::memcpy(d, args[i].bytes.data(), 16);
+                                std::snprintf(v, sizeof v, "desc[%08X %08X %08X %08X]",
+                                              d[0], d[1], d[2], d[3]);
+                            } else if (args[i].bytes.size() >= 4) {
                                 float g = 0.0f;
                                 std::memcpy(&g, args[i].bytes.data(), 4);
                                 std::snprintf(v, sizeof v, "%g", g);

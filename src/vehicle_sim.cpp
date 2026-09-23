@@ -585,6 +585,27 @@ void VehicleSim::tick() {
                     std::fprintf(stderr, "\n");
                 }
         }
+        /* BF6_UNSEEDED_REPORT=1: the per-part state cells this graph READ and nothing
+         * ever wrote, which the host is meant to answer - the header calls each one
+         * "the cell the engine would have written", and set_cell_raw exists for
+         * exactly that. The inventory was already being collected and nothing read it,
+         * so these gaps could only be found by hand-tracing one slot at a time. They
+         * are not harmless: an unseeded read returns ZERO, and an airplane graph tests
+         * one of these against zero and takes it as the wheel brake being applied,
+         * which pins four aircraft to a standstill. */
+        if (std::getenv("BF6_UNSEEDED_REPORT")) {
+            const auto& u = state_.unseeded_frame_reads();
+            std::map<uint64_t, expression::StateHost::FrameRead> once;
+            for (const auto& fr : u) once.emplace(fr.key, fr);
+            if (!once.empty()) {
+                std::fprintf(stderr, "unseeded state cells in %s: %zu distinct\n",
+                             g->name.c_str(), once.size());
+                for (const auto& kv : once)
+                    std::fprintf(stderr, "  key 0x%016llX frame %06X path %08X kind %u field %u\n",
+                                 (unsigned long long)kv.first, kv.second.frame,
+                                 kv.second.path, kv.second.kind, kv.second.field);
+            }
+        }
         if (const char* watch = std::getenv("BF6_SLOT_WATCH"))
             if (g->name.find("simex") != std::string::npos) {
                 static int calls = 0;

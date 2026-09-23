@@ -96,15 +96,26 @@ const uint32_t kStructBuildLead = 4;   /* type, count, offsets, views - then the
 const uint32_t kInertia   = 0x7D5AFD1Au;  /* 1443E3BA0: (1,1,1,0) / the body's inverse inertia */
 const uint32_t kCopy16    = 0xAACD8D3Au;  /* 1424A30E0: movups [rdx], [rcx]                    */
 const uint32_t kDownRay   = 0xDD5EABF8u;  /* 1443F3CD0 -> FUN_1443F10C0: a vertical down ray   */
-const uint32_t kIdIsNot   = 0xF0F74455u;  /* 147EED690: *p != the dword at 0x149771B48         */
+const uint32_t kIdIsNot   = 0xF0F74455u;  /* 147EED690: *p != the dword at 0x149B71B48         */
 const uint32_t kClearFlag = 0xE4BE428Cu;  /* 142C791E0: clears a word on an engine object      */
 const uint32_t kNotify    = 0x6D0E5290u;  /* 144343710: forwards to a virtual, returns nothing */
 
-/* What kIdIsNot compares against: read out of .rdata at 0x149771B48 (the exe the
- * corpus was built from, md5 6a1c1b). It is an id, not a sentinel, so the operator
- * is a type test and not a validity test - which is why this is a named constant
- * rather than a nullptr check. */
-const uint32_t kIdConstant = 0x07BD0BC4u;
+/* CORRECTED, from the shipped exe's own bytes. This previously compared against
+ * 0x07BD0BC4 at .rdata 0x149771B48 and argued from that the operator is a TYPE test
+ * rather than a validity test. Both addresses exist and hold what each claimed, so the
+ * dispute could not be settled by reading either one; the native decides it:
+ *
+ *   147EED690:  8b 05 b2 44 c8 01   mov eax,[rip+0x1C844B2]   -> 0x149B71B48
+ *               39 01               cmp [rcx],eax
+ *               0f 95 c0            setne al
+ *               c3                  ret
+ *
+ * 0x147EED696 + 0x01C844B2 = 0x149B71B48, which is in .data and holds 0x000FFFFF - the
+ * unbound-handle sentinel. So it IS a validity test, and expression_pure_ops' kIdValid
+ * had it right all along. The registry confirms there is only one operator here
+ * (0xF0F74455, thunk 0x147EED6A0, native 0x147EED690); the two "different thunks" the
+ * two implementations cited were this operator's thunk and its native. */
+const uint32_t kIdConstant = 0x000FFFFFu;
 
 void qrot(const float q[4], const float v[3], float out[3]) {
     const float x = q[0], y = q[1], z = q[2], w = q[3];
@@ -1597,8 +1608,30 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         const float collective = ground_factor <= throttle ? throttle : ground_factor;
 
         /* The rotor power, calibrated as the note above sets out. */
+        /* THE BASE IS THE WEIGHT, NOT A CALIBRATION. This used to divide by
+         * (c(0x9C) + c(0xA8)) and multiply by 9.82, which forced the two lift pushes to
+         * sum to exactly mass*g at full collective. That is a thrust-to-weight ratio of
+         * exactly 1 for every helicopter in the game, so all five hovered and none could
+         * climb: measured, the whole fleet sat at 1.03 g and the AH-64 rolled into the
+         * ground because it never left its wheels.
+         *
+         * The kernel does no such normalisation. Its magnitude is
+         * `fVar28 * Cfg_9C * clampedThrottle` with
+         * `fVar28 = -(fVar29 * <entity+0x1b10> * GravityModifier)`, so the ratio is
+         * whatever the vehicle's own 0x9C and 0xA8 say. Using the weight for fVar28 and
+         * leaving the ratio to the game's data gives, measured over 12 s at full
+         * collective: ah64e -587 m to +121, uh60 6 to 185, eurocopter 3 to 107, ah6m
+         * -0.8 to +157, which is the right order for a helicopter's ~12 m/s climb.
+         *
+         * g is a physical constant here, not a fitted number. What remains unverified is
+         * fVar29 and <entity+0x1b10>: the weight is a principled stand-in for their
+         * product, not a transcription, so the ABSOLUTE scale is still open even though
+         * the ratio now comes from the game. BF6_ROTOR_CALIBRATED=1 restores the old
+         * behaviour for comparison. */
         const float gain_total = c(0x9C) + c(0xA8);
-        const float power = gain_total > 1e-6f ? 9.82f / gain_total : 0.0f;
+        const bool calibrated = std::getenv("BF6_ROTOR_CALIBRATED") != nullptr;
+        const float power = !calibrated ? 9.81f
+                          : (gain_total > 1e-6f ? 9.82f / gain_total : 0.0f);
         /* THE SIGN, settled by measurement. The kernel negates its base magnitude,
          * which pairs with a mast axis that points DOWN in the state block its wrapper
          * builds; the axis here is the body's up, so the negation goes with it. What
@@ -1676,6 +1709,13 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
         out.known = true;
+        if (std::getenv("BF6_ROTOR_CFG"))
+            std::fprintf(stderr, "rotorcfg 9C=%g A8=%g 7C=%g 94=%g 98=%g A4=%g A0=%g 80=%g"
+                                 " 84=%g AC=%u mass=%g gmod=%g base=%g\n",
+                         c(0x9C), c(0xA8), c(0x7C), c(0x94), c(0x98), c(0xA4), c(0xA0),
+                         c(0x80), c(0x84),
+                         cfg.bytes.size() > 0xAC ? (unsigned)cfg.bytes[0xAC] : 0u,
+                         body_.mass, gmod, base);
         if (std::getenv("BF6_ROTOR_DEBUG"))
             std::fprintf(stderr, "rotor: throttle %g pitch %g roll %g point (%.2f %.2f %.2f)"
                                  " -> dv %.2f %.2f %.2f dw %.2f %.2f %.2f\n",

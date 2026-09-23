@@ -86,6 +86,7 @@ const uint32_t kMotionDamping = 0x9EB2D5CEu;
 const uint32_t kHeliRotor = 0x76A51E81u;   /* simulateHelicopterEngine */
 const uint32_t kJetEngine = 0x4D6E60D6u;   /* simulateJetEngine, native 0x1443E6320 */
 const uint32_t kTailRotor = 0x717170A5u;   /* the tail rotor, kernel FUN_1443ECAE0 */
+const uint32_t kWing = 0xBC2D6783u;        /* a lifting surface, kernel FUN_1443F5980 */
 const uint32_t kTerrainAt = 0xD7D1BAB3u;
 const uint32_t kStructBuild = 0x8B226FBBu;
 const uint32_t kStructBuildLead = 4;   /* type, count, offsets, views - then the fields */
@@ -820,6 +821,14 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.extra_output_widths = {16};
         out.output_width = 16;
         return true;
+    case kWing:
+        /* dt, InertiaLocal (never read by the kernel), FlapAngle, WindVelocity and the
+         * WingConfig -> linear then angular acceleration. The config's highest field is
+         * the rot gain at 0x74, so 0x78 covers it. */
+        out.input_widths = {4, 16, 4, 16, 0x78};
+        out.extra_output_widths = {16};
+        out.output_width = 16;
+        return true;
     case kTailRotor:
         /* dt, Rpm, Throttle, ForceDirection, ForcePositionOffset, Config
          * -> linear then angular acceleration. The config's last byte read is 0xA5. */
@@ -951,6 +960,23 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     static const Need kForce[] = {{1, 0, 12}, {2, 0, 12}};
     static const Need kStill[] = {{2, 0, 12}, {3, 0, 12}, {4, 0, 12}, {5, 0, 12}};
     static const Need kAero[] = {{1, 0, 12}, {2, 0, 12}, {3, 0, 12}, {4, 0, 12}, {5, 0, 12}, {6, 0, 12}};
+    /* THE WING'S CONFIG, by the bytes the kernel actually reads. Requiring the whole
+     * struct refused FOUR of an F-22's FIVE surfaces - they wrote width 0, unknown, so
+     * only one surface ever flew and its lift was a fifth of what the aircraft needs.
+     * The tail of the struct is padding the graph never writes, which is exactly the
+     * case this mechanism exists for. InertiaLocal is not listed at all because the
+     * kernel never reads it. */
+    static const Need kWingNeed[] = {
+        {4, 0x00, 12},   /* the lift normal */
+        {4, 0x10, 12},   /* the span */
+        {4, 0x20, 12},   /* the chord */
+        {4, 0x30, 12},   /* the application point */
+        {4, 0x58, 8},    /* the point's scale, then the lift gain */
+        {4, 0x60, 4},    /* the incidence angle */
+        {4, 0x64, 8},    /* the two flap terms */
+        {4, 0x6C, 4},    /* the drag gain */
+        {4, 0x74, 4},    /* the rot gain */
+    };
     /* HasContact is deliberately NOT required: the graph builds the first call's
      * WheelContact in place (velocity zeroed, Position from the wheel's
      * InitialPosition) and leaves the tail unwritten, which is "no contact". */
@@ -969,6 +995,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (key == kStandStill) return i == 2 || i == 3 || i == 4 || i == 5;
         if (key == kBuoyancy) return true;   /* the zero path reads nothing */
         if (key == kAeroDrag) return i >= 1;
+        if (key == kWing) return i == 1 || i == 4;   /* InertiaLocal is dead; the config is partly padding */
         return false;
     };
     auto bytes_known = [&](const Value& v, uint32_t off, uint32_t len) {
@@ -986,6 +1013,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                            : key == kWaterPlane ? kPlane
                            : key == kBoatHull ? kHull
                            : key == kTrackShare ? kShare
+                           : key == kWing ? kWingNeed
                            : key == kTrackSuspension ? kTrackSusp
                            : key == kStandStill ? kStill : key == kAeroDrag ? kAero
                            : kTyre;
@@ -998,6 +1026,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                             : key == kBoatHull ? sizeof kHull / sizeof *kHull
                             : key == kTrackShare ? sizeof kShare / sizeof *kShare
                             : key == kTrackSuspension ? sizeof kTrackSusp / sizeof *kTrackSusp
+                            : key == kWing ? sizeof kWingNeed / sizeof *kWingNeed
                             : key == kAeroDrag ? sizeof kAero / sizeof *kAero
                             : sizeof kTyre / sizeof *kTyre;
             for (size_t k = 0; k < nn; ++k)
@@ -1039,6 +1068,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         {kMotionDamping, 5},
         {kJetEngine, 7},
         {kTailRotor, 6},
+        {kWing, 5},
     };
     for (const auto& m : kMinIn)
         if (m.key == key && a.size() < m.min_in) {
@@ -1046,6 +1076,225 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kWing) {
+        /* A LIFTING SURFACE, kernel FUN_1443F5980 under wrapper FUN_1443F64A0. Four
+         * calls on a helicopter, five on an F-22. The reflected registry names it
+         * (DeltaTime, InertiaLocal, FlapAngle, WindVelocity, WingConfig, Linear,
+         * Angular), and InertiaLocal is a DEAD input - the kernel never reads it.
+         *
+         * The config, by byte offset:
+         *
+         *   0x00..0x0C  the incidence axis, used only by the pre-rotation below
+         *   0x10..0x1C  THE LIFT AXIS, in vehicle space
+         *   0x20..0x28  the chord axis: the airflow is projected on it to give `axial`
+         *   0x30..0x3C  the application point, before scaling
+         *   0x40        a speed-keyed curve (a handle, keys at +0x18)
+         *   0x48        the lift-vs-AoA curve: THE STALL
+         *   0x50        the drag-vs-AoA curve
+         *   0x58        the point's scale
+         *   0x5C        the lift gain        0x60  the incidence angle, in degrees
+         *   0x64, 0x68  the flap terms       0x6C  the drag gain   0x74  the rot gain
+         *
+         * The arithmetic:
+         *
+         *   axial    = relative wind . chord axis
+         *   rot      = min(axial * 0.036, 1) * ((w x arm) . chord) * cfg[0x74], gated
+         *              on cfg[0x74] > 0, and a SCALAR - an earlier prose summary of
+         *              this operator had it as a vector added to a scalar, which is
+         *              why that summary was not implemented from
+         *   flapLift = cA * FlapAngle * 0.6 * axial^2 * cfg[0x68]
+         *   lift     = (rot + axial)^2 * cL * 0.6 * cfg[0x5C]
+         *   drag     = |wind|^2 * (|cA * FlapAngle * cfg[0x64]| + 1) * cD * 0.6 * cfg[0x6C]
+         *   liftCap  = clamp(|AoA in degrees|, 1, 5) * mass * speed
+         *   dragCap  = (|wind| / dt) * mass * 0.5
+         *
+         * flapLift and lift are each clamped to +-liftCap and then SUMMED; drag is
+         * capped at dragCap. So lift does go as the square of the airflow.
+         *
+         * THE SIGNS, decided by the code and not by trial:
+         *   - lift acts along +-cfg[0x10..0x1C], the sign chosen by whether the
+         *     airflow comes from above the chord: `above = (wind_hat . chord) >= 0`,
+         *     and when it does not the whole axis is negated.
+         *   - drag acts along -wind_hat, by an explicit unary negation. Get that minus
+         *     wrong and drag becomes thrust.
+         *   - Both go through the submit helper that does NOT rotate, so the forces are
+         *     in vehicle space and a sign error cannot be blamed on the helper.
+         *
+         * WHAT IS NOT SERVED, AND SAYS SO:
+         *   - THE THREE CURVES. Each config field holds a handle whose keys the loader
+         *     binds; offline they are not bound here, so each curve is 1.0 - which is
+         *     the kernel's OWN behaviour for a null handle, not an invention. It does
+         *     mean NO STALL: cL = 1 makes the lift coefficient independent of angle of
+         *     attack. A wing that never stalls flies better than the real one, so this
+         *     is the first thing to fix before anyone judges the flight model.
+         *   - THE INCIDENCE PRE-ROTATION, gated on cfg[0x60] != 0, which turns the
+         *     airflow about cfg[0x00..0x08] by that angle in degrees using a polynomial
+         *     sine. Refused rather than approximated, so a surface that uses it
+         *     contributes nothing and says so under BF6_WING_DEBUG.
+         *   - `speed` in the lift cap is the wrapper's own second argument, which is
+         *     not transcribed; the body's speed is used, which is what it appears to
+         *     be. It only ever LIMITS lift. */
+        const float dt = rf(a[0], 0);
+        if (!(dt > 0.0f)) return false;
+        const Value& cfg = a[4];
+        if (cfg.bytes.size() < 0x78) return false;
+        auto c = [&](uint32_t at) { return rf(cfg, at); };
+        const bool dbg = std::getenv("BF6_WING_DEBUG") != nullptr;
+        if (dbg) {
+            std::fprintf(stderr, "wingcfg:");
+            for (uint32_t at = 0; at < 0x78; at += 4) std::fprintf(stderr, " %02X=%g", at, c(at));
+            std::fprintf(stderr, "\n");
+        }
+        const float flap = rf(a[2], 0);
+        /* The relative wind in VEHICLE space, the same convention the aero drag
+         * operator uses: the body's own velocity less the wind it is given. */
+        const float qc[4] = {-body_.quat[0], -body_.quat[1], -body_.quat[2], body_.quat[3]};
+        const float wind_w[3] = {rf(a[3], 0), rf(a[3], 4), rf(a[3], 8)};
+        float wind[3];
+        qrot(qc, wind_w, wind);
+        float vh[3] = {body_.v[0] - wind[0], body_.v[1] - wind[1], body_.v[2] - wind[2]};
+        /* THE INCIDENCE PRE-ROTATION, gated on cfg[0x60] as the kernel gates it. The
+         * airflow is turned by that angle about the axis at cfg[0x00..0x08] - the
+         * SPANWISE axis on a wing - which is how a surface's built-in angle of
+         * incidence is applied. 0.008726646 is pi/360, so the config's angle is in
+         * DEGREES and the product is the HALF angle a quaternion wants.
+         *
+         * The kernel evaluates the half-angle sine with a polynomial and clamps the
+         * cosine to [0,1]; this uses the library sine and the same clamp, which is the
+         * same rotation to within the polynomial's own error. That is a precision
+         * difference, not a different model - and skipping it is NOT an option, because
+         * both of the F-22's wings carry a 2 degree incidence and refusing them left
+         * only the fin running. */
+        if (c(0x60) != 0.0f) {
+            const float ha = c(0x60) * 0.008726646f;
+            const float sh = std::sin(ha);
+            float qw = std::cos(ha);
+            if (qw < 0.0f) qw = 0.0f;
+            if (1.0f < qw) qw = 1.0f;
+            const float q[4] = {sh * c(0x00), sh * c(0x04), sh * c(0x08), qw};
+            float r[3];
+            qrot(q, vh, r);
+            vh[0] = r[0]; vh[1] = r[1]; vh[2] = r[2];
+        }
+        const float spd = std::sqrt(vh[0] * vh[0] + vh[1] * vh[1] + vh[2] * vh[2]);
+        if (!(spd > 1e-6f)) { out.bytes.assign(32, 0); out.known = true; return true; }
+        const float n[3] = {vh[0] / spd, vh[1] / spd, vh[2] / spd};
+        const float chord[3] = {c(0x20), c(0x24), c(0x28)};
+        /* 0x10 IS THE LIFT AXIS, and the three F-22 configs prove it between them:
+         *
+         *   surface   incidence axis   LIFT 0x10   point          gain   incidence
+         *   wing L    (1,0,0) span     (0,1,0) UP  (-3, 2, -1.06) 172.2  2 deg
+         *   wing R    (1,0,0) span     (0,1,0) UP  ( 3, 2, -1.06) 172.2  2 deg
+         *   fin       (0,-1,0)         (1,0,0)     ( 0, 2, -0.76)  49.2  0
+         *
+         * The wings lift UP about a spanwise incidence axis, which is how a wing's
+         * built-in incidence actually works, and the fin's lift is sideways, which is
+         * what a vertical surface does. THIS COST ME A WRONG TURN worth recording: with
+         * the config gate too strict only the FIN ran, and seeing the aircraft drift
+         * sideways I concluded 0x10 was the span and moved the lift to 0x00. The
+         * sideways drift was the rudder working correctly. One surface is not a control
+         * for five. */
+        const float lift_axis[3] = {c(0x10), c(0x14), c(0x18)};
+
+        /* The angle of attack, between the lift axis and the airflow, signed. */
+        float aoa = 0.0f;
+        const float d = n[1] * lift_axis[1] + n[0] * lift_axis[0] + n[2] * lift_axis[2];
+        if (0.999999f <= std::fabs(d)) {
+            const float s = c(0x04) * (chord[2] * n[0] - n[2] * chord[0]) +
+                            c(0x00) * (chord[1] * n[2] - n[1] * chord[2]) +
+                            c(0x08) * (chord[0] * n[1] - n[0] * chord[1]);
+            aoa = s <= 0.0f ? -1.5707964f : 1.5707964f;
+        } else {
+            float e[3] = {n[0] * lift_axis[1] - n[1] * lift_axis[0],
+                          n[1] * lift_axis[2] - n[2] * lift_axis[1],
+                          n[2] * lift_axis[0] - n[0] * lift_axis[2]};
+            float m = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+            if (m > 1e-12f) { e[0] /= m; e[1] /= m; e[2] /= m; }
+            float f[3] = {e[0] * n[1] - n[0] * e[1], e[1] * n[2] - n[1] * e[2],
+                          e[2] * n[0] - n[2] * e[0]};
+            m = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+            if (m > 1e-12f) { f[0] /= m; f[1] /= m; f[2] /= m; }
+            const float s = (f[0] - lift_axis[0]) * n[1] + (f[1] - lift_axis[1]) * n[0] +
+                            (f[2] - lift_axis[2]) * n[2];
+            float cc = lift_axis[1] * f[0] + lift_axis[0] * f[1] + lift_axis[2] * f[2];
+            if (cc <= -1.0f) cc = -1.0f;
+            if (1.0f <= cc) cc = 1.0f;
+            aoa = std::acos(cc) * sgn(s);
+        }
+        const float aoa_deg = aoa * 57.29578f;
+        float a_abs = std::fabs(aoa_deg);
+        if (a_abs <= 1.0f) a_abs = 1.0f;
+        if (5.0f <= a_abs) a_abs = 5.0f;
+
+        const float mass = body_.mass;
+        const float speed = std::sqrt(body_.v[0] * body_.v[0] + body_.v[1] * body_.v[1] +
+                                      body_.v[2] * body_.v[2]);
+        const float drag_cap = (spd / dt) * mass * 0.5f;
+        const float lift_cap = a_abs * mass * speed;
+        const float axial = vh[1] * chord[1] + vh[0] * chord[0] + vh[2] * chord[2];
+
+        float rot = 0.0f;
+        if (0.0f < c(0x74)) {
+            float k = axial * 0.036f;
+            if (1.0f <= k) k = 1.0f;
+            const float* w = body_.w;
+            rot = k * (chord[1] * (w[2] * c(0x30) - c(0x38) * w[0]) +
+                       chord[0] * (w[1] * c(0x38) - c(0x34) * w[2]) +
+                       chord[2] * (w[0] * c(0x34) - c(0x30) * w[1])) * c(0x74);
+        }
+        /* The three curves are unbound offline, and the kernel's own answer for an
+         * unbound curve is 1.0. See the note above: this removes the stall. */
+        const float cA = 1.0f, cL = 1.0f, cD = 1.0f;
+        const bool above = 0.0f <= n[1] * chord[1] + n[0] * chord[0] + n[2] * chord[2];
+
+        float flap_lift = cA * flap * 0.6f * axial * axial * c(0x68);
+        float lift = (rot + axial) * (rot + axial) * cL * 0.6f * c(0x5C);
+        const float neg_cap = -lift_cap;
+        if (flap_lift <= neg_cap) flap_lift = neg_cap;
+        if (lift <= neg_cap) lift = neg_cap;
+        if (lift_cap <= flap_lift) flap_lift = lift_cap;
+        if (lift_cap <= lift) lift = lift_cap;
+        const float lift_total = flap_lift + lift;
+
+        float drag = (vh[0] * vh[0] + vh[1] * vh[1] + vh[2] * vh[2]) *
+                     (std::fabs(cA * flap * c(0x64)) + 1.0f) * cD * 0.6f * c(0x6C);
+        if (drag_cap <= drag) drag = drag_cap;
+
+        const float arm_s = c(0x58);
+        const float point[3] = {arm_s * c(0x30), arm_s * c(0x34), arm_s * c(0x38)};
+
+        Snapshot s;
+        s.mass = mass;
+        s.inv_mass = mass != 0.0f ? 1.0f / mass : 0.0f;
+        std::memcpy(s.v, body_.v, 16);
+        std::memcpy(s.w, body_.w, 16);
+        std::memcpy(s.com, body_.com, 16);
+        std::memcpy(s.inv_i, body_.inv_inertia, 16);
+        const Snapshot before = s;
+        std::vector<ForceRecord> recs;
+        auto push = [&](const float dir[3], float mag) {
+            ForceRecord r{};
+            for (int i = 0; i < 3; ++i) { r.f[i] = mag * dir[i] * dt * force_scale; r.p[i] = point[i]; }
+            if (finite3(r.f) && finite3(r.p)) recs.push_back(r);
+        };
+        push(n, -drag);                                       /* drag, along -wind_hat */
+        const float lsg = above ? 1.0f : -1.0f;
+        const float la[3] = {lsg * lift_axis[0], lsg * lift_axis[1], lsg * lift_axis[2]};
+        push(la, lift_total);                                 /* lift, along +-the axis */
+        apply_all(s, recs);
+        out.bytes.assign(32, 0);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
+        out.known = true;
+        if (dbg)
+            std::fprintf(stderr,
+                         "wing: spd %g axial %g aoa %g above %d rot %g flap %g"
+                         " lift %g (cap %g) drag %g (cap %g) -> dv %.3f %.3f %.3f\n",
+                         spd, axial, aoa_deg, above ? 1 : 0, rot, flap, lift_total,
+                         lift_cap, drag, drag_cap, (s.v[0] - before.v[0]) / dt,
+                         (s.v[1] - before.v[1]) / dt, (s.v[2] - before.v[2]) / dt);
+        return true;
+    }
     if (key == kTailRotor) {
         /* The TAIL ROTOR, kernel FUN_1443ECAE0 under wrapper FUN_1443E5400.
          *

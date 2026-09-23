@@ -83,6 +83,7 @@ const uint32_t kMotionDamping = 0x9EB2D5CEu;
  * TerrainHeight): a ray straight down onto the ground, which is what every wheel here
  * already casts. Its outputs come in that order, so the primary - the last operand -
  * is the height, with the point on the terrain as the extra before it. */
+const uint32_t kHeliRotor = 0x76A51E81u;   /* simulateHelicopterEngine */
 const uint32_t kTerrainAt = 0xD7D1BAB3u;
 const uint32_t kStructBuild = 0x8B226FBBu;
 const uint32_t kStructBuildLead = 4;   /* type, count, offsets, views - then the fields */
@@ -756,6 +757,13 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {16};
         out.output_width = 4;
         return true;
+    case kHeliRotor:
+        /* dt, collective, cyclic pitch and roll, a ground flag, a gravity modifier and
+         * the 176-byte rotor config -> linear then angular acceleration */
+        out.input_widths = {4, 4, 4, 4, 1, 4, 176};
+        out.extra_output_widths = {16};
+        out.output_width = 16;
+        return true;
     case kTerrainAt:
         out.input_widths = {16};
         out.extra_output_widths = {16};
@@ -973,6 +981,104 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kHeliRotor) {
+        /* FUN_1443EB0B0, the main rotor, as far as it is transcribed.
+         *
+         * The reflected registry names the operator (DeltaTime, Throttle, Pitch, Roll,
+         * HasGroundContect, GravityModifier, Config, LinearAcceleration,
+         * AngularAcceleration), so Throttle is the collective and Pitch/Roll the
+         * cyclic. Its lift is built along the mast axis and submitted as a force at a
+         * point, which this host's force accumulator already does.
+         *
+         * TWO THINGS ARE NOT READ FROM THE GAME AND ARE MARKED HERE:
+         *
+         *   THE ROTOR POWER. The kernel's base magnitude is
+         *   -(mass * telemetry[1] * GravityModifier), where telemetry is a three-float
+         *   block the wrapper reads off the entity at +0x1B10. It is not in any
+         *   listing, so it is CALIBRATED here instead: the transcribed gains total
+         *   0.99 + 1.65 = 2.64, so a power of g / 2.64 makes the rotor carry its own
+         *   weight. That is a stand-in with its arithmetic shown, not a measurement,
+         *   and it is the first thing to replace when the telemetry is read. Raw
+         *   gravity is NOT the value - it would hover at under one per cent collective.
+         *
+         *   THE CEILING. The upward component fades to zero over 50 m above
+         *   (a host scalar + Config 0x80), and neither the scalar nor that config field
+         *   is available, so the fade is 1. It only ever REDUCES lift with height, so
+         *   the error is a helicopter with no ceiling rather than one that cannot fly.
+         *
+         * What is transcribed exactly: the collective's own arithmetic. In the air the
+         * factor is max(1, Throttle) - `if (HasGroundContect == 0 || Throttle > 0) f =
+         * 1; if (f <= Throttle) f = Throttle` - so a collective below 1 does not scale
+         * lift at all. That reads oddly for a collective and is left as the listing has
+         * it rather than adjusted to taste; if a helicopter hovers without regard to
+         * the stick, this is why, and the answer is in the graph's Throttle range, not
+         * here. */
+        const float dt = rf(a[0], 0);
+        if (!(dt > 0.0f)) return false;
+        float throttle = rf(a[1], 0);
+        const float pitch = rf(a[2], 0), roll = rf(a[3], 0);
+        const bool on_ground = a[4].bytes.size() && a[4].bytes[0] != 0;
+        const float gmod = rf(a[5], 0);
+        const Value& cfg = a[6];
+        auto c = [&](uint32_t at) { return rf(cfg, at); };
+        if (cfg.bytes.size() >= 0xB0 && cfg.bytes[0xAC] != 0) throttle = -throttle;
+        const float ground_factor = (!on_ground || throttle > 0.0f) ? 1.0f : 0.0f;
+        const float collective = ground_factor <= throttle ? throttle : ground_factor;
+
+        /* The rotor power, calibrated as the note above sets out. */
+        const float gain_total = c(0x9C) + c(0xA8);
+        const float power = gain_total > 1e-6f ? 9.82f / gain_total : 0.0f;
+        /* THE SIGN, settled by measurement. The kernel negates its base magnitude,
+         * which pairs with a mast axis that points DOWN in the state block its wrapper
+         * builds; the axis here is the body's up, so the negation goes with it. What
+         * makes this a measurement rather than a coin flip: with the calibration above
+         * the magnitude came out at exactly 9.82 m/s2, the weight it has to carry, so
+         * the size was already right and the direction was the only thing left to fix
+         * - and one of the two choices has a helicopter push itself into the ground. */
+        const float base = body_.mass * power * gmod;
+        const float deadband = body_.mass * 0.001f;
+
+        /* The mast axis is the body's own up; this host builds the state block the
+         * kernel reads, so the axis is chosen to be the one the kernel lifts along. */
+        const float up[3] = {0.0f, 1.0f, 0.0f};
+        Snapshot s;
+        s.mass = body_.mass;
+        s.inv_mass = body_.mass != 0.0f ? 1.0f / body_.mass : 0.0f;
+        std::memcpy(s.v, body_.v, 16);
+        std::memcpy(s.w, body_.w, 16);
+        std::memcpy(s.com, body_.com, 16);
+        std::memcpy(s.inv_i, body_.inv_inertia, 16);
+        const Snapshot before = s;
+        std::vector<ForceRecord> recs;
+        auto push = [&](float mag, const float dir[3], const float at[3]) {
+            if (std::fabs(mag) <= deadband) return;
+            ForceRecord r{};
+            for (int i = 0; i < 3; ++i) { r.f[i] = dt * mag * dir[i] * force_scale; r.p[i] = at[i]; }
+            if (finite3(r.f) && finite3(r.p)) recs.push_back(r);
+        };
+        /* The application point, offset by the cyclic exactly as the kernel does. */
+        float point[3] = {body_.com[0], body_.com[1], body_.com[2]};
+        point[0] += roll * c(0xA4);
+        point[2] -= pitch * c(0xA0);
+        push(base * c(0x9C) * collective, up, point);            /* the main lift */
+        push(base * (collective < 0.0f ? c(0x7C) : c(0xA8)) * collective, up,
+             body_.com);                                         /* the torque path */
+        /* The disc-tilt penalty: nothing at level, full downforce inverted. */
+        float tilt = (up[1] - 1.0f) * -0.5f;
+        tilt = tilt < 0.0f ? 0.0f : (tilt > 1.0f ? 1.0f : tilt);
+        const float down[3] = {0.0f, -1.0f, 0.0f};
+        push(tilt * c(0x94) * base, down, body_.com);
+        apply_all(s, recs);
+        out.bytes.assign(32, 0);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
+        out.known = true;
+        if (std::getenv("BF6_ROTOR_DEBUG"))
+            std::fprintf(stderr, "rotor: throttle %g collective %g power %g -> dv %.2f %.2f %.2f\n",
+                         throttle, collective, power, (s.v[0] - before.v[0]) / dt,
+                         (s.v[1] - before.v[1]) / dt, (s.v[2] - before.v[2]) / dt);
+        return true;
+    }
     if (key == kTerrainAt) {
         if (!ray_) return false;
         const float at[3] = {rf(a[0], 0), rf(a[0], 4), rf(a[0], 8)};

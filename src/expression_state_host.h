@@ -224,8 +224,30 @@ private:
      * differ only in the last dword (fields 0, 1, 2, 3, 5); keyed by the path alone
      * they all landed in ONE cell, so the gearbox forgot its phase and gear every
      * frame. The cell is (frame, path, kind, field). */
+    /* THE FIELDS OVERLAPPED, so distinct cells shared one key. frame sat at bits 40..63
+     * and kind at bits 40..47, XORed, so a kind-1 read on frame N produced exactly the key
+     * of a kind-0 read on frame N+1: measured, an f22's `frame 0005AE kind 1` keyed as
+     * 0005AF. Frames are sequential small ids and kinds 0 and 1 both occur, so this was
+     * not hypothetical - and the only two aircraft that read NO kind-1 cells (f16, jas39)
+     * are exactly the two that climb properly, while every plane that reads them barely
+     * leaves the ground.
+     *
+     * Partitioned with no overlap: path 0..31, field 32..39, kind 40..47, frame 48..63.
+     * Measured over the fleet, 5436 cells: max frame 0x27EA, max kind 2, max field 22, so
+     * every field has room. A frame past 16 bits would truncate and could bring the
+     * collision back, so it reports itself rather than failing silently as the original
+     * did. */
     static uint64_t make_key(uint32_t frame, uint32_t path, uint32_t kind, uint32_t field) {
-        return ((uint64_t)(frame & 0xFFFFFFu) << 40) ^ ((uint64_t)(((kind & 0xFFu) << 8) | (field & 0xFFu)) << 32) ^ path;
+        if (frame > 0xFFFFu) {
+            static bool told = false;
+            if (!told) {
+                told = true;
+                std::fprintf(stderr, "state cell frame 0x%X exceeds 16 bits: keys may collide\n",
+                             frame);
+            }
+        }
+        return ((uint64_t)(frame & 0xFFFFu) << 48) | ((uint64_t)(kind & 0xFFu) << 40) |
+               ((uint64_t)(field & 0xFFu) << 32) | (uint64_t)path;
     }
     uint64_t cell_key(uint32_t path) const {
         const uint32_t frame = (path >= 0xFFFF0000u && !frames_.empty()) ? frames_.back().bound[3] : 0u;

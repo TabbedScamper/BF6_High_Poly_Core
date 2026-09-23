@@ -631,6 +631,30 @@ void VehicleSim::tick() {
         for (const auto& fr : state_.unseeded_frame_reads())
             if (fr.kind == 0 && fr.field == 0 && (fr.path & 0xFFu) != 0xFFu)
                 state_.set_cell_raw(fr.key, 1);
+        /* BF6_SEED_CELL=<hex key>[:<value>][,...]: seed named state cells every tick.
+         * The graph's own state list declares cells nothing offline ever writes - a
+         * helicopter's Autopilot struct carries a Pitch Angle PID, a Roll PID, HasPilot
+         * and AutohoverEnabled, and an unwritten HasPilot reads false so the attitude
+         * hold never runs. Which cell is which cannot be read off the descriptors,
+         * because the frame in a cell key is a small runtime id and not the struct's
+         * HashName, so the way to find out is to seed one at a time and measure. Value
+         * defaults to 1. */
+        if (const char* sc = std::getenv("BF6_SEED_CELL"))
+            for (const char* p = sc; *p;) {
+                char* e = nullptr;
+                const unsigned long long k = std::strtoull(p, &e, 16);
+                if (e == p) break;
+                uint32_t v = 1;
+                if (*e == ':') { char* e2 = nullptr; v = (uint32_t)std::strtoul(e + 1, &e2, 0); e = e2; }
+                state_.set_cell_raw((uint64_t)k, v);
+                p = *e ? e + 1 : e;
+            }
+        /* BF6_LIST_CELLS=1: every unseeded cell this tick, as a key the sweep can feed
+         * back to BF6_SEED_CELL. */
+        if (std::getenv("BF6_LIST_CELLS"))
+            for (const auto& fr : state_.unseeded_frame_reads())
+                std::fprintf(stderr, "cell %016llX frame %06X path %08X kind %u field %u\n",
+                             (unsigned long long)fr.key, fr.frame, fr.path, fr.kind, fr.field);
         /* BF6_WHY=<hex slot>[,tick[,depth]]: explain a value by walking the dataflow
          * BACKWARD from the slot that holds it - what wrote it, what that read, and so on
          * - printing the record, operator, value and knownness at each level.

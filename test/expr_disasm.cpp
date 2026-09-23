@@ -937,6 +937,27 @@ int main(int argc, char** argv)
                     std::printf("  impl %08X -> 0x%llX\n", kv.first,
                                 (unsigned long long)kv.second);
             }
+            /* THE REFLECTED OPERATORS carry no implementation, but their descriptor is
+             * where the thunk is reached from, and a key with neither an
+             * implementation nor a descriptor address is a key nobody can read at
+             * all. The engine functions - a rotor, a jet - are all in this set. */
+            {
+                std::vector<bf6::expression::ReflectedOperator> rows;
+                std::string rerr;
+                if (bf6::expression::read_reflected_operators(exe, rows, rerr)) {
+                    std::set<uint32_t> want(key_list.begin(), key_list.end());
+                    for (const auto& r : rows)
+                        if (want.count(r.key) && !impl_of.count(r.key))
+                        {
+                            std::printf("  reflected %08X -> descriptor 0x%llX %s(",
+                                        r.key, (unsigned long long)r.descriptor_va,
+                                        r.name_space.c_str());
+                            for (size_t i = 0; i < r.parameter_names.size(); ++i)
+                                std::printf("%s%s", i ? ", " : "", r.parameter_names[i].c_str());
+                            std::printf(")\n");
+                        }
+                }
+            }
         }
     }
 

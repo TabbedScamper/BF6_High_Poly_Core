@@ -955,29 +955,21 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             }
             for (int i = 0; i < 4; ++i) wf(dst, at + (uint32_t)(4 * i), (d[i] - v[i]) / dt);
         };
-        /* THE PAIRING, and the evidence that settles it.
+        /* THE PAIRING, settled by the executable's own parameter names.
          *
-         * The two default clamps are the tell. A CB90 is a 40-knot boat - 20.6 m/s -
-         * and this graph passes ZERO for both maxima, so both defaults apply: 100 for
-         * the first velocity and 20 for the second. Twenty metres a second is the
-         * boat's own top speed, which makes the SECOND velocity the LINEAR one and
-         * that clamp its speed limiter; a hundred is a sanity limit on the angular
-         * rate. Two more numbers in the same chain agree with the same source: the
-         * graph multiplies by 13500 where the real hull displaces 13.0 to 15.3 t, and
-         * the hull description gives a length of 15.9 m against 15.9 m overall.
+         * The reflected registry names this operator
+         *   MotionMachine(DeltaTime, Linear, Angular, LinearSpeedLimit,
+         *                 AngularSpeedLimit, LinearAcceleration, AngularAcceleration)
+         * which fixes every operand and both outputs outright: the second operand is
+         * the LINEAR coefficient set and the fourth its speed limit, the third is the
+         * ANGULAR set and the fifth its limit, and the outputs come out linear first.
          *
-         * An earlier pass had these the other way round on the grounds that the other
-         * pairing diverges. That was reading a SYMPTOM as evidence: with the linear
-         * clamp at 100 instead of 20 the runaway is merely slower, and the speed
-         * oscillates in sign every tick either way. The instability is in the force
-         * chain, not here.
-         *
-         * CONFIRMED a second way, by marker rather than by argument: with
-         * BF6_DAMP_PROBE each output carries a distinct triple, and the host reads
-         * AngularAcceleration back as exactly the EXTRA output's triple. So the extra
-         * output is the angular one and the primary the linear one, which is what the
-         * clamps already said. Two independent lines, one from the vessel's published
-         * top speed and one from the channel the graph sums each output into. */
+         * Two earlier arguments for the same conclusion are now superseded and worth
+         * recording as traps. One read the default limits as evidence, noting that 20
+         * is a CB90's forty knots - a coincidence: 20 is the ANGULAR limit in radians
+         * a second and 100 the linear one. The other took the fact that the opposite
+         * pairing diverges as proof, which was reading a symptom. The names settle it
+         * and neither guess was needed. */
         const float v4[4] = {body_.v[0], body_.v[1], body_.v[2], 0.0f};
         const float w4[4] = {body_.w[0], body_.w[1], body_.w[2], 0.0f};
         out.bytes.assign(32, 0);

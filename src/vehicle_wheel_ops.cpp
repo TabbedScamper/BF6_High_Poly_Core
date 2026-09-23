@@ -1372,7 +1372,22 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                                     body_.v[2] * body_.v[2]);
         float thr = rf(a[2], 0);
         if (cfg.bytes[0xA5] == 0 && thr <= 0.0f) thr = 0.0f;
-        const float curve = table15(cfg, 0x10, 15, rf(a[1], 0));
+        /* THE CURVE IS AT 0x30, read from the ah64e's EBX rather than guessed. The
+         * field-name hashes name the struct: 0xA4862C49 is Position, and it holds
+         * (0, 1.7, -8.94) - 8.94 m behind the origin and 1.7 m up, which is exactly
+         * where an Apache's tail rotor sits, so the struct is identified beyond doubt.
+         * 0xCDAEA245 is RpmMin (0) and 0xEA141055 RpmMax (1417). The 15-element array
+         * 0x38353381 is the curve, with real keys (0,0), (1000,9800) and (2000,9000)
+         * followed by the -666666 sentinel, and those land at bytes 0x38/0x3C and
+         * 0x40/0x44 in the seeded config - so the first pair is at 0x30.
+         *
+         * Its y is a THRUST IN NEWTONS: 9800 N at rpm 1000 is about a tonne of force,
+         * which is a tail rotor. No separate gain field exists in the 0x00..0x30 space
+         * the three structs leave, so the gain is 1 and the curve carries the
+         * magnitude. An earlier study placed the curve at 0x10 and a gain at 0x8C; both
+         * lie inside the curve's own 120 bytes and read as sentinel or zero, which is
+         * why this operator produced nothing at all. */
+        const float curve = table15(cfg, 0x30, 15, rf(a[1], 0));
         float gmin = c(0x9C);
         if (gmin <= 0.0f) gmin = 0.0f;
         if (1.0f <= gmin) gmin = 1.0f;
@@ -1388,7 +1403,8 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         float fade = 0.0f;
         if (alt - ref < 0.0f) fade = gf;
 
-        const float F = fade * (1.0f - adv * (1.0f - gmin)) * 0.5f * curve * thr * c(0x8C);
+        /* The gain at 0x8C does not exist (see the note on the curve), so it is 1. */
+        const float F = fade * (1.0f - adv * (1.0f - gmin)) * 0.5f * curve * thr;
 
         Snapshot s;
         s.mass = body_.mass;

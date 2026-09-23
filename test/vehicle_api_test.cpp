@@ -35,7 +35,12 @@ int main(int argc, char** argv) {
     const int hold = std::getenv("BF6_HOLD") ? std::atoi(std::getenv("BF6_HOLD")) : 8;
     for (int f = 0; f < 60 * secs; ++f) {
         const bool braking = f >= 60 * hold;
-        const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, 0.0f, 0.0f, 1.0f / 60.0f, 0.0f};
+        /* BF6_YAW=<n>: the yaw pedal, which reaches the graph as InputYaw and is a
+         * helicopter's tail rotor Throttle. Zero pedal leaves a main rotor's torque
+         * uncancelled, so a helicopter that spins on this harness may be obeying the
+         * model rather than breaking it. */
+        static const float yaw = std::getenv("BF6_YAW") ? (float)std::atof(std::getenv("BF6_YAW")) : 0.0f;
+        const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
         if (bf6_vehicle_step(v, in, out) < 33) { std::fprintf(stderr, "step failed\n"); return 2; }
         /* out: 0-2 pos, 3-6 quat, 7-9 vel, 10-12 angvel, 13 speed, 14 rpm,
          * 15 gear ratio, 16 clutch, 17 throttle, 18 brake */

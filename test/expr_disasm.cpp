@@ -978,6 +978,14 @@ int main(int argc, char** argv)
         std::printf("\n");
     }
 
+    /* THE TYPE RECORDS. Each carries four dwords beside its type id, and the field
+     * address operator takes its offset from a pool word the loader fills - so
+     * whatever the graph carries per type is worth seeing. */
+    std::printf("\n--- types (%zu) ---\n", g.types.size());
+    for (const auto& t : g.types)
+        std::printf("  type %08X carries %08X %08X %08X %08X\n", t.type_id,
+                    t.carried[0], t.carried[1], t.carried[2], t.carried[3]);
+
     /* Pool relocations: a pointer field in the pool patched at load to point at
      * another pool offset (array contents, type descriptors). */
     std::printf("\n--- relocations (%zu) ---\n", g.relocations.size());

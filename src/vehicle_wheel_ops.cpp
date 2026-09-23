@@ -1709,6 +1709,17 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
         out.known = true;
+        /* BF6_ROTOR_TRIM=1: the force point's offset FROM the centre of mass, with the two
+         * terms that make it. A vertical force directly above the CoM makes no moment, so
+         * only these offsets pitch or roll the aircraft, and the question that matters is
+         * whether the constant part is the airspeed curve or simply where the CoM is. */
+        if (std::getenv("BF6_ROTOR_TRIM"))
+            std::fprintf(stderr, "rotortrim com (%.3f %.3f %.3f) off (%.4f %.4f %.4f)"
+                                 " fv4 %g fv4*0.005 %.4f cyclicz %.4f auth2 %g\n",
+                         body_.com[0], body_.com[1], body_.com[2],
+                         point[0] - body_.com[0], point[1] - body_.com[1],
+                         point[2] - body_.com[2], fv4, fv4 * 0.005f,
+                         auth2 * pitch * c(0xA0), auth2);
         if (std::getenv("BF6_ROTOR_CFG"))
             std::fprintf(stderr, "rotorcfg 9C=%g A8=%g 7C=%g 94=%g 98=%g A4=%g A0=%g 80=%g"
                                  " 84=%g AC=%u mass=%g gmod=%g base=%g\n",

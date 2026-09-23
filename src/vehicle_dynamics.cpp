@@ -47,6 +47,19 @@ void VehicleDynamics::root_rows(float out[16]) const {
     const float rows[16] = {r[0], r[1], r[2], 0, u[0], u[1], u[2], 0, f[0], f[1], f[2], 0,
                             pos[0], pos[1], pos[2], 1};
     for (int i = 0; i < 16; ++i) out[i] = rows[i];
+    /* BF6_ROOT_TRANSPOSE=1 publishes the basis transposed. The rotor's cyclic loop is
+     * positive feedback offline - the cyclic's own output moves the force application
+     * point, which rotates the aircraft, which commands more cyclic - and a basis whose
+     * rows and columns are swapped is one way a feedback sign inverts. The cars and tanks
+     * are the control: they work, so if transposing breaks them this convention is right
+     * and the sign error is elsewhere. Diagnostic only. */
+    if (std::getenv("BF6_ROOT_TRANSPOSE"))
+        for (int i = 0; i < 3; ++i)
+            for (int j = i + 1; j < 3; ++j) {
+                const float t = out[i * 4 + j];
+                out[i * 4 + j] = out[j * 4 + i];
+                out[j * 4 + i] = t;
+            }
 }
 
 void VehicleDynamics::step(float dt, const VehicleDriveInputs& in) {

@@ -40,6 +40,47 @@ int main(int argc, char** argv) {
          * uncancelled, so a helicopter that spins on this harness may be obeying the
          * model rather than breaking it. */
         static const float yaw = std::getenv("BF6_YAW") ? (float)std::atof(std::getenv("BF6_YAW")) : 0.0f;
+        /* BF6_PITCH / BF6_ROLL: the cyclic. A helicopter had NO pitch or roll input on this
+         * harness at all, so its graph fell back to an autopilot whose output grows without
+         * bound, and there was no way to tell a wrong autopilot from an uncommanded aircraft.
+         * Delivered through bf6_vehicle_set_cyclic rather than `in`, which is a six-float
+         * contract. */
+        static const float pitch = std::getenv("BF6_PITCH") ? (float)std::atof(std::getenv("BF6_PITCH")) : 0.0f;
+        static const float roll  = std::getenv("BF6_ROLL")  ? (float)std::atof(std::getenv("BF6_ROLL"))  : 0.0f;
+        /* BF6_LEVEL=<k>: a plain attitude hold on the harness side, so controllability can
+         * be SETTLED rather than argued. A helicopter is unstable in pitch and roll, so no
+         * constant cyclic can hold a hover - measured, the AH-64's best fixed pitch (-0.21)
+         * only slows the departure. That is a property of helicopters, not a defect, and it
+         * means a constant-input harness can never tell a working model from a broken one.
+         * This closes the loop with the crudest possible controller: command cyclic against
+         * the measured attitude and rate. If the aircraft then holds, the model has real
+         * control authority and the open-loop departure was an uncommanded aircraft. It is a
+         * TEST rig, not part of the model - the game's own Autopilot PID is what should do
+         * this, and it is still being chased. */
+        static const float lvl = std::getenv("BF6_LEVEL") ? (float)std::atof(std::getenv("BF6_LEVEL")) : 0.0f;
+        float cp = pitch, cr = roll;
+        if (lvl != 0.0f) {
+            /* out[] from the PREVIOUS step: 3-6 quat (x,y,z,w), 10-12 angular velocity. */
+            const float qx = out[3], qy = out[4], qz = out[5], qw = out[6];
+            /* pitch and roll of the body's up axis, small-angle, enough for a hold */
+            /* The body's up axis in world, from the core's own qrot applied to (0,1,0):
+             * up = (2xy - 2wz, 1 - 2(x^2+z^2), 2wx + 2yz). Both cross terms had the wrong
+             * sign on the first attempt, which made the hold drive the aircraft over faster
+             * than no hold at all - a reminder to derive these from qrot rather than recall. */
+            const float upx = 2.0f * (qx * qy - qw * qz);
+            const float upz = 2.0f * (qw * qx + qy * qz);
+            /* THE TWO CYCLIC AXES TAKE OPPOSITE SIGNS, measured: a single-signed gain
+             * arrests one axis and drives the other over. At +0.5 the pitch quaternion fell
+             * from 0.921 to 0.203 while roll went to 0.975; at -0.5 exactly the reverse
+             * (roll 0.033, pitch 0.996). So InputPitch and InputRoll do not share a sign
+             * convention, which is a fact about the graph's inputs and not about this rig. */
+            cp = -lvl * (upz * 4.0f + out[10] * 0.8f);
+            cr =  lvl * (upx * 4.0f + out[12] * 0.8f);
+            const float lim = 1.0f;
+            cp = cp > lim ? lim : (cp < -lim ? -lim : cp);
+            cr = cr > lim ? lim : (cr < -lim ? -lim : cr);
+        }
+        bf6_vehicle_set_cyclic(v, cp, cr);
         const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
         if (bf6_vehicle_step(v, in, out) < 33) { std::fprintf(stderr, "step failed\n"); return 2; }
         /* out: 0-2 pos, 3-6 quat, 7-9 vel, 10-12 angvel, 13 speed, 14 rpm,

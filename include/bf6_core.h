@@ -3221,6 +3221,11 @@ BF6_API void bf6_vehicle_set_pose(bf6_vehicle*, const float pos[3], const float 
  * Flat, because a map's water IS a level in the game (a plane per water body);
  * waves are not modelled and a caller that has them can move the height. */
 BF6_API void bf6_vehicle_set_water(bf6_vehicle*, float height, int32_t present);
+/* Pitch and roll cyclic, delivered out of band because `in` is a six-float contract the
+ * Godot binding only guarantees to that length. They reach the graph as the InputPitch and
+ * InputRoll channels, which every helicopter binds. Without them a helicopter offline has no
+ * cyclic at all and its graph substitutes an autopilot whose output grows without bound. */
+BF6_API void bf6_vehicle_set_cyclic(bf6_vehicle*, float pitch, float roll);
 BF6_API int32_t bf6_vehicle_step(bf6_vehicle*, const float* in, float* out);
 BF6_API void bf6_vehicle_close(bf6_vehicle*);
 

@@ -21,6 +21,13 @@ struct bf6_vehicle {
     bool no_wheel_locators = false;   /* the rig had none: graph physics only */
     float water_height = 0.0f;        /* the surface the hull and buoyancy read */
     bool water_present = false;
+    /* THE CYCLIC, which nothing could command before. The step's `in` array carries
+     * throttle, brake, yaw, handbrake and dt and nothing else, so a helicopter offline had
+     * no pitch or roll input at all and its graph fell back to an autopilot whose output
+     * grows without bound. Judging that autopilot wrong was impossible while there was no
+     * control input to compare it against. Out of band rather than a seventh element of
+     * `in`, because the Godot binding only guarantees six and would read past its buffer. */
+    float cyclic_pitch = 0.0f, cyclic_roll = 0.0f;
     double time = 0.0;
     std::string name;
 };
@@ -230,6 +237,15 @@ void bf6_vehicle_set_water(bf6_vehicle* v, float height, int32_t present) {
     v->water_present = present != 0;
 }
 
+/* Pitch and roll cyclic, reaching the graph as InputPitch and InputRoll - both bound
+ * channels on every helicopter, confirmed by listing them. Range follows the other inputs:
+ * nominally -1..1, and the graph's own filters decide what it does with that. */
+void bf6_vehicle_set_cyclic(bf6_vehicle* v, float pitch, float roll) {
+    if (!v) return;
+    v->cyclic_pitch = pitch;
+    v->cyclic_roll = roll;
+}
+
 void bf6_vehicle_set_pose(bf6_vehicle* v, const float pos[3], const float quat[4]) {
     if (!v) return;
     for (int i = 0; i < 3; ++i) { v->dyn.pos[i] = pos[i]; v->dyn.vel[i] = 0; v->dyn.angvel[i] = 0; }
@@ -250,10 +266,27 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * (-0.05 against exactly 0), it comes from field 2 of a PID struct, and it WINDS UP
      * rather than settling, which is what an integrator does when its feedback is
      * missing. This tests whether telling the graph a pilot is aboard stops it. */
-    if (std::getenv("BF6_HAS_PILOT")) s.set_bool("HasPilot", true);
+    /* CORRECTED: BF6_HAS_PILOT NEVER DID ANYTHING. set_bool addresses a bound CHANNEL by
+     * name hash and returns false for a name that is not one, and HasPilot is a state CELL
+     * inside the graph's Autopilot struct, not a channel. Measured, the flag changes nothing
+     * to six decimal places on all five helicopters. It is kept only because its return now
+     * says so out loud rather than failing silently. */
+    if (std::getenv("BF6_HAS_PILOT") && !s.set_bool("HasPilot", true))
+        std::fprintf(stderr, "BF6_HAS_PILOT: no channel named HasPilot; it is a state cell, "
+                             "so this flag does nothing\n");
+    /* BF6_LIST_CHANNELS=1: every channel name the graph binds, which is the only set
+     * set_float and set_bool can reach. Guessing a name here silently does nothing, so the
+     * list has to be printable. */
+    if (std::getenv("BF6_LIST_CHANNELS") && v->time < 0.02) {
+        const std::vector<std::string> ch = s.channel_names();
+        std::fprintf(stderr, "bound channels (%zu):\n", ch.size());
+        for (const std::string& c : ch) std::fprintf(stderr, "  %s\n", c.c_str());
+    }
     s.set_float("InputThrottle", throttle);
     s.set_float("InputBrake", brake);
     s.set_float("InputYaw", steer);
+    s.set_float("InputPitch", v->cyclic_pitch);
+    s.set_float("InputRoll", v->cyclic_roll);
     s.set_bool("Handbrake", handbrake);
     s.set_time(v->time);
     float rows[16];

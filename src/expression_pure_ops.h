@@ -93,6 +93,10 @@ public:
     void set_heap_sink(HeapSink* sink) override {
         for (Host* h : hosts_) h->set_heap_sink(sink);
     }
+    /* Passed straight through for the same reason: the chain is only a router. */
+    void set_current_record(uint32_t record_offset) override {
+        for (Host* h : hosts_) h->set_current_record(record_offset);
+    }
     bool describe(uint32_t key, OperatorSignature& out) override;
     bool describe_call(uint32_t key, const std::vector<uint32_t>& consts,
                        OperatorSignature& out) override {

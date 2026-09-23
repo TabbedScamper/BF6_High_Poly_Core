@@ -142,7 +142,8 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
     }
     const auto it = cells_.find(cell_key(path));
     if (std::getenv("BF6_CELL_DEBUG"))
-        std::fprintf(stderr, "cell read  key 0x%016llX %s depth %zu bound %08X %08X %08X %08X kind %u field %u\n",
+        std::fprintf(stderr, "cell read rec 0x%X key 0x%016llX %s depth %zu bound %08X %08X %08X %08X kind %u field %u\n",
+                     cur_record_,
                      (unsigned long long)cell_key(path), it != cells_.end() ? "hit" : "MISS", frames_.size(),
                      frames_.empty() ? 0u : frames_.back().bound[0], frames_.empty() ? 0u : frames_.back().bound[1],
                      frames_.empty() ? 0u : frames_.back().bound[2], frames_.empty() ? 0u : frames_.back().bound[3],
@@ -584,8 +585,8 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (!args[1].known) { cells_.erase(cell_key(dest)); out = Value{}; return true; }
         cells_[cell_key(dest)] = args[1].as_u32();
         if (std::getenv("BF6_CELL_DEBUG"))
-            std::fprintf(stderr, "cell write op %08X key 0x%016llX value 0x%08X depth %zu bound3 %08X kind %u field %u path %08X\n",
-                         key, (unsigned long long)cell_key(dest), args[1].as_u32(),
+            std::fprintf(stderr, "cell write rec 0x%X op %08X key 0x%016llX value 0x%08X depth %zu bound3 %08X kind %u field %u path %08X\n",
+                         cur_record_, key, (unsigned long long)cell_key(dest), args[1].as_u32(),
                          frames_.size(), frames_.empty() ? 0u : frames_.back().bound[3],
                          cur_kind_, cur_field_, dest);
         ++writes_;

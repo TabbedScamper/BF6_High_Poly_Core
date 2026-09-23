@@ -78,6 +78,11 @@ public:
     /* Lent by the evaluator for the length of a run, null outside one. A host that
      * never returns an array can ignore it. */
     virtual void set_heap_sink(HeapSink* sink) { (void)sink; }
+    /* The record about to be invoked. A host that keeps per-record state, or that wants
+     * its diagnostics to name the record a cell was read or written by, needs this:
+     * without it a state cell can only be tied back to its graph position by matching
+     * values, which is slow and goes wrong. Ignored by every host that does not care. */
+    virtual void set_current_record(uint32_t record_offset) { (void)record_offset; }
     // Width and arity are part of the ABI. Refusing a description is safer
     // than reading every bare operand as a float-sized value.
     virtual bool describe(uint32_t key, OperatorSignature& out) = 0;

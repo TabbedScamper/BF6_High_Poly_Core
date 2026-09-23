@@ -231,7 +231,10 @@ private:
         const uint32_t frame = (path >= 0xFFFF0000u && !frames_.empty()) ? frames_.back().bound[3] : 0u;
         return make_key(frame, path, cur_kind_, cur_field_);
     }
-    uint32_t cur_kind_ = 0, cur_field_ = 0;
+    uint32_t cur_kind_ = 0, cur_field_ = 0, cur_record_ = 0;
+public:
+    void set_current_record(uint32_t r) override { cur_record_ = r; }
+private:
 public:
     /* A frame-relative read this tick that nothing had seeded: the cell the engine
      * would have written. Kept in read order so a caller can answer the same cells

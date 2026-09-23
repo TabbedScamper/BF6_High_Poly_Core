@@ -1302,6 +1302,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     std::fprintf(stderr, "\n");
                 }
                 Value value;
+                host->set_current_record(record.offset);
                 if (host->invoke(record.operator_key, args, value)) {
                     /* THE FIRST NON-FINITE ANSWER is the one worth seeing: everything
                      * after it is downstream of the same mistake. */

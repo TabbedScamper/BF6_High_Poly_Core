@@ -1049,7 +1049,12 @@ int main(int argc, char** argv)
             const float m = f < 0 ? -f : f;
             if (f == 0.0f) std::printf("  %12s", ".");
             else if (m >= 1e-4f && m <= 1e6f) std::printf("  %12g", (double)f);
-            else std::printf("  %12s", ("0x" + std::to_string(u)).c_str());
+            /* std::to_string is DECIMAL, so "0x" + to_string printed 0x9109505 for a word
+             * that is really 0x8B0001, which read as the pool disagreeing with the record
+             * printer about the same offset. Format the hex as hex. */
+            else std::printf("  %12s", ([&] {
+                char b[16]; std::snprintf(b, sizeof b, "0x%X", u); return std::string(b);
+            }()).c_str());
         }
         std::printf("\n");
     }

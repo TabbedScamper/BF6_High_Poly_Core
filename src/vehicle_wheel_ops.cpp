@@ -2827,8 +2827,15 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         const uint32_t base = (!rb(SC, SC_FORCE_AT_CONTACT_OFF) && contact) ? CT_POSITION : 0u;
         const Value& PB = base ? C : W;
         ForceRecord r1{}, r2{}, r3{};
+        /* BF6_SUSP_AT_COM=1 applies the suspension at the centre of mass, so it makes no
+         * torque at all. DIAGNOSTIC: an aircraft's gear does not bracket the centre of
+         * mass the way a car's four corners do, and the operator has no torque clamp, so
+         * a lateral gear offset is an uncancelled roll. This measures whether that is
+         * what rolls a helicopter over, WITHOUT inventing gear geometry to do it. */
+        const bool susp_at_com = std::getenv("BF6_SUSP_AT_COM") != nullptr;
         for (int i = 0; i < 4; ++i) {
-            const float pt = rf(a[2], 4 * i) + rf(PB, base + 4 * i);
+            const float pt = susp_at_com ? body_.com[i]
+                                         : rf(a[2], 4 * i) + rf(PB, base + 4 * i);
             r1.p[i] = r2.p[i] = r3.p[i] = pt;
             r1.f[i] = dt * (spring * dir[i]) * force_scale;
             r2.f[i] = dt * (damper * dir[i]) * force_scale;

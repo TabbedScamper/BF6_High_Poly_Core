@@ -569,9 +569,10 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (!args[1].known) { cells_.erase(cell_key(dest)); out = Value{}; return true; }
         cells_[cell_key(dest)] = args[1].as_u32();
         if (std::getenv("BF6_CELL_DEBUG"))
-            std::fprintf(stderr, "cell write key 0x%016llX value 0x%08X depth %zu bound3 %08X kind %u field %u\n",
-                         (unsigned long long)cell_key(dest), args[1].as_u32(), frames_.size(),
-                         frames_.empty() ? 0u : frames_.back().bound[3], cur_kind_, cur_field_);
+            std::fprintf(stderr, "cell write op %08X key 0x%016llX value 0x%08X depth %zu bound3 %08X kind %u field %u path %08X\n",
+                         key, (unsigned long long)cell_key(dest), args[1].as_u32(),
+                         frames_.size(), frames_.empty() ? 0u : frames_.back().bound[3],
+                         cur_kind_, cur_field_, dest);
         ++writes_;
         out = Value{};
         return true;

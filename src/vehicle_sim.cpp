@@ -554,6 +554,37 @@ void VehicleSim::tick() {
                     std::fprintf(stderr, "%s\n", o.c_str());
                 }
             }
+        /* BF6_TRACE_AT=<tick>[,<value>]: every slot write of that tick, in order, with
+         * the record and operator that made it. Given a value, only the writes within
+         * a thousandth of it - which is how you find the operator that produced a
+         * number you can see in the output but cannot place. An operator that writes
+         * nothing does not appear, so a force that is missing and a force that is
+         * cancelled look different here, which is the whole point. */
+        if (const char* at = std::getenv("BF6_TRACE_AT")) {
+            /* Counted PER GRAPH: a vehicle runs several, so a single counter would
+             * land the dump on whichever graph happened to be that many calls in. */
+            static std::map<std::string, int> ticks;
+            const int tick = ++ticks[g->name];
+            char* end = nullptr;
+            const long want = std::strtol(at, &end, 10);
+            const bool has_v = end && *end == ',';
+            const float v = has_v ? (float)std::atof(end + 1) : 0.0f;
+            if (tick == want)
+                for (const auto& t : g->inst.trace) {
+                    float l[4];
+                    std::memcpy(l, t.lanes, 16);
+                    const int n = t.width >= 16 ? 4 : (t.width >= 8 ? 2 : 1);
+                    bool hit = !has_v;
+                    for (int i = 0; i < n && !hit; ++i)
+                        hit = std::fabs(l[i] - v) <= std::fabs(v) * 1e-3f + 1e-6f;
+                    if (!hit) continue;
+                    std::fprintf(stderr, "trace %s rec 0x%X key %08X -> slot 0x%X w %u %s",
+                                 g->name.c_str(), t.record_offset, t.key, t.slot, t.width,
+                                 t.known ? "known" : "UNKNOWN");
+                    for (int i = 0; i < n; ++i) std::fprintf(stderr, " %g", l[i]);
+                    std::fprintf(stderr, "\n");
+                }
+        }
         if (const char* watch = std::getenv("BF6_SLOT_WATCH"))
             if (g->name.find("simex") != std::string::npos) {
                 static int calls = 0;

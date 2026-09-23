@@ -57,6 +57,11 @@ set(BF6_SOURCES
     src/expression_graph.cpp
     src/expression_registry.cpp
     src/expression_vm.cpp
+    src/expression_state_host.cpp
+    src/vehicle_sim.cpp
+    src/vehicle_dynamics.cpp
+    src/vehicle_wheel_ops.cpp
+    src/expression_pure_ops.cpp
     src/cache/cache_store.cpp
     src/cache/pack.cpp
     src/cache/progress.cpp
@@ -102,8 +107,10 @@ if(WIN32)
 endif()
 
 if (MSVC)
-    target_compile_options(bf6_core PRIVATE /W4)
-    target_compile_options(bf6_core_static PRIVATE /W4)
+    # /bigobj: bf6_core.cpp pulls in the whole core, and its section count passed the
+    # COFF default once the vehicle operators grew. Nothing about the output changes.
+    target_compile_options(bf6_core PRIVATE /W4 /bigobj)
+    target_compile_options(bf6_core_static PRIVATE /W4 /bigobj)
 endif()
 
 # Everything below is validation and research tooling. Several targets need a
@@ -1057,6 +1064,27 @@ add_executable(expression_registry_test test/expression_registry_test.cpp)
 target_link_libraries(expression_registry_test PRIVATE bf6_core_static)
 target_include_directories(expression_registry_test PRIVATE src include)
 
+# Tick a vehicle's own drivetrain + suspension graphs frame by frame.
+add_executable(vehicle_sim_test test/vehicle_sim_test.cpp)
+target_link_libraries(vehicle_sim_test PRIVATE bf6_core_static)
+target_include_directories(vehicle_sim_test PRIVATE src include)
+
+add_executable(vehicle_api_test test/vehicle_api_test.cpp)
+target_link_libraries(vehicle_api_test PRIVATE bf6_core_static)
+target_include_directories(vehicle_api_test PRIVATE src include)
+
+add_executable(raw_peek test/raw_peek.cpp)
+target_link_libraries(raw_peek PRIVATE bf6_core_static)
+target_include_directories(raw_peek PRIVATE src include)
+
+# Dump EBX partitions through the reflection, by name substring.
+add_executable(ebx_dump_probe test/ebx_dump_probe.cpp)
+target_link_libraries(ebx_dump_probe PRIVATE bf6_core_static)
+target_include_directories(ebx_dump_probe PRIVATE src include)
+add_executable(expression_vehicle_host_test test/expression_vehicle_host_test.cpp)
+target_link_libraries(expression_vehicle_host_test PRIVATE bf6_core_static)
+target_include_directories(expression_vehicle_host_test PRIVATE src include)
+
 add_executable(expression_vm_test test/expression_vm_test.cpp)
 target_link_libraries(expression_vm_test PRIVATE bf6_core_static)
 target_include_directories(expression_vm_test PRIVATE src include)
@@ -1656,6 +1684,10 @@ target_include_directories(vshape_test PRIVATE src include)
 add_executable(gamemode_test test/gamemode_test.cpp)
 target_link_libraries(gamemode_test PRIVATE bf6_core_static)
 target_include_directories(gamemode_test PRIVATE src include)
+
+add_executable(gamemode_export tools/gamemode_export.cpp)
+target_link_libraries(gamemode_export PRIVATE bf6_core_static)
+target_include_directories(gamemode_export PRIVATE src include)
 
 add_executable(footprint_test test/footprint_test.cpp)
 target_link_libraries(footprint_test PRIVATE bf6_core_static)

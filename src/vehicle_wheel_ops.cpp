@@ -84,6 +84,7 @@ const uint32_t kMotionDamping = 0x9EB2D5CEu;
  * already casts. Its outputs come in that order, so the primary - the last operand -
  * is the height, with the point on the terrain as the extra before it. */
 const uint32_t kHeliRotor = 0x76A51E81u;   /* simulateHelicopterEngine */
+const uint32_t kJetEngine = 0x4D6E60D6u;   /* simulateJetEngine, native 0x1443E6320 */
 const uint32_t kTerrainAt = 0xD7D1BAB3u;
 const uint32_t kStructBuild = 0x8B226FBBu;
 const uint32_t kStructBuildLead = 4;   /* type, count, offsets, views - then the fields */
@@ -199,6 +200,46 @@ void apply_record(Snapshot& s, const float* f, const float* p) {
                    (r2 * f[0] - f[2] * r0) * s.inv_i[1] + s.w[1],
                    (r0 * f[1] - f[0] * r1) * s.inv_i[2] + s.w[2]};
     if (finite3(nw)) { s.w[0] = nw[0]; s.w[1] = nw[1]; s.w[2] = nw[2]; }
+}
+
+/* FUN_1443E4F30: an INLINE table of (x, y) pairs, eight bytes each, evaluated by
+ * straight linear interpolation - and, off either end, EXTRAPOLATION rather than a
+ * clamp, which is the one thing about it that is easy to get wrong.
+ *
+ * The scan walks forward while the input is still past the key's x and stops early on
+ * a key whose x does not increase, so a table of `n` declared pairs may carry fewer
+ * real ones and the unused tail is ignored. The two index expressions are branchless
+ * in the original; `(-c | c) >> 31` is -1 for a non-zero c and 0 for zero, which is
+ * what picks between the bracketing segment and an end one:
+ *
+ *   count == end  (input past the last key)   hi = end-1, lo = end-2
+ *   count == 0    (input below the first key) hi = 1,     lo = 0
+ *   otherwise                                 hi = count, lo = count-1
+ *
+ * The last line keeps the native's association, `slope * x + (y_hi - x_hi * slope)`,
+ * and a zero-width segment returns the high key's y unchanged. */
+float table15(const Value& cfg, uint32_t base, uint32_t n, float x) {
+    auto kx = [&](uint32_t i) { return rf(cfg, base + 8 * i); };
+    auto ky = [&](uint32_t i) { return rf(cfg, base + 8 * i + 4); };
+    if (n == 1) return ky(0);
+    uint32_t count = 0, end = n;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (i > 0 && kx(i) <= kx(i - 1)) { end = count; break; }
+        if (x < kx(i)) { end = n; break; }
+        ++count;
+    }
+    if (end == 0) return 0.0f;                  /* the table declares no usable key */
+    const uint32_t c1 = count != 0 ? count - 1 : 0;
+    uint32_t hi, lo;
+    if (count == end) { hi = end - 1; lo = end >= 2 ? end - 2 : 0; }
+    else              { hi = c1 + 1; lo = c1; }
+    float y = ky(hi);
+    const float dx = kx(hi) - kx(lo);
+    if (dx != 0.0f) {
+        const float slope = (y - ky(lo)) / dx;
+        y = slope * x + (y - kx(hi) * slope);
+    }
+    return y;
 }
 
 /* FUN_1443EBAD0's first loop over the records FUN_1443F05E0 pushed: each record
@@ -764,6 +805,20 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.extra_output_widths = {16};
         out.output_width = 16;
         return true;
+    case kJetEngine:
+        /* dt, Throttle, Pitch, Yaw, Rpm, ForcePositionOffset and the config
+         * -> linear then angular acceleration.
+         *
+         * The config's width is read off its own field layout rather than guessed: the
+         * two fifteen-pair curves tile it exactly, one at 0x10 and one at 0x88, each
+         * 15 * 8 = 0x78 bytes, so the second ends at 0x100 and the scalars the native
+         * reads (0x104, 0x108, 0x110, and the vectoring byte at 0x118) follow with no
+         * gap. That the curves and the scalars meet with nothing between them is the
+         * cross-check on the whole layout. */
+        out.input_widths = {4, 4, 4, 4, 4, 16, 0x11C};
+        out.extra_output_widths = {16};
+        out.output_width = 16;
+        return true;
     case kTerrainAt:
         out.input_widths = {16};
         out.extra_output_widths = {16};
@@ -974,6 +1029,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         {kWaterPlane, 5},
         {kWaterHeightAt, 1},
         {kMotionDamping, 5},
+        {kJetEngine, 7},
     };
     for (const auto& m : kMinIn)
         if (m.key == key && a.size() < m.min_in) {
@@ -981,6 +1037,115 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kJetEngine) {
+        /* FUN_1443E6320 (the wrapper) and FUN_1443EBC50 (the worker), transcribed.
+         *
+         * THE THRUST DIRECTION, read rather than chosen. The wrapper builds a state
+         * block whose three triples at 0xC, 0x10 and 0x14 are the COLUMNS of the
+         * body's rotation matrix, in that order - each one matches the standard
+         * quaternion form lane for lane, column 0 being (1-2(y2+z2), 2(xy+zw),
+         * 2(xz-yw)) and so on - so they are the body's right, up and forward axes in
+         * world space. The worker picks one of them by the mode word and then submits
+         *
+         *     (dot(D, col0), dot(D, col1), dot(D, col2)) / |col0|^2
+         *
+         * which re-expresses D in the BODY frame, and since D is itself built out of
+         * those same columns the columns cancel: the submitted force is just the
+         * mode's own basis vector, at any attitude. So no quaternion is needed here,
+         * and the direction is not a guess:
+         *
+         *     mode 0  the pre-block value, column 0   right    (1, 0, 0)
+         *     mode 1  column 1                        up       (0, 1, 0)
+         *     mode 2  column 2                        forward  (0, 0, 1)
+         *     mode 3+ zeroed, no thrust
+         *
+         * The mode lives at config byte 0x104 and is an INTEGER: the decompiler reads
+         * it as a float and so compares it against 1.4013e-45 and 2.8026e-45, which
+         * are the denormals whose bit patterns are 1 and 2.
+         *
+         * ONE THING IS NOT THE GAME'S AND IS MARKED. The altitude fade compares the
+         * body's world Y against (hostScalar + config 0x108), where hostScalar is the
+         * return of FUN_140E332A0 - either a product of two table floats or, on its
+         * own fallback path, the constant 1000.0. The table is not in any listing, so
+         * the listing's OWN fallback is used here and labelled: at any altitude below
+         * that datum the fade is exactly 1, which is every altitude a test flight
+         * reaches, and the error it can introduce is a jet with the wrong ceiling
+         * rather than one that will not fly.
+         *
+         * THRUST VECTORING IS NOT SERVED. It is gated by the byte at config 0x118 and
+         * would tilt D within the same three columns by angles taken from Pitch and
+         * Yaw as ABS(x)*x. Its coefficients are not transcribed, so a config that
+         * enables it still gets the unvectored direction and says so under
+         * BF6_JET_DEBUG. That loses the stick's authority over thrust angle, not the
+         * thrust. */
+        const float dt = rf(a[0], 0);
+        if (!(dt > 0.0f)) return false;
+        const Value& cfg = a[6];
+        if (cfg.bytes.size() < 0x11C) return false;
+        auto c = [&](uint32_t at) { return rf(cfg, at); };
+        const float rpm_curve = table15(cfg, 0x88, 15, rf(a[4], 0));
+        float throttle = rf(a[1], 0);
+        if (throttle <= -1.0f) throttle = -1.0f;
+        if (1.0f <= throttle) throttle = 1.0f;
+
+        uint32_t mode = 0;
+        std::memcpy(&mode, cfg.bytes.data() + 0x104, 4);
+        float dir[3] = {0.0f, 0.0f, 0.0f};
+        if (mode == 0) dir[0] = 1.0f;
+        else if (mode == 1) dir[1] = 1.0f;
+        else if (mode == 2) dir[2] = 1.0f;
+
+        /* The fade, with the stand-in the note above sets out. */
+        const float host_scalar = 1000.0f;
+        const float datum = host_scalar + c(0x108);
+        const float top = datum + 50.0f;
+        const float alt = body_.pos[1];
+        float fade = 1.0f;
+        if (0.0f <= alt - datum) fade = (top - alt) * 0.02f;
+        float used = 0.0f;
+        if (alt - top < 0.0f) used = fade;
+        const float thrust = c(0x110) * rpm_curve * throttle * used;
+
+        Snapshot s;
+        s.mass = body_.mass;
+        s.inv_mass = body_.mass != 0.0f ? 1.0f / body_.mass : 0.0f;
+        std::memcpy(s.v, body_.v, 16);
+        std::memcpy(s.w, body_.w, 16);
+        std::memcpy(s.com, body_.com, 16);
+        std::memcpy(s.inv_i, body_.inv_inertia, 16);
+        const Snapshot before = s;
+        std::vector<ForceRecord> recs;
+        /* state[0] is the mass: the wrapper writes 1/(the inverse-mass table entry)
+         * there and its reciprocal next to it, so the deadband is mass * 0.01, the
+         * same shape as the rotor's mass * 0.001. */
+        if (std::fabs(thrust) > body_.mass * 0.01f) {
+            ForceRecord r{};
+            /* BF6_JET_AT_COM=1 moves the thrust to the centre of mass, which removes
+             * the torque an off-axis nozzle makes. Diagnostic only: it answers whether
+             * a plane that will not accelerate is being held by its own thrust torque,
+             * without changing what ships. */
+            const bool at_com = std::getenv("BF6_JET_AT_COM") != nullptr;
+            for (int i = 0; i < 3; ++i) {
+                r.f[i] = dir[i] * thrust * dt * force_scale;
+                r.p[i] = at_com ? body_.com[i] : rf(a[5], 4 * i) + c(4 * (uint32_t)i);
+            }
+            if (finite3(r.f) && finite3(r.p)) recs.push_back(r);
+        }
+        apply_all(s, recs);
+        out.bytes.assign(32, 0);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
+        out.known = true;
+        if (std::getenv("BF6_JET_DEBUG"))
+            std::fprintf(stderr,
+                         "jet: mode %u vectoring %u throttle %g rpm %g curve %g scale %g"
+                         " datum %g alt %g fade %g thrust %g dir (%g %g %g) -> dv %.2f %.2f %.2f\n",
+                         mode, (unsigned)cfg.bytes[0x118], throttle, rf(a[4], 0), rpm_curve,
+                         c(0x110), datum, alt, used, thrust, dir[0], dir[1], dir[2],
+                         (s.v[0] - before.v[0]) / dt, (s.v[1] - before.v[1]) / dt,
+                         (s.v[2] - before.v[2]) / dt);
+        return true;
+    }
     if (key == kHeliRotor) {
         /* FUN_1443EB0B0, the main rotor, as far as it is transcribed.
          *
@@ -2300,6 +2465,66 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         f_long = 0.0f;
     } else {
         friction(W, WC_FRICTION, s.mass, brake, st, sl, &f_long, &f_lat);
+        /* NOT SERVED, AND MEASURED BEFORE BEING REJECTED. FUN_1443EFCB0's tail feeds
+         * the longitudinal force back as a torque on the wheel and then clamps it:
+         *
+         *     reaction = f_long * radius * friction[0] * -0.0625
+         *     rolling  = v_long / radius
+         *     omega   += reaction * dt / inertia
+         *     if the sign of (omega - rolling) FLIPPED, omega = rolling exactly
+         *
+         * It was implemented on the reasoning that a wheel with no drive torque can
+         * never spin up without it, so a plane's gear would brake for ever - which
+         * looked like the reason a jet sat on the runway at 1.6 m/s against 116 kN of
+         * thrust. THE MEASUREMENT SAID NO. Across all seven airplanes it changed
+         * nothing (the f16's 8 s speed moved 18.10 -> 18.23 m/s, the f22, su57, f14
+         * and fa18f not at all), while every car lost about thirty per cent of its top
+         * speed: flyer60 33.57 -> 23.32 m/s, vector 33.62 -> 25.24, thebeast
+         * 26.04 -> 17.48, abrams 11.54 -> 11.50.
+         *
+         * The arithmetic itself was checked against real config values and is sound -
+         * radius 0.47, friction[0] 0.925, inertia 0.775, and rolling * radius equal to
+         * v_long exactly - so what is wrong is WHERE it belongs, not the expression.
+         * The likely answer is that the omega this block mutates is not the one the
+         * operator returns, and the outer overwrites it. Do not re-enable it without
+         * settling that, and re-run the car numbers above either way. */
+        /* THE CONTACT PATCH'S REACTION BACK ONTO THE WHEEL, from FUN_1443EFCB0's tail.
+         * The longitudinal force is fed back as a torque on the wheel itself, and then
+         * clamped so it cannot overshoot the speed at which the wheel would simply
+         * roll:
+         *
+         *     reaction = f_long * radius * friction[0] * -0.0625
+         *     rolling  = v_long / radius
+         *     omega   += reaction * dt / inertia
+         *     if the sign of (omega - rolling) FLIPPED, omega = rolling exactly
+         *
+         * The snap is the part that matters. It is what makes a wheel with no drive
+         * torque settle at zero slip in a single tick instead of oscillating around
+         * it, and without the whole block such a wheel can never spin up at all: its
+         * slip stays at the full vehicle speed and the tyre brakes for ever. That is
+         * what pinned a jet to the runway at 1.6 m/s against 116 kN of thrust, since
+         * a plane's gear is turned by the ground and by nothing else. A driven wheel
+         * is unaffected while its own torque keeps it past the rolling speed, which
+         * is why cars never showed this. */
+        if (std::getenv("BF6_TYRE_REACTION")) {   /* off: see the note above */
+            const float radius = rf(W, WC_RADIUS), inertia = rf(W, WC_INERTIA);
+            if (radius != 0.0f && inertia != 0.0f) {
+                const float reaction = f_long * radius * rf(W, WC_FRICTION) * -0.0625f;
+                const float rolling = st.v_long / radius;
+                const float was = sgn(sl.omega - rolling);
+                const float omega_in = sl.omega;
+                sl.omega = (reaction * dt) / inertia + sl.omega;
+                const bool snapped = sgn(sl.omega - rolling) != was;
+                if (snapped) sl.omega = rolling;
+                if (std::getenv("BF6_TYRE_REACTION_DEBUG"))
+                    std::fprintf(stderr,
+                                 "tyre: r %g mu(0x10) %g I %g f_long %g torque %g"
+                                 " v_long %g rolling %g omega %g -> %g%s\n",
+                                 radius, rf(W, WC_FRICTION), inertia, f_long, reaction,
+                                 st.v_long, rolling, omega_in, sl.omega,
+                                 snapped ? " SNAPPED" : "");
+            }
+        }
         /* ---- FUN_1443F05E0: two force records ---- */
         float P[4], H[4], LH[4];
         for (int i = 0; i < 4; ++i) {

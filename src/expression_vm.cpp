@@ -739,7 +739,12 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
         if (instance && instance->trace_records)
             for (; trace_filled < instance->trace.size(); ++trace_filled) {
                 auto& tr = instance->trace[trace_filled];
-                if ((size_t)tr.slot < slots.bytes.size() && slots.bytes.size() - (size_t)tr.slot >= 4) std::memcpy(&tr.bits, slots.bytes.data() + tr.slot, 4);
+                if ((size_t)tr.slot < slots.bytes.size() && slots.bytes.size() - (size_t)tr.slot >= 4) {
+                    std::memcpy(&tr.bits, slots.bytes.data() + tr.slot, 4);
+                    const size_t room = slots.bytes.size() - (size_t)tr.slot;
+                    const size_t n = std::min<size_t>(16, std::min<size_t>(room, tr.width ? tr.width : 4));
+                    std::memcpy(tr.lanes, slots.bytes.data() + tr.slot, n);
+                }
             }
         const auto found = records.find(cursor);
         if (found == records.end()) {

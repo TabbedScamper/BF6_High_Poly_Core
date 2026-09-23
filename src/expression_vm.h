@@ -135,6 +135,10 @@ struct Instance {
         uint32_t width = 0;
         bool known = false;
         uint32_t bits = 0;      /* first 4 bytes written, filled before the next record */
+        /* ALL FOUR LANES, for the same reason a whole-frame aggregate is useless: a
+         * vehicle accelerating along Z writes zero into lane 0, so a trace that shows
+         * only `bits` reports every force on the forward axis as nothing. */
+        uint32_t lanes[4] = {0, 0, 0, 0};
     };
     /* DATA TYPE SIZES by type id (a reflected name hash), from the caller's own
      * reading of the game executable (bf6_type_size_by_hash). A kind 0x24/0x25 move

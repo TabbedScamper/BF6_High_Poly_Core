@@ -27,8 +27,14 @@ int main(int argc, char** argv) {
     float last_ratio = 0.0f;
     int shifts = 0;
     float top = 0.0f;
-    for (int f = 0; f < 60 * 14; ++f) {
-        const bool braking = f >= 60 * 8;
+    /* BF6_SECONDS=<n> runs longer than the default fourteen, and BF6_HOLD=<n> moves the
+     * moment the throttle gives way to the brake. An aircraft needs both: the f16 is
+     * still gaining 4 m/s every second when the default run brakes at eight, so a
+     * take-off cannot be reached inside it, let alone a wing's lift measured. */
+    const int secs = std::getenv("BF6_SECONDS") ? std::atoi(std::getenv("BF6_SECONDS")) : 14;
+    const int hold = std::getenv("BF6_HOLD") ? std::atoi(std::getenv("BF6_HOLD")) : 8;
+    for (int f = 0; f < 60 * secs; ++f) {
+        const bool braking = f >= 60 * hold;
         const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, 0.0f, 0.0f, 1.0f / 60.0f, 0.0f};
         if (bf6_vehicle_step(v, in, out) < 33) { std::fprintf(stderr, "step failed\n"); return 2; }
         /* out: 0-2 pos, 3-6 quat, 7-9 vel, 10-12 angvel, 13 speed, 14 rpm,

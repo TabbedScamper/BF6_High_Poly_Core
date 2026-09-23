@@ -1593,8 +1593,17 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
              * layout, not a loop (the flyer60 branches forward to a test block at
              * 0x446C that jumps back to 0x2E8C): always followed. A jump back to a
              * record already run is a loop, followed under the guess rule and cap. */
+            /* BF6_LOOP_AFTER_GUESS=1 follows a back-edge even when a branch was guessed
+             * since its head was first reached, keeping only the kMaxLoop cap. The guess
+             * rule exists so an unresolved condition cannot spin a loop forever, but it
+             * also ends a run that had one unrelated guess anywhere upstream - and the
+             * graph is one linear program whose wheel sections precede the rotor, so
+             * ending early silently drops everything after the loop. This separates "the
+             * graph stopped" from "the guard stopped it". */
+            static const bool loop_after_guess = std::getenv("BF6_LOOP_AFTER_GUESS") != nullptr;
             loop_ok = ++n <= kMaxLoop &&
-                      (fg == first_guess.end() || result.guessed_branches == fg->second);
+                      (loop_after_guess || fg == first_guess.end() ||
+                       result.guessed_branches == fg->second);
         }
         if (!next || (next <= cursor && !returning && !loop_ok) || records.find(next) == records.end()) {
             result.termination = Termination::Complete;

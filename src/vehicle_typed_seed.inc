@@ -32,6 +32,55 @@ void bf6__collect_typed(const bf6::EbxValue& v, const bf6::TypeGuid& guid,
     for (const auto& it : v.items) bf6__collect_typed(it, guid, out, depth + 1);
 }
 
+/* WHERE EACH VALUE GOES, STATED BY THE DATA.
+ *
+ * The pairing of authored values to pool offsets never needed to be guessed: every
+ * value is wrapped in an entry that carries its DESTINATION. A car's eleven curve
+ * tables sit in one array, each entry holding a small descriptor and the table:
+ *
+ *     0xC939B436 [11]
+ *        0: { 0xFC636C1F { 0xBDF81E34 0, 0x4FF541E4 1024 },   <- the pool offset
+ *             0x8CF424E7 {15} ... }                           <- the table
+ *
+ * and those eleven offsets - 512, 640, 768 ... 1792 - are exactly the eleven pool
+ * offsets that car's typed copies read, in no particular order. Two count-based
+ * pairings were tried before this turned up and both broke working vehicles; neither
+ * was needed.
+ *
+ * So the walk looks for the WRAPPER rather than for the value: any struct carrying an
+ * offset descriptor and a struct-valued field is one placement, and the field's own
+ * type decides how it is written. */
+const uint32_t kPlacementDesc = 0xFC636C1Fu;   /* the descriptor that carries it */
+const uint32_t kPlacementOff  = 0x4FF541E4u;   /* the pool offset itself */
+
+struct bf6__placement {
+    uint32_t pool_offset = 0;
+    const bf6::EbxValue* value = nullptr;
+};
+
+void bf6__collect_placements(const bf6::EbxValue& v,
+                             std::vector<bf6__placement>& out, int depth)
+{
+    if (depth > 24) return;
+    const bf6::EbxValue* desc = v.field(kPlacementDesc);
+    if (desc && desc->kind == bf6::EbxValue::Kind::Struct) {
+        const bf6::EbxValue* off = desc->field(kPlacementOff);
+        if (off && (off->kind == bf6::EbxValue::Kind::Uint ||
+                    off->kind == bf6::EbxValue::Kind::Int)) {
+            const uint32_t at = off->kind == bf6::EbxValue::Kind::Uint
+                                    ? (uint32_t)off->u : (uint32_t)off->i;
+            /* The placed value is the entry's OTHER field - a struct, not the
+             * descriptor. An entry with none places nothing. */
+            for (const auto& kv : v.fields)
+                if (kv.first != kPlacementDesc &&
+                    kv.second.kind == bf6::EbxValue::Kind::Struct)
+                    out.push_back({at, &kv.second});
+        }
+    }
+    for (const auto& kv : v.fields) bf6__collect_placements(kv.second, out, depth + 1);
+    for (const auto& it : v.items) bf6__collect_placements(it, out, depth + 1);
+}
+
 /* One number, as the four bytes the field holds.
  *
  * AN INTEGER STAYS AN INTEGER. A curve key's interpolation mode is an integer in a
@@ -125,123 +174,74 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
 
     const bf6::expression::Graph* gr = sim.graph_named(name);
     if (!gr) return;
-    /* Which pool offset each typed slot is copied from: a kind 0x24 or 0x25 record
-     * whose source is the pool and whose destination is that slot. */
-    std::map<uint32_t, uint32_t> from_pool;
+    const bool dbg = std::getenv("BF6_SEED_DEBUG") != nullptr;
+    /* The instances are KEPT: a collected value points into the tree the reader built,
+     * so the tree has to outlive the walk. */
+    std::vector<bf6::EbxValue> kept;
+    kept.reserve(e.instance_count());
+    for (size_t i = 0; i < e.instance_count(); ++i) kept.push_back(e.read_instance(i));
+    std::vector<bf6__placement> places;
+    for (const auto& v : kept) bf6__collect_placements(v, places, 0);
+    if (dbg) std::fprintf(stderr, "seed: %zu placement(s) declared by %s\n",
+                          places.size(), name.c_str());
+
+    /* Which pool offsets this graph's typed copies actually read, and the slot each
+     * one feeds. A placement naming an offset no copy reads is for a region this
+     * graph does not use, and is skipped rather than written blindly. */
+    std::map<uint32_t, uint32_t> slot_of_pool;      /* pool offset -> slot offset */
     for (const auto& rec : gr->records) {
         if (rec.has_operator || rec.kind < 0x24 || rec.kind > 0x25 || rec.operands.size() < 2) continue;
         const auto& src = rec.operands.front();
         const auto& dst = rec.operands.back();
-        if (src.region == 0 && dst.region == 2) from_pool[dst.offset] = src.offset;
+        if (src.region == 0 && dst.region == 2) slot_of_pool[src.offset] = dst.offset;
     }
-
-    const bool dbg = std::getenv("BF6_SEED_DEBUG") != nullptr;
+    /* Each typed slot's declared type and its spacing, so a value written by reference
+     * is told from one written inline. */
+    std::map<uint32_t, uint32_t> slot_type;
+    std::map<uint32_t, uint32_t> slot_stride;
     for (const auto& grp : gr->slot_values) {
-        bf6::TypeGuid guid{};
-        if (!ctx->types->guid_by_name_hash(grp.data_type_id, guid)) {
-            if (dbg) std::fprintf(stderr, "seed: type %08X has no guid\n", grp.data_type_id);
-            continue;
-        }
-        const bf6::TypeLayout& lay = ctx->types->layout_full(guid);
-        /* The instances are KEPT: a collected value is a pointer into the tree the
-         * reader built, so the tree has to outlive the walk. */
-        std::vector<bf6::EbxValue> kept;
-        kept.reserve(e.instance_count());
-        for (size_t i = 0; i < e.instance_count(); ++i) kept.push_back(e.read_instance(i));
-        std::vector<const bf6::EbxValue*> vals;
-        for (const auto& v : kept) bf6__collect_typed(v, guid, vals, 0);
-        if (dbg) {
-            std::fprintf(stderr, "seed: type %08X size %u, %zu slot(s), %zu value(s) in the resource\n",
-                         grp.data_type_id, lay.size, grp.offsets.size(), vals.size());
-            std::fprintf(stderr, "  layout fields %zu:", lay.fields.size());
-            for (size_t i = 0; i < lay.fields.size() && i < 8; ++i)
-                std::fprintf(stderr, " %08X@%u", lay.fields[i].name_hash, lay.fields[i].offset);
-            std::fprintf(stderr, "\n");
-            if (!vals.empty()) {
-                std::fprintf(stderr, "  value fields %zu:", vals[0]->fields.size());
-                for (const auto& kv : vals[0]->fields) std::fprintf(stderr, " %08X", kv.first);
-                std::fprintf(stderr, "\n");
-            }
-        }
-        /* INLINE OR BY REFERENCE. The graph puts consecutive slots of a group one
-         * VALUE apart when the slot holds the value and one POINTER apart when it
-         * holds a handle the loader fills: a boat's eight 120-byte tables sit 128
-         * apart, its two keyed curves 8 apart against a 40-byte type. A handle is
-         * seeded as a handle - writing the struct into the pool would be writing it
-         * where the graph keeps something else. */
-        /* ONLY WHERE THE PAIRING IS FORCED. The k-th slot taking the k-th value of
-         * its type is the only ordering either side offers, and it is sound only
-         * when there are as many values as slots. A car declares thirteen tables and
-         * ships eleven, a tank eleven and nine: pairing those by index handed each
-         * one somebody else's gear and torque curves, and both lost a third of their
-         * top speed while the tank stopped leaving the start line. Where the counts
-         * disagree the graph's own pool is left exactly as authored, which is what
-         * the vehicles had before any of this.
-         *
-         * TWO WAYS OF GUESSING THE PAIRING HAVE BEEN TRIED AND BOTH FAILED THEIR
-         * REGRESSION, so neither is worth a third attempt without new evidence:
-         *
-         *   1. Seed only the slots whose pool source is empty - all zero or all
-         *      -666666, the engine's unset marker - and pair those with the values in
-         *      order. A car has eleven such slots and eleven unclaimed values, so the
-         *      counts agree and it seeds; the result is flyer60 down from 33.57 m/s to
-         *      22.18 and every tank stationary. An empty pool slot does NOT imply that
-         *      one of this resource's values belongs in it.
-         *   2. As above, but first MATCH each authored slot to the value that equals
-         *      it field for field and only pair the leftovers, refusing the group if
-         *      any authored slot matches nothing. Same regression, for the same
-         *      reason: the eleven empty slots are simply not the eleven values.
-         *
-         * What that rules out is the whole family of count-based pairings. The link,
-         * if it exists, is something neither side's ORDER nor its ARITY carries -
-         * plausibly a name or an index on the value that this reader does not surface
-         * yet. Until that turns up, a group whose counts disagree stays untouched. */
-        if (vals.size() != grp.offsets.size()) {
-            if (dbg)
-                std::fprintf(stderr, "  %zu value(s) for %zu slot(s): the pool is left alone\n",
-                             vals.size(), grp.offsets.size());
-            continue;
-        }
-        /* The spacing is measured on the SORTED offsets; the pairing keeps the
-         * graph's own order, because the k-th slot as the graph lists it takes the
-         * k-th value of that type in the resource, and sorting the pairing handed a
-         * car's gear tables to each other's slots. */
         std::vector<uint32_t> sorted(grp.offsets.begin(), grp.offsets.end());
         std::sort(sorted.begin(), sorted.end());
-        const uint32_t stride = sorted.size() > 1 ? sorted[1] - sorted[0] : lay.size;
-        const bool by_reference = stride && stride < lay.size;
-        for (size_t k = 0; k < grp.offsets.size() && k < vals.size(); ++k) {
-            const auto at = from_pool.find(grp.offsets[k]);
-            if (at == from_pool.end()) {
-                if (dbg) std::fprintf(stderr, "  slot 0x%X is not copied from the pool\n", grp.offsets[k]);
-                continue;
-            }
-            std::map<uint32_t, uint32_t> patches;
-            if (by_reference) {
-                /* The value's own array field carries the keys; the pool word gets a
-                 * handle to the curve the host now holds. */
-                std::map<uint32_t, uint32_t> fields;
-                bf6__seed_value(*ctx->types, lay, *vals[k], 0, fields, 0, &sim.wheel_ops());
-                for (const auto& f : lay.fields) {
-                    const auto h = fields.find(f.offset);
-                    if (h == fields.end()) continue;
-                    if ((h->second & 0xFFFF0000u) == 0xC0DE0000u) patches[at->second] = h->second;
-                }
-            } else {
-                bf6__seed_value(*ctx->types, lay, *vals[k], at->second, patches, 0, &sim.wheel_ops());
-            }
-            sim.add_pool_patches(name, patches);
-            if (dbg) {
-                std::fprintf(stderr, "  slot 0x%X <- pool 0x%X%s, %zu word(s):",
-                             grp.offsets[k], at->second, by_reference ? " (by reference)" : "",
-                             patches.size());
-                size_t shown = 0;
-                for (const auto& kv : patches) {
-                    if (shown++ >= 6) break;
-                    std::fprintf(stderr, " 0x%X=%08X", kv.first, kv.second);
-                }
-                std::fprintf(stderr, "\n");
-            }
+        for (size_t i = 0; i < sorted.size(); ++i) {
+            slot_type[sorted[i]] = grp.data_type_id;
+            if (sorted.size() > 1)
+                slot_stride[sorted[i]] = i + 1 < sorted.size() ? sorted[i + 1] - sorted[i]
+                                                               : sorted[i] - sorted[i - 1];
         }
     }
+
+    size_t written = 0;
+    for (const bf6__placement& pl : places) {
+        const auto slot = slot_of_pool.find(pl.pool_offset);
+        if (slot == slot_of_pool.end()) continue;      /* this graph does not read it */
+        const bf6::TypeLayout& lay = ctx->types->layout_full(pl.value->guid);
+        if (!lay.valid || !lay.size) {
+            if (dbg)
+                std::fprintf(stderr, "  pool 0x%X: the placed value's type has no layout\n",
+                             pl.pool_offset);
+            continue;
+        }
+        const auto st = slot_stride.find(slot->second);
+        const bool by_reference = st != slot_stride.end() && st->second && st->second < lay.size;
+        std::map<uint32_t, uint32_t> patches;
+        if (by_reference) {
+            /* The slot holds a handle, so only the curve handle goes in the pool. */
+            std::map<uint32_t, uint32_t> fields;
+            bf6__seed_value(*ctx->types, lay, *pl.value, 0, fields, 0, &sim.wheel_ops());
+            for (const auto& f : fields)
+                if ((f.second & 0xFFFF0000u) == 0xC0DE0000u) patches[pl.pool_offset] = f.second;
+        } else {
+            bf6__seed_value(*ctx->types, lay, *pl.value, pl.pool_offset, patches, 0,
+                            &sim.wheel_ops());
+        }
+        if (patches.empty()) continue;
+        sim.add_pool_patches(name, patches);
+        ++written;
+        if (dbg) {
+            std::fprintf(stderr, "  pool 0x%X -> slot 0x%X%s, %zu word(s)\n",
+                         pl.pool_offset, slot->second,
+                         by_reference ? " (by reference)" : "", patches.size());
+        }
+    }
+    if (dbg) std::fprintf(stderr, "seed: %zu placement(s) written\n", written);
 }

@@ -2856,6 +2856,18 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          *
          * Diagnostic. The point of it is to find which values stabilise the airframe and
          * compare them with the real aircraft's track, not to ship a number. */
+        /* BF6_SUSP_CFG_DEBUG=1: the whole WheelConfig as floats. That offset 0 holds
+         * InitialPosition is an INFERENCE from a study whose byte offsets were wrong for
+         * the tail rotor, so before concluding that a gear's track is missing from the
+         * data it is worth looking at every field for one that carries it. */
+        if (std::getenv("BF6_SUSP_CFG_DEBUG")) {
+            std::fprintf(stderr, "suspcfg %zu bytes:", W.bytes.size());
+            for (uint32_t at = 0; at + 4 <= (uint32_t)W.bytes.size() && at < 0x70; at += 4) {
+                const float f = rf(W, at);
+                if (f != 0.0f) std::fprintf(stderr, " %02X=%g", at, f);
+            }
+            std::fprintf(stderr, "\n");
+        }
         static const char* const trk = std::getenv("BF6_GEAR_TRACK");
         const float track = trk ? (float)std::atof(trk) : 0.0f;
         const bool tail_zero = std::getenv("BF6_GEAR_TAIL_ZERO") != nullptr;

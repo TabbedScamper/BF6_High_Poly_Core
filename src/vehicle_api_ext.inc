@@ -243,6 +243,14 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     bf6::VehicleSim& s = v->sim;
     bf6::VehicleDynamics& d = v->dyn;
     s.set_bool("EntryActive_Driver", true);
+    /* BF6_HAS_PILOT=1: a helicopter's state list declares HasPilot beside Autopilot,
+     * AutohoverEnabled and a Roll PID with its own errorSum and lastError, and nothing
+     * here had ever seeded it - so offline it reads false. Three of the five
+     * helicopters carry a small negative cyclic Roll that the eurocopter does not
+     * (-0.05 against exactly 0), it comes from field 2 of a PID struct, and it WINDS UP
+     * rather than settling, which is what an integrator does when its feedback is
+     * missing. This tests whether telling the graph a pilot is aboard stops it. */
+    if (std::getenv("BF6_HAS_PILOT")) s.set_bool("HasPilot", true);
     s.set_float("InputThrottle", throttle);
     s.set_float("InputBrake", brake);
     s.set_float("InputYaw", steer);

@@ -144,6 +144,16 @@ struct Instance {
          * vehicle accelerating along Z writes zero into lane 0, so a trace that shows
          * only `bits` reports every force on the forward axis as nothing. */
         uint32_t lanes[4] = {0, 0, 0, 0};
+        /* THE SLOTS THIS RECORD READ, so a value can be explained without a human
+         * walking the graph one grep at a time. Every diagnosis in this file's history
+         * has been a backward walk - "what wrote that, and what did IT read" - done by
+         * hand, ten or twenty commands deep, and the walks that went wrong went wrong by
+         * matching VALUES when the identity was what mattered. With the inputs recorded
+         * the walk is mechanical. Eight is enough for every operator that has ever
+         * needed explaining; a wider one is truncated and says so. */
+        uint32_t inputs[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        uint8_t n_inputs = 0;
+        bool inputs_truncated = false;
     };
     /* DATA TYPE SIZES by type id (a reflected name hash), from the caller's own
      * reading of the game executable (bf6_type_size_by_hash). A kind 0x24/0x25 move

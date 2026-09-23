@@ -612,6 +612,67 @@ void VehicleSim::tick() {
         for (const auto& fr : state_.unseeded_frame_reads())
             if (fr.kind == 0 && fr.field == 0 && (fr.path & 0xFFu) != 0xFFu)
                 state_.set_cell_raw(fr.key, 1);
+        /* BF6_WHY=<hex slot>[,tick[,depth]]: explain a value by walking the dataflow
+         * BACKWARD from the slot that holds it - what wrote it, what that read, and so on
+         * - printing the record, operator, value and knownness at each level.
+         *
+         * This exists because every diagnosis in this file's history was that same walk
+         * done by hand, ten or twenty commands deep, one grep per level. Worse, the
+         * manual walks were stitched together by matching VALUES between levels, and
+         * three of them reached confident wrong conclusions that way: a frozen state cell
+         * blamed for a roll it had no part in, an integrator accused of accumulating its
+         * own delta when it was tracking a channel, and a wing axis deduced from the one
+         * surface that happened to be a rudder. Identity is in the trace; matching values
+         * was never necessary. One command now does the whole walk. */
+        if (const char* want = std::getenv("BF6_WHY")) {
+            static std::map<std::string, int> ticks;
+            const int tick = ++ticks[g->name];
+            char* end = nullptr;
+            const uint32_t slot = (uint32_t)std::strtoul(want, &end, 16);
+            long at_tick = 120, max_depth = 12;
+            if (end && *end == ',') { at_tick = std::strtol(end + 1, &end, 10);
+                                      if (end && *end == ',') max_depth = std::strtol(end + 1, nullptr, 10); }
+            if (tick == at_tick) {
+                std::fprintf(stderr, "why slot 0x%X in %s at tick %ld:\n",
+                             slot, g->name.c_str(), at_tick);
+                /* Last writer wins: a slot written more than once in a tick is explained
+                 * by the write that the readers downstream of it actually saw. */
+                std::map<uint32_t, const expression::Instance::TraceRow*> last;
+                for (const auto& t : g->inst.trace) last[t.slot] = &t;
+                std::set<uint32_t> seen;
+                struct Walk {
+                    const std::map<uint32_t, const expression::Instance::TraceRow*>& last;
+                    std::set<uint32_t>& seen;
+                    long max_depth;
+                    void go(uint32_t s, long depth) const {
+                        std::string pad((size_t)depth * 2, ' ');
+                        const auto it = last.find(s);
+                        if (it == last.end()) {
+                            std::fprintf(stderr, "%s0x%X <- NOTHING WROTE IT this tick"
+                                                 " (a seeded constant, or an unseeded cell"
+                                                 " read as zero)\n", pad.c_str(), s);
+                            return;
+                        }
+                        const auto* t = it->second;
+                        float l[4];
+                        std::memcpy(l, t->lanes, 16);
+                        const int n = t->width >= 16 ? 4 : 1;
+                        std::fprintf(stderr, "%s0x%X = ", pad.c_str(), s);
+                        for (int i = 0; i < n; ++i) std::fprintf(stderr, "%g ", l[i]);
+                        std::fprintf(stderr, "%s <- rec 0x%X %s", t->known ? "" : "UNKNOWN",
+                                     t->record_offset,
+                                     t->key ? "op" : "move/select");
+                        if (t->key) std::fprintf(stderr, " %08X", t->key);
+                        if (t->inputs_truncated) std::fprintf(stderr, " (inputs truncated)");
+                        std::fprintf(stderr, "\n");
+                        if (depth + 1 > max_depth || !seen.insert(s).second) return;
+                        for (uint8_t i = 0; i < t->n_inputs; ++i)
+                            go(t->inputs[i], depth + 1);
+                    }
+                };
+                Walk{last, seen, max_depth}.go(slot, 1);
+            }
+        }
         /* BF6_UNSEEDED_REPORT=1: the per-part state cells this graph READ and nothing
          * ever wrote, which the host is meant to answer - the header calls each one
          * "the cell the engine would have written", and set_cell_raw exists for

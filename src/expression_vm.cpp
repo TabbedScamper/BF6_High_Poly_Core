@@ -923,8 +923,17 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     slots.write(dst.offset, width, unknown(width));
                     last_written.tainted = true;
                 }
-                if (instance && instance->trace_records)
-                    instance->trace.push_back({record.offset, 0u, dst.offset, width, c.known});
+                if (instance && instance->trace_records) {
+                    Instance::TraceRow tr{record.offset, 0u, dst.offset, width, c.known};
+                    /* The condition and BOTH candidate sources: a destination stuck at
+                     * one value is either a stuck source or a stuck flag, and only
+                     * having all three in the row tells them apart. */
+                    tr.inputs[0] = record.operands[0].offset;
+                    tr.inputs[1] = record.operands[1].offset;
+                    tr.inputs[2] = record.operands[2].offset;
+                    tr.n_inputs = 3;
+                    instance->trace.push_back(tr);
+                }
                 /* BF6_SELECT_DEBUG=<hex dst slot>: this record picks between two
                  * sources on a flag, so a destination stuck at one value means the
                  * FLAG never changed, not that the value was miscomputed. Printing the
@@ -1056,9 +1065,14 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 if (source.region == 2) slots.copy(source.offset, output->offset, width);
                 else slots.write(output->offset, width, value);
                 last_written = value;
-                if (instance && instance->trace_records)
-                    instance->trace.push_back({record.offset, 0u, output->offset, width,
-                                               value.known});
+                if (instance && instance->trace_records) {
+                    Instance::TraceRow tr{record.offset, 0u, output->offset, width, value.known};
+                    /* A move's single source, so the backward walk does not stop dead at
+                     * the copies - which is exactly where every hand-trace stalled. */
+                    tr.inputs[0] = source.offset;
+                    tr.n_inputs = 1;
+                    instance->trace.push_back(tr);
+                }
             } else if (!width) {
                 result.diagnostics.push_back("unmeasured move width withheld");
                 last_written.tainted = true;
@@ -1358,6 +1372,23 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                             instance->trace.push_back({record.offset, record.operator_key,
                                                        call.output->offset,
                                                        signature.output_width, value.known});
+                    }
+                    /* STAMP THE INPUT SLOTS onto every row this record just produced, so
+                     * a value can be explained by walking backward mechanically rather
+                     * than by hand. Scanning back while the record matches avoids
+                     * threading a mark through each push site. */
+                    if (instance && instance->trace_records) {
+                        uint32_t in[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+                        uint8_t n = 0;
+                        for (size_t i = 0; i < call.inputs.size() && n < 8; ++i)
+                            if (call.inputs[i]) in[n++] = call.inputs[i]->offset;
+                        const bool trunc = call.inputs.size() > 8;
+                        for (size_t i = instance->trace.size(); i-- > 0;) {
+                            if (instance->trace[i].record_offset != record.offset) break;
+                            std::memcpy(instance->trace[i].inputs, in, sizeof in);
+                            instance->trace[i].n_inputs = n;
+                            instance->trace[i].inputs_truncated = trunc;
+                        }
                     }
                 } else {
                     if (instance && instance->trace_records) {

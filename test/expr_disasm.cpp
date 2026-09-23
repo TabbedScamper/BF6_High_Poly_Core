@@ -1054,6 +1054,21 @@ int main(int argc, char** argv)
         std::printf("\n");
     }
 
+    /* BF6_REC_HEX=<start>:<end>: the raw record bytes over a byte range, as dwords.
+     * Every conclusion about which staging slot a config lands in rests on the parser's
+     * operand decode, and the parser is the thing under suspicion, so there has to be a
+     * way to read the bytes without it. */
+    if (const char* rh = std::getenv("BF6_REC_HEX")) {
+        unsigned long a = std::strtoul(rh, nullptr, 0), b = a + 64;
+        if (const char* colon = std::strchr(rh, ':')) b = std::strtoul(colon + 1, nullptr, 0);
+        std::printf("\n--- raw record bytes %lu..%lu ---\n", a, b);
+        for (unsigned long at = a; at + 4 <= b && at + 4 <= g.record_region.size(); at += 4) {
+            uint32_t u = 0;
+            std::memcpy(&u, g.record_region.data() + at, 4);
+            std::printf("  %6lu  +%-3lu  0x%08X  %u\n", at, at - a, u, u);
+        }
+    }
+
     /* The program. */
     std::printf("\n--- records ---\n");
     for (size_t i = 0; i < g.records.size(); ++i) {

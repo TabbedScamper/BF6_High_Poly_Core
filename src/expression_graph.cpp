@@ -591,6 +591,7 @@ bool parse(const uint8_t* data, size_t size, Graph& out, std::string& error,
 
     std::map<uint32_t, uint32_t> key_by_offset;
     const uint8_t* region = data + out.region_base;
+    out.record_region.assign(region, region + record_bytes);
     for (uint32_t i = 0; i < h.fixup_count; ++i) {
         const size_t at = out.fixup_table + (size_t)i * 8;
         Fixup f{u32(data + at), u32(data + at + 4)};

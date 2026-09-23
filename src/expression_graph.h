@@ -98,6 +98,9 @@ struct Graph {
     std::vector<Relocation> relocations;
     std::vector<Fixup> fixups;
     std::vector<Record> records;
+    /* The record region verbatim. The operand decode is the thing most often in
+     * doubt, so the bytes it was derived from stay available to check against. */
+    std::vector<uint8_t> record_region;
     std::vector<uint8_t> instance_image;
 
     // True only when the proven per-kind lengths (including a constrained

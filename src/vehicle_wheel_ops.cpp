@@ -1322,10 +1322,19 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             hull_dw_[i] += s.w[i] - before.w[i];
         }
         hull_ran_ = true;
+        /* THE OUTPUT ORDER IS THE REGISTRY'S. The executable names this operator
+         * (DeltaTime, HullConfig, SimulationConfig, WaterPlane, SecondWaterPlane,
+         * SecondWaterPlaneTickDifference, WavesCanAffectBoatHorizontally,
+         * UnderWaterRatio, LinearAccelerationOut, AngularAccelerationOut), so its
+         * three outputs come in that order - and the VM's primary is the LAST
+         * operand, which makes the primary the ANGULAR one. These were the other way
+         * round, which fed the hull's linear force in as torque and its torque in as
+         * force: the boat tumbled, and suppressing the hull's torque was what made
+         * the tumble stop. */
         out.bytes.assign(16 + 4 + 16, 0);
-        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.v[i] - before.v[i]) / dt);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
         wf(out.bytes, 16, wet_norm > 0.0f ? wet_sum / wet_norm : 0.0f);
-        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(20 + 4 * i), (s.w[i] - before.w[i]) / dt);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(20 + 4 * i), (s.v[i] - before.v[i]) / dt);
         out.known = true;
         if (std::getenv("BF6_HULL_DEBUG")) {
             /* THE ONE NUMBER THAT SAYS WHETHER THE SURFACE IS RIGHT. Buoyancy is

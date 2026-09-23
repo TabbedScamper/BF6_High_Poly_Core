@@ -35,6 +35,8 @@ struct Slots {
      * as known - see the note where these are filled. */
     std::set<uint32_t> named_slots;
     std::set<uint32_t> never_written;
+    /* Per byte: whether ANY record's output span can reach it. */
+    std::vector<uint8_t> writable;
 
     /* ARRAY HEAP. Expression arrays are an 8-byte data pointer with the element
      * count at data-4 (research: expression-lerp-array-iteration-and-context-nodes).
@@ -86,8 +88,18 @@ struct Slots {
         v.bytes.assign(bytes.begin() + offset, bytes.begin() + offset + width);
         v.known_bytes.assign(initialized.begin() + offset, initialized.begin() + offset + width);
         v.known = true;
+        /* AND THE SAME RULE PER BYTE. A Vec3 is often assembled lane by lane, and a
+         * lane no record writes stays the buffer's zero - the boat builds three of its
+         * force directions that way, and leaving those lanes unknown refused the
+         * NormalizeFloat3 above them and took three applyForce calls with it. A byte
+         * counts as unwritable only if it falls outside every record's output span,
+         * which is bounded generously below, so this under-claims rather than over. */
+        for (uint32_t i = 0; i < width; ++i)
+            if (!initialized[offset + i] && offset + i < writable.size() &&
+                !writable[offset + i])
+                v.known_bytes[i] = 1;
         for (uint32_t i = 0; i < width; ++i) {
-            const bool byte_known = initialized[offset + i] != 0;
+            const bool byte_known = v.known_bytes[i] != 0;
             v.known = v.known && byte_known;
             v.tainted = v.tainted || !byte_known;
             v.tainted = v.tainted || tainted[offset + i] != 0;
@@ -676,6 +688,26 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
             if (op.region == 2) slots.named_slots.insert(op.offset);
     for (uint32_t off : slots.named_slots)
         if (!written_slots.count(off)) slots.never_written.insert(off);
+    /* The byte-level version of the same fact. A record's output span is taken as
+     * sixteen bytes from its offset, or its move width where the record states one,
+     * which over-covers rather than under-covers the bytes a write can reach - so a
+     * byte left outside every span really is one nothing writes. */
+    slots.writable.assign(slots.bytes.size(), 0);
+    for (const Record& rec : graph.records) {
+        const uint32_t mw = move_width(rec);
+        auto cover = [&](uint32_t off, uint32_t w) {
+            for (uint32_t i = 0; i < w && off + i < slots.writable.size(); ++i)
+                slots.writable[off + i] = 1;
+        };
+        if (rec.counted_lists) {
+            for (uint32_t o = rec.n_in; o < (uint32_t)rec.n_in + rec.n_out &&
+                                        o < rec.operands.size(); ++o)
+                if (rec.operands[o].region == 2) cover(rec.operands[o].offset, 272);
+            continue;
+        }
+        for (const Operand& op : rec.operands)
+            if (op.region == 2) cover(op.offset, mw > 16 ? mw : 272);
+    }
 
     std::map<uint32_t, unsigned> back_edges;   /* record offset -> times its back-edge ran */
     const unsigned kMaxLoop = 1024;

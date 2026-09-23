@@ -1074,9 +1074,12 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
         out.known = true;
         if (std::getenv("BF6_ROTOR_DEBUG"))
-            std::fprintf(stderr, "rotor: throttle %g collective %g power %g -> dv %.2f %.2f %.2f\n",
-                         throttle, collective, power, (s.v[0] - before.v[0]) / dt,
-                         (s.v[1] - before.v[1]) / dt, (s.v[2] - before.v[2]) / dt);
+            std::fprintf(stderr, "rotor: throttle %g pitch %g roll %g point (%.2f %.2f %.2f)"
+                                 " -> dv %.2f %.2f %.2f dw %.2f %.2f %.2f\n",
+                         throttle, pitch, roll, point[0], point[1], point[2],
+                         (s.v[0] - before.v[0]) / dt, (s.v[1] - before.v[1]) / dt,
+                         (s.v[2] - before.v[2]) / dt, (s.w[0] - before.w[0]) / dt,
+                         (s.w[1] - before.w[1]) / dt, (s.w[2] - before.w[2]) / dt);
         return true;
     }
     if (key == kTerrainAt) {

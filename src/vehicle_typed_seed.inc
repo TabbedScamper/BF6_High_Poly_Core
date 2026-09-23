@@ -176,7 +176,26 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
          * one somebody else's gear and torque curves, and both lost a third of their
          * top speed while the tank stopped leaving the start line. Where the counts
          * disagree the graph's own pool is left exactly as authored, which is what
-         * the vehicles had before any of this. */
+         * the vehicles had before any of this.
+         *
+         * TWO WAYS OF GUESSING THE PAIRING HAVE BEEN TRIED AND BOTH FAILED THEIR
+         * REGRESSION, so neither is worth a third attempt without new evidence:
+         *
+         *   1. Seed only the slots whose pool source is empty - all zero or all
+         *      -666666, the engine's unset marker - and pair those with the values in
+         *      order. A car has eleven such slots and eleven unclaimed values, so the
+         *      counts agree and it seeds; the result is flyer60 down from 33.57 m/s to
+         *      22.18 and every tank stationary. An empty pool slot does NOT imply that
+         *      one of this resource's values belongs in it.
+         *   2. As above, but first MATCH each authored slot to the value that equals
+         *      it field for field and only pair the leftovers, refusing the group if
+         *      any authored slot matches nothing. Same regression, for the same
+         *      reason: the eleven empty slots are simply not the eleven values.
+         *
+         * What that rules out is the whole family of count-based pairings. The link,
+         * if it exists, is something neither side's ORDER nor its ARITY carries -
+         * plausibly a name or an index on the value that this reader does not surface
+         * yet. Until that turns up, a group whose counts disagree stays untouched. */
         if (vals.size() != grp.offsets.size()) {
             if (dbg)
                 std::fprintf(stderr, "  %zu value(s) for %zu slot(s): the pool is left alone\n",

@@ -85,6 +85,7 @@ const uint32_t kMotionDamping = 0x9EB2D5CEu;
  * is the height, with the point on the terrain as the extra before it. */
 const uint32_t kHeliRotor = 0x76A51E81u;   /* simulateHelicopterEngine */
 const uint32_t kJetEngine = 0x4D6E60D6u;   /* simulateJetEngine, native 0x1443E6320 */
+const uint32_t kTailRotor = 0x717170A5u;   /* the tail rotor, kernel FUN_1443ECAE0 */
 const uint32_t kTerrainAt = 0xD7D1BAB3u;
 const uint32_t kStructBuild = 0x8B226FBBu;
 const uint32_t kStructBuildLead = 4;   /* type, count, offsets, views - then the fields */
@@ -819,6 +820,13 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.extra_output_widths = {16};
         out.output_width = 16;
         return true;
+    case kTailRotor:
+        /* dt, Rpm, Throttle, ForceDirection, ForcePositionOffset, Config
+         * -> linear then angular acceleration. The config's last byte read is 0xA5. */
+        out.input_widths = {4, 4, 4, 16, 16, 0xA8};
+        out.extra_output_widths = {16};
+        out.output_width = 16;
+        return true;
     case kTerrainAt:
         out.input_widths = {16};
         out.extra_output_widths = {16};
@@ -1030,6 +1038,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         {kWaterHeightAt, 1},
         {kMotionDamping, 5},
         {kJetEngine, 7},
+        {kTailRotor, 6},
     };
     for (const auto& m : kMinIn)
         if (m.key == key && a.size() < m.min_in) {
@@ -1037,6 +1046,138 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kTailRotor) {
+        /* The TAIL ROTOR, kernel FUN_1443ECAE0 under wrapper FUN_1443E5400.
+         *
+         * THE DIRECTION NEEDS NO DECIDING, which is what makes this one safe to serve.
+         * The kernel applies the force along the `ForceDirection` OPERAND as given -
+         * no unary negation, no basis column, no gating on a dot product. The three
+         * basis columns in the state block are dotted with the velocity for an
+         * airspeed MAGNITUDE only; they scale the thrust through the advance-ratio
+         * term and never steer it. So the axis is the graph's own, and the one way to
+         * get a tail rotor catastrophically wrong - a sign that doubles the yaw
+         * instead of cancelling it - is not a choice this host has to make.
+         *
+         * Its only transform is a degenerate-input fallback: a direction shorter than
+         * 0.99 is replaced by the unit lane named at config 0x98.
+         *
+         * ITS CONFIG OFFSETS ARE NOT VERIFIED, AND SO IT CURRENTLY PRODUCES EXACTLY
+         * ZERO. Read this before trusting anything below. Dumping the real ah64e
+         * config showed the offsets the study gave lie outside the part of the struct
+         * that holds data:
+         *
+         *   - THE STRIDE IS 0xA8, measured rather than assumed: the whole layout
+         *     repeats there (0x04 and 0xB4 both 1.7; 0x38 and 0xD8 both 1000). So
+         *     everything the study placed at 0x8C, 0x94, 0x98, 0x9C and 0xA0 sits in
+         *     the dead tail of one instance, and every one of them reads zero.
+         *   - -666666 IS A SENTINEL for an unset curve key: a 15-float run at
+         *     0x48..0x84 is entirely filled with it, so THIS airframe's rpm curve has
+         *     no keys at all and a table read there is a no-op by authoring.
+         *   - The real data sits at 0x04 and 0x08 (1.7 and -8.94, the second negative,
+         *     which is the shape of a yaw gain) and 0x38..0x44 (1000, 9800, 2000,
+         *     9000, the shape of two ranges).
+         *
+         * So the gain is among those, not at 0x8C. Until that is settled from the
+         * listing this operator claims its key and contributes nothing, which is why
+         * no helicopter's numbers move because of it. It is kept because the DIRECTION
+         * question above IS settled and worth not re-deriving, and because the debug
+         * below prints the real config. What it must not be mistaken for is a served
+         * tail rotor.
+         *
+         * THE MAGNITUDE, transcribed, but see the warning above:
+         *
+         *     thr   = Throttle, but zero when config 0xA5 is clear and Throttle <= 0
+         *     curve = interp15(Rpm, config + 0x10)          15 pairs, 0x10..0x88
+         *     gmin  = clamp(config 0x9C, 0, 1)
+         *     adv   = min((3.6 / config 0x94) * airspeed, 1)
+         *     F     = fade * (1 - adv * (1 - gmin)) * 0.5 * curve * thr * config 0x8C
+         *
+         * so thrust falls off with forward speed towards the floor `gmin` - the
+         * advance ratio of a real tail rotor.
+         *
+         * ONE STAND-IN, the same one the jet has and marked the same way: the fade
+         * compares the body's height against (hostScalar + config 0xA0) and hostScalar
+         * is FUN_140E332A0, whose own fallback path returns 1000.0. The table it would
+         * otherwise read is in no listing, so the listing's own constant is used. It
+         * only ever REDUCES thrust with height, and below that datum the fade is
+         * exactly 1, which is every altitude these tests reach.
+         *
+         * The airspeed is |velocity| here: the kernel forms it by pushing the velocity
+         * through the three columns, which is a rotation and so preserves length, save
+         * for the one scale factor every column carries. */
+        const float dt = rf(a[0], 0);
+        if (!(dt > 0.0f)) return false;
+        const Value& cfg = a[5];
+        if (cfg.bytes.size() < 0xA8) return false;   /* widened while probing */
+        auto c = [&](uint32_t at) { return rf(cfg, at); };
+
+        float dir[4] = {rf(a[3], 0), rf(a[3], 4), rf(a[3], 8), rf(a[3], 12)};
+        if (dir[1] * dir[1] + dir[0] * dir[0] + dir[2] * dir[2] < 0.99f) {
+            dir[0] = dir[1] = dir[2] = dir[3] = 0.0f;
+            uint32_t lane = 0;
+            std::memcpy(&lane, cfg.bytes.data() + 0x98, 4);
+            if (lane < 4) dir[lane] = 1.0f;
+        }
+
+        const float spd = std::sqrt(body_.v[0] * body_.v[0] + body_.v[1] * body_.v[1] +
+                                    body_.v[2] * body_.v[2]);
+        float thr = rf(a[2], 0);
+        if (cfg.bytes[0xA5] == 0 && thr <= 0.0f) thr = 0.0f;
+        const float curve = table15(cfg, 0x10, 15, rf(a[1], 0));
+        float gmin = c(0x9C);
+        if (gmin <= 0.0f) gmin = 0.0f;
+        if (1.0f <= gmin) gmin = 1.0f;
+        float adv = c(0x94) != 0.0f ? (3.6f / c(0x94)) * spd : 0.0f;
+        if (1.0f <= adv) adv = 1.0f;
+
+        const float host_scalar = 1000.0f;          /* the listing's own fallback */
+        const float datum = host_scalar + c(0xA0);
+        const float ref = datum + 50.0f;
+        const float alt = body_.pos[1];
+        float gf = 1.0f;
+        if (0.0f <= alt - datum) gf = (ref - alt) * 0.02f;
+        float fade = 0.0f;
+        if (alt - ref < 0.0f) fade = gf;
+
+        const float F = fade * (1.0f - adv * (1.0f - gmin)) * 0.5f * curve * thr * c(0x8C);
+
+        Snapshot s;
+        s.mass = body_.mass;
+        s.inv_mass = body_.mass != 0.0f ? 1.0f / body_.mass : 0.0f;
+        std::memcpy(s.v, body_.v, 16);
+        std::memcpy(s.w, body_.w, 16);
+        std::memcpy(s.com, body_.com, 16);
+        std::memcpy(s.inv_i, body_.inv_inertia, 16);
+        const Snapshot before = s;
+        std::vector<ForceRecord> recs;
+        if (body_.mass * 0.01f <= std::fabs(F) && cfg.bytes[0xA4] == 0) {
+            ForceRecord r{};
+            for (int i = 0; i < 3; ++i) {
+                r.f[i] = F * dir[i] * dt * force_scale;
+                r.p[i] = rf(a[4], 4 * i) + c(4 * (uint32_t)i);
+            }
+            if (finite3(r.f) && finite3(r.p)) recs.push_back(r);
+        }
+        apply_all(s, recs);
+        out.bytes.assign(32, 0);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
+        for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
+        out.known = true;
+        if (std::getenv("BF6_ROTOR_DEBUG"))
+            std::fprintf(stderr,
+                         "tail: rpm %g curve %g thr %g spd %g adv %g gmin %g gain %g F %g"
+                         " dir (%.3f %.3f %.3f) -> dw %.3f %.3f %.3f\n",
+                         rf(a[1], 0), curve, thr, spd, adv, gmin, c(0x8C), F,
+                         dir[0], dir[1], dir[2], (s.w[0] - before.w[0]) / dt,
+                         (s.w[1] - before.w[1]) / dt, (s.w[2] - before.w[2]) / dt);
+        if (std::getenv("BF6_TAILCFG_DEBUG")) {
+            std::fprintf(stderr, "tailcfg size %zu nonzero:", cfg.bytes.size());
+            for (uint32_t at = 0; at + 4 <= (uint32_t)cfg.bytes.size(); at += 4)
+                if (c(at) != 0.0f) std::fprintf(stderr, " %X=%g", at, c(at));
+            std::fprintf(stderr, "\n");
+        }
+        return true;
+    }
     if (key == kJetEngine) {
         /* FUN_1443E6320 (the wrapper) and FUN_1443EBC50 (the worker), transcribed.
          *
@@ -2418,7 +2559,11 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         return true;
     }
     if (key != kTyreForce || a.size() < 13 || !g_table_ok) return false;
-    const float dt = rf(a[0], 0), steer = rf(a[1], 0), brake = rf(a[2], 0), torque = rf(a[3], 0);
+    const float dt = rf(a[0], 0), steer = rf(a[1], 0), torque = rf(a[3], 0);
+    /* BF6_NO_WHEEL_BRAKE=1 forces the brake operand to zero. DIAGNOSTIC ONLY: the
+     * aircraft graphs hand this operator brake = 1 on every gear even when the host
+     * sends no brake at all, so this measures what that costs them. */
+    const float brake = std::getenv("BF6_NO_WHEEL_BRAKE") ? 0.0f : rf(a[2], 0);
     const Value& C = a[4];
     const Value& W = a[12];
     /* an unwritten flag byte is "no contact" (see kTyre) */
@@ -2443,6 +2588,9 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     sl.angle_sum = rf(a[9], 0);
 
     float slip_ratio = 0.0f, slip_angle = 0.0f, f_long = 0.0f, f_lat = 0.0f;
+    /* captured AT THE CALL, because reading them back at the end of the operator gave
+     * two wheels identical inputs and twenty-fold different slip, which is impossible */
+    float dbg_omega_used = 0.0f, dbg_radius_used = 0.0f, dbg_vlong_used = 0.0f;
     std::vector<ForceRecord> recs;
     /* ---- FUN_1443EFCB0 ---- */
     if (!contact) {
@@ -2457,6 +2605,9 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         float n[4];
         for (int i = 0; i < 4; ++i) n[i] = rf(C, CT_NORMAL + 4 * i);
         tyre_frame(rf(W, WC_RADIUS), steer, sl.omega, n, st, &slip_angle, &slip_ratio);
+        dbg_omega_used = sl.omega;
+        dbg_radius_used = rf(W, WC_RADIUS);
+        dbg_vlong_used = st.v_long;
         run_sum(sl.angle_sum, sl.angle_window, slip_angle);
         run_sum(sl.ratio_sum, sl.ratio_window, slip_ratio);
     }
@@ -2578,6 +2729,18 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     wf(out.bytes, at, slip_ratio); at += 4;
     wf(out.bytes, at, slip_angle);
     out.known = true;
+    /* BF6_TYRE_IN_DEBUG: the tyre's own INPUTS next to what it made of them. The
+     * outputs alone cannot say why a wheel brakes - a brake the graph applied, a drive
+     * torque that never arrives and a contact that is not there all look the same from
+     * outside. */
+    if (std::getenv("BF6_TYRE_IN_DEBUG"))
+        std::fprintf(stderr,
+                     "tyre: omega IN %.6g USED %.6g OUT %.6g | contact %d brake %g"
+                     " torque %g r %.6g v_long %.6g rolling %.6g | slip %.6g f_long %g\n",
+                     rf(a[6], 0), dbg_omega_used, sl.omega, contact ? 1 : 0, brake,
+                     torque, dbg_radius_used, dbg_vlong_used,
+                     dbg_radius_used != 0.0f ? dbg_vlong_used / dbg_radius_used : 0.0f,
+                     slip_ratio, f_long);
     return true;
 }
 

@@ -1219,6 +1219,28 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     args.push_back(materialize(graph, instance, slots,
                                                *call.inputs[i],
                                                signature.input_widths[i]));
+                /* BF6_OP_INPUTS=<hex key>: every call of that operator, with each
+                 * input's region, slot, first float, and - the point of it - whether
+                 * the slot is one NO record writes. A state input on such a slot reads
+                 * a known zero for ever, which looks exactly like a physical result
+                 * (a wheel that never turns) rather than a wiring fault. */
+                if (const char* want = std::getenv("BF6_OP_INPUTS")) {
+                    const uint32_t k = (uint32_t)std::strtoul(want, nullptr, 16);
+                    if (k == record.operator_key) {
+                        std::fprintf(stderr, "op %08X rec 0x%X inputs:", k, record.offset);
+                        for (size_t i = 0; i < call.inputs.size(); ++i) {
+                            float g = 0.0f;
+                            if (args[i].bytes.size() >= 4)
+                                std::memcpy(&g, args[i].bytes.data(), 4);
+                            const bool r2 = call.inputs[i]->region == 2;
+                            const bool nw = r2 && slots.never_written.count(call.inputs[i]->offset);
+                            std::fprintf(stderr, " [%zu]r%u+0x%X=%g%s", i,
+                                         call.inputs[i]->region, call.inputs[i]->offset, g,
+                                         nw ? " NOBODY-WRITES" : "");
+                        }
+                        std::fprintf(stderr, "\n");
+                    }
+                }
                 if (record.operator_key == 0x9afb0561u && std::getenv("BF6_MOVE_DEBUG")) {
                     std::fprintf(stderr, "curve call @%u:", record.offset);
                     for (size_t i = 0; i < call.inputs.size(); ++i)

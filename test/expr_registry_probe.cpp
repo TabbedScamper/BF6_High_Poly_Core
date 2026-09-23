@@ -28,6 +28,8 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -256,6 +258,45 @@ int main(int argc, char** argv)
         std::printf("registry: %s\n", err.c_str()); return 1;
     }
     std::printf("%zu reflected descriptors\n\n", refl.size());
+
+    /* BF6_DESC_KEYS=k1,k2,...: dump each listed operator's descriptor as qwords,
+     * marking the ones that point into a section, so the current build's
+     * implementation address can be read off rather than taken from a table made
+     * against another build. */
+    if (const char* ks = std::getenv("BF6_DESC_KEYS")) {
+        std::vector<uint32_t> want;
+        for (const char* p = ks; *p;) {
+            want.push_back((uint32_t)std::strtoul(p, nullptr, 16));
+            const char* c = std::strchr(p, ',');
+            if (!c) break;
+            p = c + 1;
+        }
+        auto sec_of = [&](uint64_t va) -> std::string {
+            if (va < base) return std::string();
+            for (const auto& s : secs)
+                if (va >= base + s.va && va < base + s.va + s.virtual_size)
+                    return s.name;
+            return std::string();
+        };
+        for (uint32_t k : want) {
+            bool found = false;
+            for (const auto& r : refl) {
+                if (r.key != k) continue;
+                found = true;
+                std::printf("KEY 0x%08X desc 0x%llX params %u ns '%s'\n", k,
+                            (unsigned long long)r.descriptor_va, r.parameter_count,
+                            r.name_space.c_str());
+                const int64_t desc = va_to_file(r.descriptor_va, base, secs, d.size());
+                for (int q = 0; q < 16 && desc >= 0; ++q) {
+                    const uint64_t v = rd64(d, (size_t)desc + (size_t)q * 8);
+                    std::printf("   +0x%02X  0x%016llX  %s\n", q * 8,
+                                (unsigned long long)v, sec_of(v).c_str());
+                }
+            }
+            if (!found) std::printf("KEY 0x%08X not in the reflected set\n", k);
+        }
+        return 0;
+    }
 
     /* ---- enumerate routes ---- */
     std::vector<Route> routes;

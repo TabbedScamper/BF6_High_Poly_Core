@@ -1,0 +1,27 @@
+Manual build for locostance_runtime_probe.cpp
+=============================================
+
+NOT a CMake target on purpose: core/CMakeLists.txt currently carries unrelated
+uncommitted gamemode work, and adding an entry would mean editing that file.
+Make it a real target once that work lands.
+
+From a VS 2026 x64 developer prompt, with the core already built once so the
+import library exists:
+
+  cl /nologo /std:c++17 /EHsc /W3 /O2 /DNDEBUG ^
+     /I C:\BF6_Dev\bf6-portal-highpoly-preview\core\include ^
+     C:\BF6_Dev\bf6-portal-highpoly-preview\core\test\locostance_runtime_probe.cpp ^
+     /Fe:probe\locostance_runtime_probe.exe /Fo:probe\ ^
+     /link /LIBPATH:C:\BF6_Dev\bf6-portal-highpoly-preview\core\build-verify-20260920\Release bf6_core.lib
+
+Then copy bf6_core.dll from that same Release directory next to the exe.
+
+Usage:
+  locostance_runtime_probe <game> [item] [root-asset] [sweep]
+
+  locostance_runtime_probe "<game>" carbine/m4a1
+  locostance_runtime_probe "<game>" carbine/m4a1 animations/glacier/controllers/1p.loco.idle.slc
+  locostance_runtime_probe "<game>" carbine/m4a1 animations/glacier/controllers/1p.loco.run.slc sweep
+
+Note the stance root is under GLACIER, not Kingston:
+  animations/glacier/controllers/1p.locostance.slc

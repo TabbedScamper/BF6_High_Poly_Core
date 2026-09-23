@@ -26,8 +26,8 @@
  *   MP_GolmudRailway conquest        12 capture polygons (five authored pairs
  *                                    plus two singles; the builder merges them)
  *   MP_Contaminated  breakthrough    11 capture polygons (the game plays ten)
- *   MP_Isolated      gems            the probe's 34 hand-built vehicle spots:
- *                                    at least 20 must have a gem within 15 m
+ *   MP_Isolated      conquest        40 game-authored gem_vehiclespawner rows,
+ *                                    using selectors 0,1,4,5,7,8,9,11-14
  * The census per mode is printed so the count can be compared against the
  * GDScript miner's numbers for the same map. */
 #include <algorithm>
@@ -36,6 +36,7 @@
 #include <cstring>
 #include <ctime>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include "bf6_core.h"
@@ -64,20 +65,6 @@ static const char* role_name(int r)
 }
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
-
-/* Andy's hand-built MP_Isolated_Conquest.tscn vehicle spots (probe_vehiclespawner.gd,
- * extracted 2026-09-02): game-space x, z. */
-static const float kIsolatedVehicleRef[][2] = {
-    {-99.5f, 1017.2f}, {-98.7f, 1025.6f}, {-8.5f, 1006.0f}, {-98.9f, 1033.7f},
-    {-8.8f, 1023.2f}, {-98.9f, 1009.5f}, {-14.1f, 991.5f}, {-47.8f, 1068.4f},
-    {-43.3f, 863.9f}, {-44.3f, 899.5f}, {-44.3f, 922.3f}, {-46.6f, 940.1f},
-    {-613.9f, -943.9f}, {-615.2f, -952.3f}, {-695.4f, -923.1f}, {-615.6f, -960.3f},
-    {-700.6f, -932.8f}, {-614.0f, -936.2f}, {-688.9f, -909.0f}, {-668.2f, -984.8f},
-    {-635.6f, -785.5f}, {-639.7f, -828.3f}, {-637.3f, -806.9f}, {-682.3f, -955.6f},
-    {-209.8f, -259.1f}, {-217.4f, 405.8f}, {-279.5f, -129.3f}, {-308.7f, 154.4f},
-    {-422.0f, 455.4f}, {-227.3f, -382.4f}, {-576.6f, -126.6f}, {-596.0f, -22.7f},
-    {-509.7f, 270.7f}, {-400.9f, -326.3f},
-};
 
 struct Oracle { const char* level; const char* mode; int captures; };
 static const Oracle kOracles[] = {
@@ -137,6 +124,12 @@ int main(int argc, char** argv)
         int bad_planar = 0, bad_yaw = 0, bad_link = 0, own_xf = 0, gem_own_xf = 0, gem_rows = 0, gem_team = 0;
         std::map<int, int> gem_teams, gem_values;
         float worst_span = 0.f, worst_up = 0.f;
+        int isolated_conquest_vehicle_gems = 0;
+        int isolated_selector_min = 1000000, isolated_selector_max = -1000000;
+        std::map<int, int> isolated_selectors;
+        int isolated_capture_gems = 0, isolated_capture_shapes = 0;
+        std::vector<int> isolated_hq_order, isolated_capture_order;
+        std::set<int> isolated_root_order;
         for (const bf6_gm_entity& e : rows) {
             per[e.mode ? e.mode : "?"][e.kind]++;
             if (e.has_own_transform) own_xf++;
@@ -146,6 +139,25 @@ int main(int argc, char** argv)
                 if (e.team) gem_team++;
                 gem_teams[e.team]++; gem_values[e.gem_value]++;
                 link_words[e.gem_link ? (*e.gem_link ? e.gem_link : "(none)") : "(null!)"]++;
+                if (lvl == "mp_isolated" && std::strcmp(e.mode ? e.mode : "", "conquest") == 0 &&
+                    std::strcmp(e.gem_link ? e.gem_link : "", "gem_vehiclespawner") == 0) {
+                    isolated_conquest_vehicle_gems++;
+                    isolated_selector_min = std::min(isolated_selector_min, e.gem_value);
+                    isolated_selector_max = std::max(isolated_selector_max, e.gem_value);
+                    isolated_selectors[e.gem_value]++;
+                }
+                if (lvl == "mp_isolated" && std::strcmp(e.mode ? e.mode : "", "conquest") == 0 &&
+                    std::strcmp(e.gem_link ? e.gem_link : "", "gem_capturepoint") == 0) {
+                    isolated_capture_gems++;
+                    isolated_capture_order.push_back(e.root_order);
+                    if (e.gem_shape && e.gem_shape_property == 0x5C3A072Bu)
+                        isolated_capture_shapes++;
+                }
+                if (lvl == "mp_isolated" && std::strcmp(e.mode ? e.mode : "", "conquest") == 0) {
+                    if (e.root_order >= 0) isolated_root_order.insert(e.root_order);
+                    if (std::strcmp(e.gem_link ? e.gem_link : "", "gem_hq") == 0)
+                        isolated_hq_order.push_back(e.root_order);
+                }
             }
             if (e.kind == BF6_GM_VOLUME) {
                 if (e.point_count < 3) bad_planar++;
@@ -191,6 +203,32 @@ int main(int argc, char** argv)
             std::printf("      values:"); for (const auto& kv : gem_values) std::printf(" %d x%d", kv.first, kv.second); std::printf("\n");
             ck("every gem carries a transform of its own", gem_own_xf == gem_rows);
             ck("no gem link is NULL (a gem must read as a gem)", link_words.count("(null!)") == 0);
+            if (lvl == "mp_isolated") {
+                std::printf("      MP_Isolated conquest vehicle selectors: min %d max %d\n",
+                            isolated_selector_min, isolated_selector_max);
+                std::printf("      selector census:");
+                for (const auto& kv : isolated_selectors) std::printf(" %d x%d", kv.first, kv.second);
+                std::printf("\n");
+                ck("MP_Isolated Conquest has 40 game-authored vehicle spawners",
+                   isolated_conquest_vehicle_gems == 40);
+                const std::map<int, int> expected_selectors = {
+                    {0, 2}, {1, 2}, {4, 2}, {5, 2}, {7, 4}, {8, 6}, {9, 3},
+                    {11, 10}, {12, 1}, {13, 4}, {14, 4}
+                };
+                ck("MP_Isolated vehicle selector census matches shipped data",
+                   isolated_selectors == expected_selectors);
+                ck("all 9 capture GEMs bind their game-authored vector shape",
+                   isolated_capture_gems == 9 && isolated_capture_shapes == 9);
+                std::sort(isolated_hq_order.begin(), isolated_hq_order.end());
+                std::sort(isolated_capture_order.begin(), isolated_capture_order.end());
+                ck("MP_Isolated HQ order is preserved from root Objects[]",
+                   isolated_hq_order == std::vector<int>({1, 2}));
+                ck("MP_Isolated capture order is preserved from root Objects[]",
+                   isolated_capture_order == std::vector<int>({3, 4, 5, 6, 7, 44, 45, 69, 70}));
+                ck("all 94 MP_Isolated Conquest GEMs have unique root order",
+                   isolated_root_order.size() == 94 && *isolated_root_order.begin() == 0 &&
+                   *isolated_root_order.rbegin() == 93);
+            }
         }
 
         /* ---- the layout, per mode ---- */
@@ -198,8 +236,6 @@ int main(int argc, char** argv)
                     "layout", "objs", "capture", "zone", "combat", "spawn", "veh", "resup", "mcom", "bomb", "spec", "slot", "unlnk");
         int ground_n = 0, ground_far = 0; float ground_med = 0.f;
         std::vector<float> ground_dy;
-        int isolated_ref_hits = -1;
-        std::vector<float> ref_best(sizeof(kIsolatedVehicleRef) / sizeof(kIsolatedVehicleRef[0]), 1e9f);
         for (const auto& m : per) {
             bf6_gm_layout ls{};
             err[0] = 0;
@@ -229,18 +265,6 @@ int main(int argc, char** argv)
                     if (bf6_level_gamemode_ground(ctx, level, xz, 1, &y, &wy, err, sizeof(err)) == 1 && y > -1e8f)
                         ground_dy.push_back(std::fabs(e.xform[10] - y));
                 }
-            if (lvl == "mp_isolated") {
-                isolated_ref_hits = 0;
-                for (size_t ri = 0; ri < ref_best.size(); ri++) {
-                    const float* ref = kIsolatedVehicleRef[ri];
-                    for (const bf6_gm_object& o : objs) {
-                        if (o.gem_link == nullptr) continue;
-                        const bf6_gm_entity& e = rows[(size_t)o.entity];
-                        const float dx = e.xform[9] - ref[0], dz = e.xform[11] - ref[1];
-                        ref_best[ri] = std::min(ref_best[ri], std::sqrt(dx * dx + dz * dz));
-                    }
-                }
-            }
             /* a few rows per mode so a human can eyeball them */
             int shown = 0;
             for (const bf6_gm_object& o : objs) {
@@ -263,14 +287,6 @@ int main(int argc, char** argv)
             std::printf("   ground under %d spawn(s): median |dy| %.2f m, p90 %.2f m, %d over 10 m\n", ground_n, ground_med, p90, ground_far);
             ck("spawns stand on the sampled terrain (median under 3 m)", ground_med < 3.f);
         } else std::printf("   no heightfield sampled for %s\n", level);
-        if (isolated_ref_hits >= 0) {
-            std::printf("   hand-built vehicle spots, nearest gem (m):");
-            for (float d : ref_best) { std::printf(" %.0f", d); if (d < 15.f) isolated_ref_hits++; }
-            std::printf("\n");
-            char buf[160];
-            std::snprintf(buf, sizeof(buf), "oracle MP_Isolated gems: %d of 34 hand-built vehicle spots have a gem within 15 m (need 20)", isolated_ref_hits);
-            ck(buf, isolated_ref_hits >= 20);
-        }
         for (int i = 0; i < st.dropped_link_type_count && i < 6; i++) std::printf("   dropped link types: %s\n", st.dropped_link_types[i]);
         if (st.other_type_count) {
             std::printf("   other top-level types on the mode layers (guid count), top %d:\n",

@@ -271,15 +271,43 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             for (const auto& f : lay.fields) {
                 const auto nx = std::upper_bound(sorted_off.begin(), sorted_off.end(), f.offset);
                 const uint32_t end = nx == sorted_off.end() ? lay.size : *nx;
-                if (end - f.offset <= 8) narrow.push_back(f.offset);
+                /* A PACKED BYTE FIELD IS ADDRESSABLE however big its gap looks. The gap
+                 * rule reads a field's width as the distance to the next offset, so the
+                 * LAST field in offset order gets whatever the struct's declared size
+                 * leaves - trailing padding included. On the helicopter rotor config
+                 * (type C5186166, 176 bytes) that rejected a one-byte flag at offset 165
+                 * as an eleven-byte field, leaving 8 addressable fields against 9 calls,
+                 * so the whole placement was abandoned and the gear offsets it carries
+                 * were never patched. Bools pack at byte offsets, so an offset that is
+                 * not four-byte aligned cannot be a wide value and is addressable
+                 * whatever follows it. */
+                const bool packed_byte = (f.offset & 3u) != 0;
+                if (end - f.offset <= 8 || packed_byte) narrow.push_back(f.offset);
             }
             /* More calls than there are addressable fields would mean the order is not
              * what it looks like, so nothing is patched rather than some of it. */
             if (kv.second.size() > narrow.size()) {
-                if (dbg)
+                if (dbg) {
                     std::fprintf(stderr, "seed: slot 0x%X has %zu field calls for %zu"
                                          " addressable field(s): left alone\n",
                                  kv.first, kv.second.size(), narrow.size());
+                    /* WHICH fields the width rule rejected. The rule infers a field's
+                     * width from the GAP to the next offset, so the LAST field's width is
+                     * whatever the struct's declared size leaves - trailing padding
+                     * included - and a four-byte field followed by padding is rejected as
+                     * wide. Two of an ah64e's six placements trip this gate, and what it
+                     * abandons is what rolls the aircraft over, so print the working. */
+                    std::fprintf(stderr, "seed:   type %08X size %u fields(offset:gap):",
+                                 ty->second, (unsigned)lay.size);
+                    for (const auto& f : lay.fields) {
+                        const auto nx = std::upper_bound(sorted_off.begin(), sorted_off.end(),
+                                                         f.offset);
+                        const uint32_t end = nx == sorted_off.end() ? lay.size : *nx;
+                        std::fprintf(stderr, " %u:%u%s", f.offset, end - f.offset,
+                                     (end - f.offset <= 8) ? "" : "(WIDE)");
+                    }
+                    std::fprintf(stderr, "\n");
+                }
                 continue;
             }
             for (size_t i = 0; i < kv.second.size(); ++i)

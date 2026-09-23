@@ -67,6 +67,20 @@ const float kNoWater = -1024.0f;
  * graph both velocities in the body frame already, so that round trip is a no-op and
  * only the pairing matters. It is stated at the call below rather than buried. */
 const uint32_t kMotionDamping = 0x9EB2D5CEu;
+/* FUN_143B254B0: A STRUCT BUILT FROM ITS ARGUMENTS.
+ *
+ * Its i-th argument goes at the i-th entry of an offsets array the loader hands it,
+ * and for a struct that array is the type's own field table. The body also walks an
+ * entity handle, but only to fetch a context word for its copy helpers - the bulk
+ * source is the output type's default, and nothing is read out of a live object. So
+ * this is servable, which an earlier reading of the same body denied.
+ *
+ * The caller measures the field table (the hosts have no type database) and hands it
+ * over keyed by field count, which the record itself states: a helicopter's rotor
+ * config declares fifteen, the record's count constant is 0xF, and the one field wide
+ * enough to need a reference is the one argument passed as a bound register. */
+const uint32_t kStructBuild = 0x8B226FBBu;
+const uint32_t kStructBuildLead = 4;   /* type, count, offsets, views - then the fields */
 
 /* SHARED ACROSS CLASSES, transcribed from the shipped code (studies muse_shared,
  * muse_boat). Small, and each one unblocks more than one class. */
@@ -737,6 +751,14 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {16};
         out.output_width = 4;
         return true;
+    case kStructBuild:
+        /* CLAIMED SO THE CHAIN ROUTES IT HERE. The real shape needs the field count
+         * the record states as a constant, which only describe_call is given, so this
+         * is a routing claim and nothing else: if describe_call cannot find a layout
+         * for that count it refuses, and the VM refuses the call with it. */
+        out.input_widths.assign(kStructBuildLead, 4u);
+        out.output_width = 4;
+        return true;
     case kMotionDamping:
         /* dt, two per-axis coefficient vectors, two maximum lengths -> two
          * accelerations; the primary is the second, as the record's last slot */
@@ -794,6 +816,21 @@ bool WheelOps::describe(uint32_t key, OperatorSignature& out) {
 
 bool WheelOps::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
                              OperatorSignature& out) {
+    if (key == kStructBuild) {
+        /* The second constant is the field count, and the layout is looked up by it. */
+        const BuilderLayout* b = consts.size() >= 2 ? builder_for(consts[1]) : nullptr;
+        if (std::getenv("BF6_BUILD_DEBUG")) {
+            std::fprintf(stderr, "struct build describe_call: %zu const(s)", consts.size());
+            for (uint32_t c : consts) std::fprintf(stderr, " %u", c);
+            std::fprintf(stderr, " -> layout %s\n", b ? "found" : "none");
+        }
+        if (!b || b->widths.size() != consts[1]) return false;
+        out = OperatorSignature{};
+        out.input_widths.assign(kStructBuildLead, 4u);
+        for (uint32_t w : b->widths) out.input_widths.push_back(w);
+        out.output_width = b->size;
+        return true;
+    }
     if (!describe(key, out)) return false;
     /* operands = inputs + outputs (these calls have no context list), so a record with
      * fewer operands than the signature is one that left trailing inputs off. */
@@ -926,6 +963,26 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
+    if (key == kStructBuild) {
+        if (a.size() < kStructBuildLead) return false;
+        const BuilderLayout* b = builder_for(a.size() - kStructBuildLead);
+        if (!b) return false;
+        /* The type's default, which this host cannot read, is taken as zero - so a
+         * field the record does not pass stays zero rather than becoming a guess. */
+        out.bytes.assign(b->size, 0);
+        out.known = true;
+        for (size_t i = 0; i < b->offsets.size(); ++i) {
+            const Value& src = a[kStructBuildLead + i];
+            const uint32_t at = b->offsets[i], w = b->widths[i];
+            if ((size_t)at + w > out.bytes.size() || src.bytes.size() < w) continue;
+            std::memcpy(out.bytes.data() + at, src.bytes.data(), w);
+            if (!src.known) out.known = false;
+        }
+        if (std::getenv("BF6_BUILD_DEBUG"))
+            std::fprintf(stderr, "struct build: %zu field(s) into %u bytes, known %d\n",
+                         b->offsets.size(), b->size, (int)out.known);
+        return true;
+    }
     if (key == kMotionDamping) {
         /* FUN_1443E9D10 through its kernel FUN_1443E7850, line for line. */
         const float dt = rf(a[0], 0);

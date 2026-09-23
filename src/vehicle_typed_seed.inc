@@ -224,6 +224,41 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
         }
     }
 
+    /* THE FIELD TABLE A STRUCT BUILDER NEEDS. 0x8B226FBB writes its i-th argument at
+     * the i-th field of the type it produces, and only this caller can see the type
+     * database, so the table is measured here and handed to the host. The type is the
+     * one declared for the slot the builder writes; the width of each field is the gap
+     * to the next field in OFFSET order, which is what a field occupies. */
+    for (const auto& rec : gr->records) {
+        if (!rec.has_operator || rec.operator_key != 0x8B226FBBu || rec.operands.empty()) continue;
+        uint32_t out_slot = 0;
+        bool have = false;
+        for (auto it = rec.operands.rbegin(); it != rec.operands.rend(); ++it)
+            if (it->region == 2) { out_slot = it->offset; have = true; break; }
+        if (!have) continue;
+        const auto ty = slot_type.find(out_slot);
+        if (ty == slot_type.end()) continue;
+        bf6::TypeGuid g{};
+        if (!ctx->types->guid_by_name_hash(ty->second, g)) continue;
+        const bf6::TypeLayout& lay = ctx->types->layout_full(g);
+        if (!lay.valid || !lay.size || lay.fields.empty()) continue;
+        std::vector<uint32_t> sorted;
+        for (const auto& f : lay.fields) sorted.push_back(f.offset);
+        std::sort(sorted.begin(), sorted.end());
+        bf6::expression::WheelOps::BuilderLayout b;
+        b.size = lay.size;
+        for (const auto& f : lay.fields) {
+            const auto nx = std::upper_bound(sorted.begin(), sorted.end(), f.offset);
+            const uint32_t end = nx == sorted.end() ? lay.size : *nx;
+            b.offsets.push_back(f.offset);
+            b.widths.push_back(end > f.offset ? end - f.offset : 4u);
+        }
+        sim.wheel_ops().set_builder(b);
+        if (dbg)
+            std::fprintf(stderr, "seed: builder for type %08X, %zu field(s), %u bytes\n",
+                         ty->second, b.offsets.size(), b.size);
+    }
+
     size_t written = 0;
     for (const bf6__placement& pl : places) {
         const auto slot = slot_of_pool.find(pl.pool_offset);

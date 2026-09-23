@@ -90,6 +90,22 @@ public:
     }
     static uint32_t curve_handle(size_t index) { return 0xC0DE0000u | (uint32_t)index; }
 
+    /* A STRUCT BUILDER'S FIELD TABLE. 0x8B226FBB writes its i-th argument at the i-th
+     * entry of an offsets array the loader hands it, and for a struct that array is
+     * the type's own field table - which the hosts cannot read, because they have no
+     * type database. So the caller measures it and hands it over, keyed by the field
+     * COUNT, which the record states as a constant. */
+    struct BuilderLayout {
+        uint32_t size = 0;                  /* the struct's own size */
+        std::vector<uint32_t> offsets;      /* per argument, in declaration order */
+        std::vector<uint32_t> widths;       /* per argument */
+    };
+    void set_builder(const BuilderLayout& b) { builders_[b.offsets.size()] = b; }
+    const BuilderLayout* builder_for(size_t count) const {
+        const auto it = builders_.find(count);
+        return it == builders_.end() ? nullptr : &it->second;
+    }
+
     /* Lent by the evaluator: the track sampler returns an array of contacts. */
     void set_heap_sink(HeapSink* sink) override { heap_ = sink; }
     bool describe(uint32_t key, OperatorSignature& out) override;
@@ -120,6 +136,7 @@ private:
     float hull_half_length_ = 0.0f;
     std::map<uint32_t, uint32_t> served_;
     std::vector<std::vector<float>> curves_;
+    std::map<size_t, BuilderLayout> builders_;
 };
 
 } // namespace expression

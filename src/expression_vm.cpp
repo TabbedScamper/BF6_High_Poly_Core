@@ -925,6 +925,26 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 }
                 if (instance && instance->trace_records)
                     instance->trace.push_back({record.offset, 0u, dst.offset, width, c.known});
+                /* BF6_SELECT_DEBUG=<hex dst slot>: this record picks between two
+                 * sources on a flag, so a destination stuck at one value means the
+                 * FLAG never changed, not that the value was miscomputed. Printing the
+                 * condition beside both candidate sources is the only way to tell
+                 * those apart. */
+                if (const char* want = std::getenv("BF6_SELECT_DEBUG")) {
+                    const uint32_t s = (uint32_t)std::strtoul(want, nullptr, 16);
+                    if (s == dst.offset) {
+                        float got = 0.0f;
+                        const Value dv = slots.read(dst.offset, width < 4 ? 4 : width);
+                        if (dv.bytes.size() >= 4) std::memcpy(&got, dv.bytes.data(), 4);
+                        std::fprintf(stderr,
+                                     "select rec 0x%X -> slot 0x%X w %u cond %s%u"
+                                     " true=r%u+0x%X false=r%u+0x%X got %g\n",
+                                     record.offset, dst.offset, width,
+                                     c.known ? "" : "UNKNOWN:", c.known ? c.bytes[0] : 0u,
+                                     record.operands[1].region, record.operands[1].offset,
+                                     record.operands[2].region, record.operands[2].offset, got);
+                    }
+                }
             }
         } else if (!record.has_operator && record.kind >= 0x1e && record.kind <= 0x25 &&
                    record.operands.size() >= 2 && record.operands.back().region == 1 &&
@@ -1019,6 +1039,20 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     source = Operand{t.region, t.offset + source.offset};
                 }
                 Value value = materialize(graph, instance, slots, source, width);
+                /* BF6_MOVE_FROM=<hex dst slot>: names the SOURCE a move copied from.
+                 * A destination stuck at one value is either a source stuck at that
+                 * value or a move reading the wrong place, and only the source's slot
+                 * tells those apart. */
+                if (const char* want = std::getenv("BF6_MOVE_FROM")) {
+                    const uint32_t s = (uint32_t)std::strtoul(want, nullptr, 16);
+                    if (s == output->offset) {
+                        float g = 0.0f;
+                        if (value.bytes.size() >= 4) std::memcpy(&g, value.bytes.data(), 4);
+                        std::fprintf(stderr, "move rec 0x%X: slot 0x%X <- r%u+0x%X (w %u) = %g%s\n",
+                                     record.offset, output->offset, source.region,
+                                     source.offset, width, g, value.known ? "" : " UNKNOWN");
+                    }
+                }
                 if (source.region == 2) slots.copy(source.offset, output->offset, width);
                 else slots.write(output->offset, width, value);
                 last_written = value;
@@ -1229,13 +1263,24 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     if (k == record.operator_key) {
                         std::fprintf(stderr, "op %08X rec 0x%X inputs:", k, record.offset);
                         for (size_t i = 0; i < call.inputs.size(); ++i) {
-                            float g = 0.0f;
-                            if (args[i].bytes.size() >= 4)
-                                std::memcpy(&g, args[i].bytes.data(), 4);
                             const bool r2 = call.inputs[i]->region == 2;
                             const bool nw = r2 && slots.never_written.count(call.inputs[i]->offset);
-                            std::fprintf(stderr, " [%zu]r%u+0x%X=%g%s", i,
-                                         call.inputs[i]->region, call.inputs[i]->offset, g,
+                            /* BY WIDTH. Printing a float from anything narrower than
+                             * four bytes reported every one-byte flag as 0, and a flag
+                             * written TRUE then read as 0 sent a whole investigation
+                             * the wrong way. A narrow value prints as its integer. */
+                            char v[32] = "?";
+                            if (args[i].bytes.size() >= 4) {
+                                float g = 0.0f;
+                                std::memcpy(&g, args[i].bytes.data(), 4);
+                                std::snprintf(v, sizeof v, "%g", g);
+                            } else if (!args[i].bytes.empty()) {
+                                uint32_t u = 0;
+                                std::memcpy(&u, args[i].bytes.data(), args[i].bytes.size());
+                                std::snprintf(v, sizeof v, "%u(w%zu)", u, args[i].bytes.size());
+                            }
+                            std::fprintf(stderr, " [%zu]r%u+0x%X=%s%s", i,
+                                         call.inputs[i]->region, call.inputs[i]->offset, v,
                                          nw ? " NOBODY-WRITES" : "");
                         }
                         std::fprintf(stderr, "\n");

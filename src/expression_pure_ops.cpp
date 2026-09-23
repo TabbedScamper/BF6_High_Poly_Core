@@ -1077,6 +1077,12 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
         float sign = w >= 0.0f ? 1.0f : -1.0f;
         float aw = std::fabs(w);
         if (!(aw > -0.0f)) sign = 0.0f;
+        /* BF6_WHEELSPIN_NO_RES=1 drops the resistance. DIAGNOSTIC ONLY: on an f22 one
+         * gear arrives here with a resistance of 623.875 against the other two gears'
+         * 71.4 and 10, which with an inertia of 1 removes 10.4 rad/s of wheel spin per
+         * tick and pins that wheel's omega at zero for ever. This measures whether
+         * that is what holds the aircraft on the runway. */
+        if (std::getenv("BF6_WHEELSPIN_NO_RES")) res = 0.0f;
         float d = std::fabs(res) * dt;
         d = d / inertia;
         float y = aw - d;

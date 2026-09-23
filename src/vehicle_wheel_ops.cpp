@@ -2844,10 +2844,30 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * stiff spring sits on the SINGLETON while the soft pair share theirs - inverted
          * from a tricycle gear, where the mains carry the weight. */
         const bool no_a2 = std::getenv("BF6_SUSP_NO_A2") != nullptr;
+        /* A VALUE SWEEP OVER THE GEAR'S LATERAL GEOMETRY, so what the arm should be can be
+         * measured rather than argued. As read, an ah64e's three gears sit at lateral +1,
+         * +0 and -0: a mirrored pair whose magnitude is zero, and one lone main. The pair's
+         * SIGN survives, which is what makes the sweep possible - copysign puts the track
+         * back without inventing which side is which.
+         *
+         *   BF6_GEAR_TRACK=<x>   the collapsed pair becomes +-x
+         *   BF6_GEAR_TAIL_ZERO=1 the odd gear moves to the centreline, testing the reading
+         *                        that the pair are the mains and the singleton the tail
+         *
+         * Diagnostic. The point of it is to find which values stabilise the airframe and
+         * compare them with the real aircraft's track, not to ship a number. */
+        static const char* const trk = std::getenv("BF6_GEAR_TRACK");
+        const float track = trk ? (float)std::atof(trk) : 0.0f;
+        const bool tail_zero = std::getenv("BF6_GEAR_TAIL_ZERO") != nullptr;
         for (int i = 0; i < 4; ++i) {
-            const float pt = susp_at_com ? body_.com[i]
-                             : (no_a2 ? rf(PB, base + 4 * i)
-                                      : rf(a[2], 4 * i) + rf(PB, base + 4 * i));
+            float pt = susp_at_com ? body_.com[i]
+                       : (no_a2 ? rf(PB, base + 4 * i)
+                                : rf(a[2], 4 * i) + rf(PB, base + 4 * i));
+            if (trk && i == 0 && !susp_at_com) {
+                const float ax = std::fabs(pt);
+                if (ax < 0.001f) pt = std::copysign(track, pt);   /* the collapsed pair */
+                else if (tail_zero) pt = 0.0f;                    /* the odd one out */
+            }
             r1.p[i] = r2.p[i] = r3.p[i] = pt;
             r1.f[i] = dt * (spring * dir[i]) * force_scale;
             r2.f[i] = dt * (damper * dir[i]) * force_scale;

@@ -198,6 +198,11 @@ bool States::as_bool(Graph& g, const Obj* o, bool& ok)
 {
     ok = false;
     if (!o) { note_unknown(o); return false; }
+    {
+        static const char* why_t = std::getenv("BF6_ANT_WHY_CHOOSER");
+        if (why_t && *why_t && o->path.find(why_t) != std::string::npos)
+            std::fprintf(stderr, "as_bool %s type %s\n", o->path.c_str(), o->type.c_str());
+    }
     /* THE TWO LITERALS, WHICH THE DATA DOES NOT DISTINGUISH.
      *
      * common/literal.true.bool and common/literal.false.bool are byte-identical: both
@@ -303,6 +308,39 @@ bool States::as_bool(Graph& g, const Obj* o, bool& ok)
          * sprint pose is the case: 1p.enablesprintpose.chooserbool is ten vetoes over a
          * default of true, every veto false for a standing rifleman, and it still read
          * false. */
+        /* BF6_ANT_WHY_CHOOSER=<path substring>: every entry of a matching bool chooser,
+         * each signal it tests with the value read now, and the entry's own value -
+         * which veto held a layer off, instead of a bare "held off by its Enable". */
+        static const char* why = std::getenv("BF6_ANT_WHY_CHOOSER");
+        if (why && *why && o->path.find(why) != std::string::npos) {
+            std::fprintf(stderr, "chooser %s\n", o->path.c_str());
+            int k = 0;
+            for (const auto& er : es->items) {
+                const Obj* e = g.resolve(&er, o);
+                if (!e) { std::fprintf(stderr, "  entry %d (null)\n", k++); continue; }
+                bool pok = true;
+                const bool pass = signal_pass(g, e, pok);
+                bool vok = false;
+                const Obj* vo = g.resolve(e->f(0x81309ef7u), e);
+                const bool val = as_bool(g, vo, vok);
+                std::fprintf(stderr, "  entry %d pass=%d%s value=%s (%s)\n", k++, pass ? 1 : 0,
+                             pok ? "" : " UNREADABLE", vok ? (val ? "true" : "false") : "?",
+                             vo ? vo->path.c_str() : "null");
+                for (uint32_t h : {0xdf9f1fbau, 0xb6eb75d4u}) {
+                    const bf6::EbxValue* l = e->f(h);
+                    if (!l) continue;
+                    for (const auto& it : l->items) {
+                        const Obj* s = g.resolve(&it, e);
+                        if (!s) continue;
+                        bool sok = false;
+                        const bool v = as_bool(g, s, sok);
+                        std::fprintf(stderr, "      needs %s: %s = %s\n",
+                                     h == 0xdf9f1fbau ? "TRUE " : "FALSE", s->path.c_str(),
+                                     sok ? (v ? "true" : "false") : "?");
+                    }
+                }
+            }
+        }
         int index = 0;
         for (const auto& er : es->items) {
             const Obj* e = g.resolve(&er, o);

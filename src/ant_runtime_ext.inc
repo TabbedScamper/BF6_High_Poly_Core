@@ -1894,6 +1894,10 @@ float NodeCtrl::time_to_transition(Runtime& rt, float dt)
     int result = 0xff;
     for (int i = 0; i < (int)entries.size() && i != 0xff; i = entries[(size_t)i].next) {
         const Entry& e = entries[(size_t)i];
+        {
+            static const char* why_node = std::getenv("BF6_ANT_WHY_NODE");
+            if (why_node && *why_node) (void)entry_conds(rt, e);   /* prints when the node matches */
+        }
         if (entry_state.size() != entries.size()) entry_state.assign(entries.size(), 0);
         bool pass = true;
         if (entry_state[(size_t)i] != 4) pass = conds(e.must_true, true) && conds(e.must_false, false);
@@ -1976,6 +1980,25 @@ bool NodeCtrl::entry_conds(Runtime& rt, const Entry& e) const
         }
         return true;
     };
+    /* BF6_ANT_WHY_NODE=<path substring>: for a matching node, each exit tested, where it
+     * leads, and every condition with the value read now - which state holds a machine
+     * in its pass-through node when the layer around it is already enabled. */
+    static const char* why = std::getenv("BF6_ANT_WHY_NODE");
+    if (why && *why && asset && asset->path.find(why) != std::string::npos) {
+        std::string line = "node " + asset->path + " -> " + (e.to ? e.to->path : std::string("(none)"));
+        auto dump = [&](const std::vector<int>& idx, const char* need) {
+            for (int k : idx) {
+                if (k < 0 || k >= (int)watched.size()) { line += std::string("  ") + need + " (bad index)"; continue; }
+                bool ok = false;
+                const bool v = rt.st.as_bool(rt.g, watched[(size_t)k], ok);
+                line += std::string("  ") + need + " " + (watched[(size_t)k] ? watched[(size_t)k]->path : "null")
+                        + "=" + (ok ? (v ? "1" : "0") : "?");
+            }
+        };
+        dump(e.must_true, "T");
+        dump(e.must_false, "F");
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
     return all(e.must_true, true) && all(e.must_false, false);
 }
 

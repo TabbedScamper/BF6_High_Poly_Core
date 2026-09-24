@@ -396,6 +396,20 @@ int bf6_anim_bindings(bf6_ctx* c, const char* clip_ebx,
         row.dof_set = (int32_t)set; row.dof_record = (int32_t)local;
         row.storage_index = (int32_t)(record.byte_offset / record.stride);
         std::snprintf(row.dof_name, sizeof(row.dof_name), "%s", record.name.c_str());
+        /* Animated RAW payloads permute quaternion and translation channels;
+         * unlike DCT/VBR they are not stored in two contiguous type runs.  The
+         * resolved DofSet record is authoritative (and independently checked by
+         * its .q/.t/.s suffix), so classify the binding from that record rather
+         * than from the channel's position in the payload.  Without this, the
+         * 1P additive stance clips resolve all of their keys but ClipSource
+         * rejects every transform binding as a scalar. */
+        const size_t name_len = record.name.size();
+        if (name_len > 2 && record.name[name_len - 2] == '.') {
+            const char suffix = record.name[name_len - 1];
+            if (suffix == 'q') row.component = BF6_ANIM_DOF_QUATERNION;
+            else if (suffix == 't') row.component = BF6_ANIM_DOF_VECTOR3;
+            else if (suffix == 's') row.component = BF6_ANIM_DOF_SCALAR;
+        }
         ++report.resolved_storage;
         const auto default_value = defaults.find(row.key);
         if (default_value != defaults.end() &&

@@ -3516,6 +3516,22 @@ BF6_API int  bf6_soldier_fields_load(bf6_ctx*);
 /* A field's live value by its name as the asset spells it (e.g. "CurrentSpeed"); up to four
  * lanes for a vector field. Replaces the authored default until changed. */
 BF6_API void bf6_soldier_field_set(const char* name, const float* v, int32_t n);
+/* A field's value by name: 1 known (up to four lanes into out4), 0 when its last store was
+ * of an unknown value, -1 when no field has that name. */
+BF6_API int32_t bf6_soldier_field_get(const char* name, float* out4);
+BF6_API void bf6_soldier_fields_reset(void);
+/* Every field written so far (live value or unknown store), newline-separated. */
+BF6_API int32_t bf6_soldier_written(char* buf, int32_t cap);
+
+/* THE SOLDIER'S MOTION-MACHINE GRAPHS run frame by frame (soldier_sim_ext.inc): a comma-
+ * separated list of graph names under common/gameplay/soldier/, run in that order, with
+ * the soldier fields as their state and an optional collision mesh for their rays. */
+typedef struct bf6_soldier bf6_soldier;
+BF6_API bf6_soldier* bf6_soldier_open(bf6_ctx*, const char* graphs_csv, const float* tris,
+                                      int32_t vert_count, char* err, int32_t err_len);
+BF6_API void    bf6_soldier_tick(bf6_soldier*, float dt);
+BF6_API int32_t bf6_soldier_report(bf6_soldier*, char* buf, int32_t cap);
+BF6_API void    bf6_soldier_close(bf6_soldier*);
 
 /* Read the customization allowance from equipment_<weapon> in the mounted
  * install.  The value is field 0x3CE3B411 on the weapon's customization

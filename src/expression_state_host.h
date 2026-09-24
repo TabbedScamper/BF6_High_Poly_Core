@@ -420,6 +420,8 @@ public:
     /* The game clock in seconds, served by 0xE2EEC2BE. */
     void set_time(double t) { time_ = t; }
     bool describe(uint32_t key, OperatorSignature& out) override;
+    bool describe_call(uint32_t key, const std::vector<uint32_t>& consts,
+                       OperatorSignature& out) override;
     bool invoke(uint32_t key, const std::vector<Value>& args, Value& out) override;
     const std::map<uint32_t, uint32_t>& served() const { return served_; }
 private:

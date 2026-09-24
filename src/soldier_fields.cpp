@@ -19,6 +19,7 @@ const KindType kKinds[] = {
     {"87064bc2-47ce-d8a7-1080-1c04f8461d1c", SoldierFields::kFloat},  /*  85 fields */
     {"1eed978d-3fd5-6baa-b88f-be30bbbc61ed", SoldierFields::kInt},    /*  76 fields */
     {"70d5f40c-24e8-57aa-943d-784840b38efc", SoldierFields::kVec},    /*  19 fields */
+    {"34a56106-7b27-37b7-a4e9-28a040cfa9a2", SoldierFields::kXform},  /*  17 fields */
 };
 const uint32_t kName    = 0x0c59fa06u;
 const uint32_t kId      = 0x51480447u;
@@ -86,6 +87,7 @@ bool SoldierFields::load(Source& src, TypeDb& types, std::string& err)
         f.lane = (int)lane;
         by_key_[key(f.kind, f.lane, f.id)] = f;
     }
+    for (const auto& kv : by_key_) by_name_[kv.second.name] = &kv.second;
     loaded_ = !by_key_.empty();
     if (!loaded_) err = "no soldier field instances in " + std::string(kAsset);
     return loaded_;
@@ -101,6 +103,28 @@ void SoldierFields::value(const Field& f, float out[4]) const
 {
     auto it = live_.find(f.name);
     for (int j = 0; j < 4; ++j) out[j] = it != live_.end() ? it->second[(size_t)j] : f.def[j];
+}
+
+void SoldierFields::xform(const Field& f, float out[16]) const
+{
+    auto it = xform_live_.find(f.name);
+    if (it != xform_live_.end()) { for (int j = 0; j < 16; ++j) out[j] = it->second[(size_t)j]; return; }
+    for (int j = 0; j < 16; ++j) out[j] = (j == 0 || j == 5 || j == 10 || j == 15) ? 1.0f : 0.0f;
+}
+
+void SoldierFields::set_live_xform(const std::string& name, const float m[16])
+{
+    std::array<float, 16> a{};
+    for (int j = 0; j < 16; ++j) a[(size_t)j] = m[j];
+    xform_live_[name] = a;
+}
+
+bool SoldierFields::get_by_name(const std::string& name, float out[4]) const
+{
+    auto it = by_name_.find(name);
+    if (it == by_name_.end()) return false;
+    value(*it->second, out);
+    return true;
 }
 
 void SoldierFields::set_live(const std::string& name, const float* v, int n)

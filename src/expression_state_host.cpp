@@ -1051,6 +1051,17 @@ const uint32_t kSettingBool   = 0x63E71248u; /* native 144328E80       */
 const uint32_t kFieldFloat    = 0xF4311C3Du; /* native 144328FC0       */
 const uint32_t kFieldInt      = 0x9FC488C4u; /* native 144328F40       */
 const uint32_t kFieldVec      = 0x32E399EBu; /* native 144329040       */
+/* Their write twins (read from the natives): (descriptor, value) into the same tables. */
+const uint32_t kStoreBool     = 0x16D34E05u; /* native 144329670 -> FUN_14436B9E0 */
+const uint32_t kStoreFloat    = 0x371C27B1u; /* native 1443297B0 -> FUN_14436A080 */
+const uint32_t kStoreInt      = 0x02A56C25u; /* native 144329700, presence bit + value */
+/* A transform field, built from a stored rotation + position (native 1443290E0). */
+const uint32_t kFieldXform    = 0xD927CB31u;
+/* CLAMPED stores, natives from expression_engine_nodes_6a1c1b.tsv (the EngineNodes.tsv
+ * addresses for these keys land mid-function): (key, descriptor, min, max, -, value)
+ * stores min(max(value, min), max) into the int / float field. Operand 4 is never read. */
+const uint32_t kClampStoreInt   = 0xB7428609u; /* native 144329F30 */
+const uint32_t kClampStoreFloat = 0x239DC415u; /* native 14432A010 -> FUN_14436A080 */
 /* 0xEA5D1359 Aiming(EntryTagId -> Yaw, Pitch, Roll, ZoomLevel): thunk 0x14736B4A0 ->
  * FUN_1405794A0, which ZEROES all four outputs first and fills them only when an
  * entry in the vehicle's entry list carries the tag (vtable +0x250 gives the trio,
@@ -1264,6 +1275,31 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {4, 4};
         out.output_width = 1;
         return true;
+    case kStoreBool:
+    case kStoreFloat:
+    case kStoreInt:
+        /* The field STORES, write twins of the readers. MEASURED under BF6_LOG_FIELD_IDS
+         * across the 118 soldier graphs, all 93 calls: (0xF263DF78, descriptor, value) -
+         * the same collection key and the same (u16 id, flags, lane) descriptor the
+         * readers take, then a 1-byte bool or a 4-byte float/int. No output. */
+        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        out.input_widths = {4, 4, key == kStoreBool ? 1u : 4u};
+        out.output_width = 0;
+        return true;
+    case kClampStoreInt:
+    case kClampStoreFloat:
+        /* Six operands here; describe_call also admits the five-operand form. */
+        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        out.input_widths = {4, 4, 4, 4, 4, 4};
+        out.output_width = 0;
+        return true;
+    case kFieldXform:
+        /* (0xF263DF78, descriptor, space mode) -> LinearTransform. Native 1443290E0 via
+         * FUN_141320DA0; all 29 calls measured with this shape. */
+        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        out.input_widths = {4, 4, 4};
+        out.output_width = 64;
+        return true;
     case kFieldFloat:
     case kFieldInt:
     case kFieldVec:
@@ -1314,7 +1350,68 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
     }
 }
 
+bool WorldHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
+                              OperatorSignature& out) {
+    if ((key == kClampStoreInt || key == kClampStoreFloat) &&
+        (consts.size() == 5 || consts.size() == 6)) {
+        if (!describe(key, out)) return false;
+        out.input_widths.assign(consts.size(), 4u);
+        return true;
+    }
+    return describe(key, out);
+}
+
 bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
+    if (key == kClampStoreInt || key == kClampStoreFloat) {
+        if (std::getenv("BF6_LOG_FIELD_IDS")) {
+            std::string hex;
+            for (size_t a = 0; a < args.size(); ++a) {
+                hex += a ? " | " : "";
+                for (size_t b = 0; b < args[a].bytes.size() && b < 16; ++b) {
+                    char t[4]; std::snprintf(t, sizeof t, "%02x", args[a].bytes[b]); hex += t;
+                }
+                hex += args[a].known ? "" : "?";
+            }
+            std::fprintf(stderr, "fieldop %08X n %zu raw %s\n", key, args.size(), hex.c_str());
+        }
+        /* MEASURED, all 34 calls the soldier graphs reach: (0xF263DF78, descriptor, min,
+         * max, unread, value), e.g. min -15.0 max 2.0. The five-operand form the atlas
+         * also lists has not been seen reaching a call, so it is refused, not guessed. */
+        bf6::SoldierFields& sf = bf6::SoldierFields::get();
+        if (!sf.loaded() || args.size() != 6 || !args[1].known || args[1].bytes.size() < 4)
+            return false;
+        uint16_t id = 0;
+        std::memcpy(&id, args[1].bytes.data(), 2);
+        out = Value{};
+        served_[key] += 1;
+        if (id == 0xFFFFu) return true;
+        const bf6::SoldierFields::Field* f = sf.find(
+            key == kClampStoreInt ? bf6::SoldierFields::kInt : bf6::SoldierFields::kFloat,
+            args[1].bytes[3], id);
+        if (!f) { served_[key] -= 1; return false; }
+        const Value& lo = args[2]; const Value& hi = args[3]; const Value& val = args[5];
+        if (!lo.known || !hi.known || !val.known || lo.bytes.size() < 4 || hi.bytes.size() < 4 ||
+            val.bytes.size() < 4) { sf.store_unknown(*f); return true; }
+        float v = 0.0f;
+        if (key == kClampStoreInt) {
+            int32_t a, l, h;
+            std::memcpy(&a, val.bytes.data(), 4); std::memcpy(&l, lo.bytes.data(), 4);
+            std::memcpy(&h, hi.bytes.data(), 4);
+            /* the native's order: raise to min first, then cap at max */
+            if (a < l) a = l;
+            if (h < a) a = h;
+            v = (float)a;
+        } else {
+            float a, l, h;
+            std::memcpy(&a, val.bytes.data(), 4); std::memcpy(&l, lo.bytes.data(), 4);
+            std::memcpy(&h, hi.bytes.data(), 4);
+            if (!(l > a)) l = a;   /* fVar5 = min; if (min <= value) fVar5 = value */
+            if (!(h > l)) l = h;   /* if (max <= fVar5) fVar5 = max */
+            v = l;
+        }
+        sf.store(*f, &v, 1);
+        return true;
+    }
     OperatorSignature sig;
     if (!describe(key, sig) || args.size() != sig.input_widths.size()) return false;
     /* FUN_1443EFC30 maps its missing-table sentinel (-FLT_MAX) to -1024.0f.
@@ -1325,6 +1422,70 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
          * null; only the live-object path reads TeamId at object +0x60. */
         served_[key] += 1;
         out = Value::from_u32(0);
+        return true;
+    }
+    if (key == kStoreBool || key == kStoreFloat || key == kStoreInt || key == kFieldXform) {
+        if (std::getenv("BF6_LOG_FIELD_IDS")) {
+            std::string hex;
+            for (size_t a = 0; a < args.size(); ++a) {
+                hex += a ? " | " : "";
+                for (size_t b = 0; b < args[a].bytes.size() && b < 16; ++b) {
+                    char t[4]; std::snprintf(t, sizeof t, "%02x", args[a].bytes[b]); hex += t;
+                }
+                hex += args[a].known ? "" : "?";
+            }
+            std::fprintf(stderr, "fieldop %08X n %zu raw %s\n", key, args.size(), hex.c_str());
+        }
+        bf6::SoldierFields& sf = bf6::SoldierFields::get();
+        if (!sf.loaded() || args.size() != 3 || !args[1].known || args[1].bytes.size() < 4)
+            return false;
+        uint16_t id = 0;
+        std::memcpy(&id, args[1].bytes.data(), 2);
+        const uint8_t flags = args[1].bytes[2];
+        const int lane = args[1].bytes[3];
+        if (key == kFieldXform) {
+            /* FUN_141320DA0. Space mode 0, or mode 2 with (flags & 6) == 0, reads the
+             * stored (position, rotation) raw; a field never written - or id 0xFFFF -
+             * reads position 0 and the identity rotation, which built into a transform is
+             * identity. Every other mode goes through a space conversion
+             * (FUN_144369A20) against the live soldier, which does not exist offline:
+             * refused, not faked. */
+            if (!args[2].known || args[2].bytes.size() < 4) return false;
+            uint32_t mode = 0;
+            std::memcpy(&mode, args[2].bytes.data(), 4);
+            if (!(mode == 0 || (mode == 2 && (flags & 6) == 0))) return false;
+            float m[16];
+            if (id == 0xFFFFu) {
+                lt_identity(m);
+                m[15] = 1.0f;
+            } else {
+                const bf6::SoldierFields::Field* f = sf.find(bf6::SoldierFields::kXform, lane, id);
+                if (!f || !sf.known(*f)) return false;
+                sf.xform(*f, m);
+            }
+            out = Value{};
+            out.bytes.resize(64);
+            std::memcpy(out.bytes.data(), m, 64);
+            out.known = true;
+            served_[key] += 1;
+            return true;
+        }
+        /* A STORE. id 0xFFFF names nothing and the native skips it. */
+        out = Value{};
+        served_[key] += 1;
+        if (id == 0xFFFFu) return true;
+        const int kind = key == kStoreBool ? bf6::SoldierFields::kBool
+                       : key == kStoreFloat ? bf6::SoldierFields::kFloat : bf6::SoldierFields::kInt;
+        const bf6::SoldierFields::Field* f = sf.find(kind, lane, id);
+        if (!f) { served_[key] -= 1; return false; }
+        if (!args[2].known || args[2].bytes.empty()) { sf.store_unknown(*f); return true; }
+        float v = 0.0f;
+        if (key == kStoreBool) v = args[2].bytes[0] ? 1.0f : 0.0f;
+        else if (args[2].bytes.size() >= 4) {
+            if (key == kStoreFloat) std::memcpy(&v, args[2].bytes.data(), 4);
+            else { int32_t i = 0; std::memcpy(&i, args[2].bytes.data(), 4); v = (float)i; }
+        } else { sf.store_unknown(*f); return true; }
+        sf.store(*f, &v, 1);
         return true;
     }
     if (key == kFieldFloat || key == kFieldInt || key == kFieldVec ||
@@ -1367,7 +1528,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         const int kind = key == kFieldFloat ? bf6::SoldierFields::kFloat
                        : key == kFieldInt ? bf6::SoldierFields::kInt : bf6::SoldierFields::kVec;
         const bf6::SoldierFields::Field* f = bf6::SoldierFields::get().find(kind, lane, id);
-        if (!f) return false;
+        if (!f || !bf6::SoldierFields::get().known(*f)) return false;
         float v[4];
         bf6::SoldierFields::get().value(*f, v);
         if (key == kFieldInt) out = Value::from_u32((uint32_t)(int32_t)v[0]);
@@ -1389,6 +1550,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         std::memcpy(&id, args[1].bytes.data(), 2);
         if (const bf6::SoldierFields::Field* f = bf6::SoldierFields::get().find(bf6::SoldierFields::kBool,
                                                                       args[1].bytes[3], id)) {
+            if (!bf6::SoldierFields::get().known(*f)) return false;
             float v[4];
             bf6::SoldierFields::get().value(*f, v);
             out = Value::from_bool(v[0] != 0.0f);

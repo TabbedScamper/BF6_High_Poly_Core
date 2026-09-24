@@ -108,14 +108,38 @@ int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
     if (slash != std::string::npos) bare = bare.substr(slash + 1);
     const std::string want = bare + "_wb";
     const int n = bf6_list_ebx(c, want.c_str(), nullptr, 0);
-    if (n <= 0) return fail("no weapon blueprint named " + want);
-    std::vector<bf6_asset> rows((size_t)n);
-    const int got = bf6_list_ebx(c, want.c_str(), rows.data(), n);
     std::string wb;
-    for (int i = 0; i < got; ++i) {
-        const std::string p = rows[(size_t)i].name ? rows[(size_t)i].name : "";
-        const size_t s = p.find_last_of('/');
-        if ((s == std::string::npos ? p : p.substr(s + 1)) == want && (wb.empty() || p.size() < wb.size())) wb = p;
+    if (n > 0) {
+        std::vector<bf6_asset> rows((size_t)n);
+        const int got = bf6_list_ebx(c, want.c_str(), rows.data(), n);
+        for (int i = 0; i < got; ++i) {
+            const std::string p = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+            const size_t s = p.find_last_of('/');
+            if ((s == std::string::npos ? p : p.substr(s + 1)) == want && (wb.empty() || p.size() < wb.size())) wb = p;
+        }
+    }
+    /* NOT EVERY BLUEPRINT IS NAMED AFTER ITS FOLDER. Gadgets and melee weapons use their
+     * own names - throwables/frag holds fraggrenade_wb, mines/atmine gadget_atmine_wb,
+     * throwables/c4 wb_c4, melee/combatknife wb_melee_combatknife - so when <leaf>_wb is
+     * absent, the blueprint is the asset DIRECTLY in the item's own folder named *_wb or
+     * wb_*, the client-schematics companion excluded. */
+    if (wb.empty()) {
+        const std::string folder = "/" + std::string(item) + "/";
+        const int m = bf6_list_ebx(c, folder.c_str(), nullptr, 0);
+        if (m > 0) {
+            std::vector<bf6_asset> all((size_t)m);
+            const int had = bf6_list_ebx(c, folder.c_str(), all.data(), m);
+            for (int i = 0; i < had; ++i) {
+                const std::string p = all[(size_t)i].name ? all[(size_t)i].name : "";
+                const size_t at = p.find(folder);
+                if (at == std::string::npos) continue;
+                const std::string leaf = p.substr(at + folder.size());
+                if (leaf.find('/') != std::string::npos) continue;   /* a subfolder: art, skins */
+                const bool named = (leaf.size() > 3 && leaf.compare(leaf.size() - 3, 3, "_wb") == 0) ||
+                                   (leaf.compare(0, 3, "wb_") == 0 && leaf.find("schematic") == std::string::npos);
+                if (named && (wb.empty() || p.size() < wb.size())) wb = p;
+            }
+        }
     }
     if (wb.empty()) return fail("no weapon blueprint named " + want);
     bf6ant::Graph g(c);

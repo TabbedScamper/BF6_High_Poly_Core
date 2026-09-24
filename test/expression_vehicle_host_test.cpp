@@ -26,6 +26,7 @@
 #include "expression_pure_ops.h"
 #include "expression_state_host.h"
 #include "expression_vm.h"
+#include "soldier_fields.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1404,6 +1405,9 @@ int main(int argc, char** argv) {
             bf6::expression::ChainHost both;
             both.add(&builtins);
             bf6::expression::RecoveredOps recovered;
+            /* Each graph starts from an unwritten soldier: one graph's stores must not
+             * leak into the next one's score. */
+            bf6::SoldierFields::get().clear_live();
             bf6::expression::WorldHost world;
             for (const auto& b : cur_bindings)
                 if (b.kind == 2) world.set_tweakable(b.channel_hash, b.default_bits);

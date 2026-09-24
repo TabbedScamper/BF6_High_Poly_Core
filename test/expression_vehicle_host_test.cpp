@@ -1002,6 +1002,10 @@ int main(int argc, char** argv) {
             static const uint32_t kRoots[] = {
                 0xE22FCA6Fu, 0xC58D8EA6u, 0x63D604B7u, 0xE7488ECEu, 0xF0F74455u,
                 0x040F4924u, 0x0F063D92u, 0x532B3BA9u, 0x6D98A861u,
+                0xB19CEDF0u, 0x42D8AA50u, 0xAACB562Au, 0x09635061u,
+                0x45DAEC6Au, 0xC1AE90A7u, 0x19A7BA16u, 0x91C21F3Cu,
+                0xED79777Au, 0xC0C3BE9Fu, 0xFC69D4E9u, 0xE9560B5Eu,
+                0x94A8B80Bu, 0x78AD5912u, 0x55DAC91Du, 0x1AE1C80Au,
             };
             for (const auto& rec : graph.records) {
                 bool root = false;

@@ -1050,6 +1050,18 @@ bool WheelOps::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
 }
 
 bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
+    /* FUN_1443EFC30's live implementation needs Position to select a water probe,
+     * but its no-probe path is the constant -1024. The offline surface is likewise
+     * global and flat, so Position cannot affect either offline answer. Serve this
+     * before the generic known-input gate: presentation graphs often leave Position
+     * unknown, which was incorrectly hiding the native's deterministic miss value. */
+    if (key == kWaterHeightAt && a.size() == 1) {
+        ++served_[key];
+        out.bytes.assign(4, 0);
+        wf(out.bytes, 0, body_.water ? body_.water_height : kNoWater);
+        out.known = true;
+        return true;
+    }
     /* A 52-BYTE SUSPENSION CONFIG. FUN_1443ED130 reads its config through +0x52 with no
      * length and no bounds check (+0x44..+0x51 unconditionally). A car's configs are 84
      * bytes; a helicopter's (mh47) are 52, packed at a 52-byte stride as per-wheel
@@ -2086,12 +2098,6 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                          rf(a[2], 0), rf(a[2], 4), rf(a[2], 8), rf(a[4], 0),
                          o(0), o(4), o(8));
         }
-        return true;
-    }
-    if (key == kWaterHeightAt) {
-        out.bytes.assign(4, 0);
-        wf(out.bytes, 0, body_.water ? body_.water_height : kNoWater);
-        out.known = true;
         return true;
     }
     if (key == kWaterPlane) {

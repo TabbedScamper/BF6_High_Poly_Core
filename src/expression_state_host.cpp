@@ -234,8 +234,18 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
         out.output_width = 4;
         return true;
     }
-    if (key == kWriteFloatQ || key == kWriteAny || key == kWriteBool ||
-        key == kWriteU32) {
+    if (key == kWriteAny) {
+        if (!allow_writes_) return false;
+        /* FUN_142BB8D70 has one node descriptor operand and no result.  Unlike the
+         * explicit scalar writers below, the value is embedded in the descriptor
+         * and the native dispatches it through the field type's +0x30 virtual.  No
+         * replicated object exists offline, so the native's observable effect is
+         * absent; still consume the one operand with the record's real shape. */
+        out.input_widths = {16};
+        out.output_width = 0;
+        return true;
+    }
+    if (key == kWriteFloatQ || key == kWriteBool || key == kWriteU32) {
         if (!allow_writes_) return false;
         /* TWO OPERANDS, MEASURED. The engine table gives these arity 1, which was
          * why this host declared one input and why every write refused: the records
@@ -741,8 +751,15 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out = known_u32(raw);
         return true;
     }
-    if (key == kWriteFloatQ || key == kWriteAny || key == kWriteBool ||
-        key == kWriteU32) {
+    if (key == kWriteAny) {
+        if (args.size() != 1 || !args[0].known || args[0].bytes.size() < 16) return false;
+        ++writes_;
+        served_[key] += 1;
+        out = Value{};
+        out.known = true;
+        return true;
+    }
+    if (key == kWriteFloatQ || key == kWriteBool || key == kWriteU32) {
         /* args[0] is the destination path, args[1] the value - measured, see
          * describe(). An unknown destination is refused rather than written to a
          * fabricated address; an unknown VALUE is stored as unknown by marking the
@@ -1010,6 +1027,14 @@ const uint32_t kAffectorQuery = 0xCA1E499Eu; /* shape-B node -> FUN_141723e60   
  * Slot 2 (0x85A781A7) is the related Vehicle; C22CF89C after it is a
  * PlayerAbilityState lookup (5 = Active, 7 = Invalid on a miss), not a seat state. */
 const uint32_t kFilterSet     = 0xA1D70F8Eu;
+/* Reflected/engine nodes whose native miss paths are completely defined. */
+const uint32_t kShooterStatus = 0x9C8D786Fu; /* 147B6AA20 -> 142CC9510 */
+const uint32_t kActorStat     = 0x79F15D30u; /* 147591A10 -> 147591900 */
+const uint32_t kClientString  = 0xFE6B9F7Cu; /* 1474ACB80 -> 1474ACAB0 */
+const uint32_t kWeaponState   = 0x75BF546Fu; /* 147B6ADA0 -> 142CC9850 */
+const uint32_t kGameplayFlags = 0x39497415u; /* engine node 14172B810 */
+/* Native-backed offline fallback for the reflected Player query. */
+const uint32_t kPlayerTeam    = 0x2948B3E1u; /* native 1475F4920       */
 /* 0xEA5D1359 Aiming(EntryTagId -> Yaw, Pitch, Roll, ZoomLevel): thunk 0x14736B4A0 ->
  * FUN_1405794A0, which ZEROES all four outputs first and fills them only when an
  * entry in the vehicle's entry list carries the tag (vtable +0x250 gives the trio,
@@ -1023,6 +1048,36 @@ const uint32_t kAiming        = 0xEA5D1359u;
  * carries the affector. No entity here carries one. The f16 guessed IsActive TRUE, which
  * zeroes the throttle channel below 100 (records @3304..@3536). */
 const uint32_t kAffectorPick  = 0x02C66B00u;
+/* Batch G0. These are kept here (rather than in the name-driven pure host) because
+ * all but the easing helper are engine/reflection services with explicit offline
+ * miss paths.
+ *
+ * 0xB19CEDF0, native 0x140BA5CB0: MOV EAX,[RCX]; MOV [RDX],EAX.
+ * 0xAACB562A, native 0x1417315C0: clears four u32 outputs before any context lookup.
+ * 0x19A7BA16, native 0x146BA4330 -> 0x143AB21E0: PropertyInterpolationMode
+ * wrapper. Only the two recovered base curves (Linear and Quad) are admitted.
+ * 0xC0C3BE9F, native 0x14759ECF0 -> 0x14133D4A0: the null Option path returns
+ * the third argument (DefaultValue) unchanged.
+ * The four set/query helpers clear their destination before walking live handles;
+ * consequently an empty/null input has the exact empty result offline. Non-empty
+ * inputs are refused because this host has no entity/handle registry to walk. */
+const uint32_t kIdentityI32   = 0xB19CEDF0u;
+const uint32_t kContextStats  = 0xAACB562Au;
+const uint32_t kSubHandle     = 0x09635061u;
+const uint32_t kEntityEntry   = 0x91C21F3Cu;
+const uint32_t kEaseProperty  = 0x19A7BA16u;
+const uint32_t kPlayerDefault = 0xC0C3BE9Fu;
+const uint32_t kEntityWalk    = 0xFC69D4E9u;
+const uint32_t kSliceHandles  = 0xE9560B5Eu;
+/* Batch-1 state/world nodes.  Each fallback below is the native's initialized miss
+ * path, not a guessed gameplay value. */
+const uint32_t kAimingPlayer  = 0x368D3BC1u; /* FUN_14736B5D0: ptr -> u32 x4 */
+const uint32_t kSetMerge      = 0xA46470C2u; /* FUN_144341D40: set,set -> set */
+const uint32_t kContextPair   = 0x1833369Eu; /* FUN_141730D50: -> bool,u32 */
+const uint32_t kAbilityState  = 0xC22CF89Cu; /* FUN_14174E130: ids -> state,value */
+const uint32_t kEntityFlags   = 0xE029A05Du; /* FUN_14172B9B0: id -> ten values */
+const uint32_t kRelated       = 0x76E6401Cu; /* FUN_141737FC0: set -> set */
+const uint32_t kApplyAffector = 0x329770B8u; /* FUN_141726A10: query -> bool */
 const uint32_t kSetBytes      = 260u;        /* u32 count + 64 x u32                   */
 const uint32_t kNoId          = 0x000FFFFFu; /* DAT_149b71b48                          */
 
@@ -1035,15 +1090,39 @@ Value empty_set() {
 }
 }
 
-/* __GetTweakableFloat / __GetTweakableBool (CRC-32 of the node names). */
+/* __GetTweakableFloat / __GetTweakableBool / __GetTweakableInt
+ * (CRC-32/BZIP2 of the node names). */
 const uint32_t kTweakFloat = 0x10E7EF91u;
 const uint32_t kTweakBool  = 0xC6485A8Bu;
+const uint32_t kTweakInt   = 0x94A8B80Bu;
+const uint32_t kWaterHeight = 0xED79777Au;
 
 bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
     out = OperatorSignature{};
     switch (key) {
     case kTweakFloat: out.input_widths = {4}; out.output_width = 4; return true;
     case kTweakBool:  out.input_widths = {4}; out.output_width = 1; return true;
+    case kTweakInt:   out.input_widths = {4}; out.output_width = 4; return true;
+    case kWaterHeight: out.input_widths = {16}; out.output_width = 4; return true;
+    case kIdentityI32:
+        out.input_widths = {4}; out.output_width = 4; return true;
+    case kContextStats:
+        out.input_widths = {};
+        out.extra_output_widths = {4, 4, 4};
+        out.output_width = 4;
+        return true;
+    case kSubHandle:
+        out.input_widths = {8, 4}; out.output_width = kSetBytes; return true;
+    case kEntityEntry:
+        out.input_widths = {kSetBytes, 4}; out.output_width = kSetBytes; return true;
+    case kEaseProperty:
+        out.input_widths = {4, 4, 4}; out.output_width = 4; return true;
+    case kPlayerDefault:
+        out.input_widths = {4, 8, 4}; out.output_width = 4; return true;
+    case kEntityWalk:
+        out.input_widths = {kSetBytes, 4, 4}; out.output_width = kSetBytes; return true;
+    case kSliceHandles:
+        out.input_widths = {kSetBytes, 4, 4}; out.output_width = kSetBytes; return true;
     case kSetFromSlot:   out.input_widths = {4};          out.output_width = kSetBytes; return true;
     case kHandleOfFirst: out.input_widths = {kSetBytes};  out.output_width = 8;         return true;
     case kPartitionA:
@@ -1127,6 +1206,73 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {kSetBytes, 12};
         out.output_width = kSetBytes;
         return true;
+    case kAimingPlayer:
+        out.input_widths = {8};
+        out.extra_output_widths = {4, 4, 4};
+        out.output_width = 4;
+        return true;
+    case kSetMerge:
+        out.input_widths = {kSetBytes, kSetBytes};
+        out.output_width = kSetBytes;
+        return true;
+    case kContextPair:
+        out.input_widths = {};
+        out.extra_output_widths = {1};
+        out.output_width = 4;
+        return true;
+    case kAbilityState:
+        out.input_widths = {4, 4};
+        out.extra_output_widths = {4};
+        out.output_width = 4;
+        return true;
+    case kEntityFlags:
+        out.input_widths = {4};
+        out.extra_output_widths = {1, 1, 1, 1, 1, 4, 1, 1, 1};
+        out.output_width = 1;
+        return true;
+    case kRelated:
+        out.input_widths = {kSetBytes};
+        out.output_width = kSetBytes;
+        return true;
+    case kApplyAffector:
+        out.input_widths = {kSetBytes, kSetBytes, 8, 4, 1, 4, 64, 8};
+        out.output_width = 1;
+        return true;
+    case kPlayerTeam:
+        /* Battlefield(Player PointerRef) -> TeamId. */
+        out.input_widths = {8};
+        out.output_width = 4;
+        return true;
+    case kShooterStatus:
+        /* Native outputs status first, secondary state last (the VM primary). */
+        out.input_widths = {};
+        out.extra_output_widths = {4};
+        out.output_width = 4;
+        return true;
+    case kActorStat:
+        /* GameQueryResult, UseCurrentContext -> valid, value (primary last). */
+        out.input_widths = {4, 1};
+        out.extra_output_widths = {1};
+        out.output_width = 4;
+        return true;
+    case kClientString:
+        /* LocalPlayerId, PointerRef, CString default -> CString. */
+        out.input_widths = {4, 8, 8};
+        out.output_width = 8;
+        return true;
+    case kWeaponState:
+        /* Sixteen native outputs; the final float is the VM primary. */
+        out.input_widths = {};
+        out.extra_output_widths = {4, 4, 4, 1, 1, 1, 1, 1, 1,
+                                   4, 4, 4, 4, 4, 4};
+        out.output_width = 4;
+        return true;
+    case kGameplayFlags:
+        /* One entity/id input; ten outputs, final bool is the VM primary. */
+        out.input_widths = {4};
+        out.extra_output_widths = {1, 1, 1, 1, 1, 4, 1, 1, 1};
+        out.output_width = 1;
+        return true;
     case kEntryState:
         /* (entity/slot, bool gate) -> (state int, ==0, ==1, ==2, ==3) */
         out.input_widths = {4, 1};
@@ -1140,19 +1286,136 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
 bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
     OperatorSignature sig;
     if (!describe(key, sig) || args.size() != sig.input_widths.size()) return false;
+    /* FUN_1443EFC30 maps its missing-table sentinel (-FLT_MAX) to -1024.0f.
+     * Offline there is no simulation table, so the result does not depend on
+     * whether the position operand itself is known. */
+    if (key == kWaterHeight) {
+        const float value = -1024.0f;
+        uint32_t raw = 0;
+        std::memcpy(&raw, &value, sizeof(raw));
+        served_[key] += 1;
+    if (key == kPlayerTeam) {
+        /* 0x1475F4920 returns zero if either link in the Player PointerRef chain is
+         * null; only the live-object path reads TeamId at object +0x60. */
+        served_[key] += 1;
+        out = Value::from_u32(0);
+        return true;
+    }
+        out = Value::from_u32(raw);
+        return true;
+    }
     if (key == kBoneConstraint) {       /* a side effect with no result: no-op */
         served_[key] += 1;
         out = Value{};
         out.known = true;
         return true;
     }
+    if (key == kShooterStatus && args.empty()) {
+        /* FUN_142CC9510 initializes (status, secondary) to (7, 0), then returns
+         * unchanged when FUN_142CC9300 finds no shooter. Primary comes first. */
+        const uint32_t secondary = 0, status = 7;
+        out.bytes.resize(8);
+        std::memcpy(out.bytes.data(), &secondary, 4);
+        std::memcpy(out.bytes.data() + 4, &status, 4);
+        out.known = true;
+        served_[key] += 1;
+        return true;
+    }
+    if (key == kActorStat && args.size() == 2) {
+        /* FUN_147591900 zeroes valid/value before resolving either entity path. */
+        out.bytes.assign(5, 0);          /* float primary, bool extra */
+        out.known = true;
+        served_[key] += 1;
+        return true;
+    }
+    if (key == kClientString && args.size() == 3 && args[2].known &&
+        args[2].bytes.size() >= 8) {
+        /* FUN_1474ACAB0 copies DefaultValue when entity is null or player id is FF. */
+        out.bytes.assign(args[2].bytes.begin(), args[2].bytes.begin() + 8);
+        out.known = true;
+        served_[key] += 1;
+        return true;
+    }
+    if (key == kWeaponState && args.empty()) {
+        /* FUN_142CC9850 native order:
+         *   7, 0, FFFFFFFF, six false, four zero words, three zero floats.
+         * The VM stores the last native output first, followed by the first 15. */
+        out.bytes.assign(46, 0);
+        const uint32_t status = 7, no_id = 0xFFFFFFFFu;
+        std::memcpy(out.bytes.data() + 4, &status, 4);
+        std::memcpy(out.bytes.data() + 12, &no_id, 4);
+        out.known = true;
+        served_[key] += 1;
+        return true;
+    }
+    if (key == kGameplayFlags && args.size() == 1) {
+        /* FUN_14172B810 clears all ten outputs before looking up the live object. */
+        out.bytes.assign(13, 0);         /* bool primary + nine extras */
+        out.known = true;
+        served_[key] += 1;
+        return true;
+    }
     for (size_t i = 0; i < args.size(); ++i)
         if (!args[i].known || args[i].bytes.size() < sig.input_widths[i]) return false;
-    if (key == kTweakFloat || key == kTweakBool) {
+    if (key == kTweakFloat || key == kTweakBool || key == kTweakInt) {
         const auto it = tweakables_.find(args[0].as_u32());
         if (it == tweakables_.end()) return false;
         served_[key] += 1;
         out = key == kTweakBool ? Value::from_bool(it->second != 0) : Value::from_u32(it->second);
+        return true;
+    }
+    if (key == kIdentityI32) {
+        served_[key] += 1;
+        out = Value::from_u32(args[0].as_u32());
+        return true;
+    }
+    if (key == kContextStats) {
+        served_[key] += 1;
+        out.bytes.assign(16, 0); /* primary fourth output, then outputs 0..2 */
+        out.known = true;
+        return true;
+    }
+    if (key == kPlayerDefault) {
+        served_[key] += 1;
+        out = Value::from_u32(args[2].as_u32());
+        return true;
+    }
+    if (key == kEaseProperty) {
+        const uint32_t mode = args[0].as_u32();
+        const uint32_t type = args[1].as_u32();
+        float x = 0.0f;
+        std::memcpy(&x, args[2].bytes.data(), 4);
+        auto base = [&](float t) { return type == 0 ? t : t * t; };
+        if (type > 1) return false; /* remaining function-table entries unrecovered */
+        float y = x;
+        if (mode == 0) y = base(x);
+        else if (mode == 1) y = 1.0f - base(1.0f - x);
+        else if (mode == 2)
+            y = x < 0.5f ? base(x + x) * 0.5f
+                         : 1.0f - base(2.0f - x - x) * 0.5f;
+        else if (mode == 3)
+            y = 0.5f < x ? (base(x + x - 1.0f) + 1.0f) * 0.5f
+                         : 0.5f - base(1.0f - x - x) * 0.5f;
+        uint32_t raw = 0;
+        std::memcpy(&raw, &y, 4);
+        served_[key] += 1;
+        out = Value::from_u32(raw);
+        return true;
+    }
+    if (key == kSubHandle) {
+        uint64_t handle = 0;
+        std::memcpy(&handle, args[0].bytes.data(), 8);
+        if (handle != 0) return false;
+        served_[key] += 1;
+        out = empty_set();
+        return true;
+    }
+    if (key == kEntityEntry || key == kEntityWalk || key == kSliceHandles) {
+        uint32_t count = 0;
+        std::memcpy(&count, args[0].bytes.data(), 4);
+        if (count != 0) return false;
+        served_[key] += 1;
+        out = empty_set();
         return true;
     }
     if (key == kFilterByTags) {
@@ -1188,6 +1451,78 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (count != 0) return false;          /* context-dependent: not served */
         served_[key] += 1;
         out = empty_set();
+        return true;
+    }
+    if (key == kAimingPlayer) {
+        served_[key] += 1;
+        /* FUN_14736B5D0 stores zero to all four outputs before resolving Player. */
+        out.bytes.assign(16, 0);       /* primary fourth output, then first..third */
+        out.known = true;
+        return true;
+    }
+    if (key == kSetMerge) {
+        served_[key] += 1;
+        /* FUN_144341D40 copies input 0 verbatim, then appends unseen valid ids from
+         * input 1, preserving order and stopping at the native's 64-entry cap. */
+        out.bytes.assign(args[0].bytes.begin(), args[0].bytes.begin() + kSetBytes);
+        uint32_t count = 0, incoming = 0;
+        std::memcpy(&count, out.bytes.data(), 4);
+        std::memcpy(&incoming, args[1].bytes.data(), 4);
+        count = std::min(count, 64u);
+        incoming = std::min(incoming, 64u);
+        for (uint32_t i = 0; i < incoming && count < 64u; ++i) {
+            uint32_t id = kNoId;
+            std::memcpy(&id, args[1].bytes.data() + 4 + i * 4, 4);
+            if (id == kNoId) continue;
+            bool present = false;
+            for (uint32_t j = 0; j < count; ++j) {
+                uint32_t old = kNoId;
+                std::memcpy(&old, out.bytes.data() + 4 + j * 4, 4);
+                if (old == id) { present = true; break; }
+            }
+            if (!present) {
+                std::memcpy(out.bytes.data() + 4 + count * 4, &id, 4);
+                ++count;
+            }
+        }
+        std::memcpy(out.bytes.data(), &count, 4);
+        out.known = true;
+        return true;
+    }
+    if (key == kContextPair) {
+        served_[key] += 1;
+        /* FUN_141730D50 initializes (bool,u32) to (0,0) before every context lookup. */
+        out.bytes.assign(5, 0);        /* primary u32, then extra bool */
+        out.known = true;
+        return true;
+    }
+    if (key == kAbilityState) {
+        served_[key] += 1;
+        /* FUN_14174E130 initializes state=7 (Invalid), value=0. */
+        const uint32_t invalid = 7;
+        out.bytes.assign(8, 0);        /* primary value, then extra state */
+        std::memcpy(out.bytes.data() + 4, &invalid, 4);
+        out.known = true;
+        return true;
+    }
+    if (key == kEntityFlags) {
+        served_[key] += 1;
+        /* FUN_14172B9B0 clears all ten outputs before resolving the entity. */
+        out.bytes.assign(13, 0);       /* primary byte + nine extras (12 bytes) */
+        out.known = true;
+        return true;
+    }
+    if (key == kRelated) {
+        served_[key] += 1;
+        /* FUN_141737FC0 clears the destination before entity resolution. */
+        out = empty_set();
+        return true;
+    }
+    if (key == kApplyAffector) {
+        served_[key] += 1;
+        /* Server path FUN_141726A10 clears the result before scanning TargetList;
+         * the offline world has no resolvable target/affector components. */
+        out = Value::from_bool(false);
         return true;
     }
     served_[key] += 1;

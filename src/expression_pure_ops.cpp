@@ -440,7 +440,6 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     if (n == "ToFloatUInt")          { out = put_f32((float)a[0].as_u32()); return true; }
     if (n == "ToFloatBool")          { out = put_f32(a[0].as_bool() ? 1.f : 0.f); return true; }
     if (n == "NotEqualsBool")        { out = Value::from_bool(a[0].as_bool() != a[1].as_bool()); return true; }
-
     float u[3], v[3];
     if (n == "AddFloat3") {
         vec3(a[0], u); vec3(a[1], v);

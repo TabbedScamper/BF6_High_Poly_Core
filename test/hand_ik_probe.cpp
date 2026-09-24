@@ -83,6 +83,15 @@ int main(int argc, char** argv)
     std::printf("%s: weapon %d type %d, handikdisable %d; bones LeftHand %d RightHand %d Wep_IK_LeftHand %d Wep_IK_RightHand %d\n",
                 argv[2], w, t, mode, lh, rh, il, ir);
     if (lh < 0 || rh < 0 || il < 0 || ir < 0) return 1;
+    if (std::getenv("BF6_LIST_WEP_BONES"))
+        for (int i = 0; i < sk->bone_count; ++i) {
+            const char* n = sk->bones[i].name ? sk->bones[i].name : "";
+            if (std::strncmp(n, "Wep", 3) == 0 || std::strstr(n, "Camera") || std::strstr(n, "Aim") || std::strstr(n, "Sight"))
+                std::printf("bone %3d %-28s parent %-24s bind local t (%.4f %.4f %.4f) model t (%.4f %.4f %.4f)\n", i, n,
+                            sk->bones[i].parent >= 0 && sk->bones[sk->bones[i].parent].name ? sk->bones[sk->bones[i].parent].name : "-",
+                            sk->bones[i].local[9], sk->bones[i].local[10], sk->bones[i].local[11],
+                            sk->bones[i].model[9], sk->bones[i].model[10], sk->bones[i].model[11]);
+        }
     for (int b : { il, ir, lh, rh }) {
         std::string chain;
         for (int k = b; k >= 0; k = sk->bones[k].parent) { chain += sk->bones[k].name ? sk->bones[k].name : "?"; chain += k == 0 ? "" : " < "; }

@@ -66,7 +66,23 @@ public:
     void set_bool(const std::string& p, bool v)   { m_[p] = Value{1, v, v ? 1.f : 0.f, v ? 1 : 0}; }
     void set_float(const std::string& p, float v) { m_[p] = Value{2, v != 0.f, v, (int32_t)v}; }
     void set_int(const std::string& p, int32_t v) { m_[p] = Value{3, v != 0, (float)v, v}; }
-    const Value* get(const std::string& p) const { auto it = m_.find(p); return it == m_.end() ? nullptr : &it->second; }
+    /* A TAG'S WRITE sits OVER the caller's value until the tag resets it. The caller
+     * plays the game's gameplay code and re-sends its states every frame; a clip or
+     * node tag (the reload node setting 13p.wep.handikdisable to Both) must hold for as
+     * long as it is active rather than be erased by the next frame's re-send - which is
+     * what happened: the upper body read the caller's value while the IK read the tag's,
+     * and the reload arms were driven by neither. Resetting a tag clears only its layer,
+     * so the state goes back to the caller's value (or, unset, the authored default). */
+    void tag_set_bool(const std::string& p, bool v)   { t_[p] = Value{1, v, v ? 1.f : 0.f, v ? 1 : 0}; }
+    void tag_set_float(const std::string& p, float v) { t_[p] = Value{2, v != 0.f, v, (int32_t)v}; }
+    void tag_set_int(const std::string& p, int32_t v) { t_[p] = Value{3, v != 0, (float)v, v}; }
+    void tag_clear(const std::string& p) { t_.erase(p); }
+    const Value* get(const std::string& p) const {
+        auto t = t_.find(p);
+        if (t != t_.end()) return &t->second;
+        auto it = m_.find(p);
+        return it == m_.end() ? nullptr : &it->second;
+    }
     void clear(const std::string& p) { m_.erase(p); }
     /* The value faces of a game-state asset. `ok` false = not evaluable. */
     bool  as_bool(Graph& g, const Obj* o, bool& ok);
@@ -81,6 +97,7 @@ private:
      * that could not be evaluated says WHY rather than returning a bare false. */
     void note_unknown_str(const std::string& why);
     std::map<std::string, Value> m_;
+    std::map<std::string, Value> t_;   /* active tags' writes, over m_ */
     std::vector<std::string> unknown_;
 };
 

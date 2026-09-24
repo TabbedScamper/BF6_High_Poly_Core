@@ -1520,37 +1520,44 @@ struct TagSet {
         const int mode = (int)numv(t.a->f(0xc755b26cu));
         const Obj* gs = rt.g.resolve(t.a->f(0x6b01e323u), t.a);
         if (!gs) return;
+        /* A tag that resets on leave (ResetOnLeave 1 default, 2 restore) holds its value
+         * OVER the caller's for as long as it is active (States::tag_set_*); one that
+         * never resets writes the base value, as it always did. */
+        const bool held = (int)numv(t.a->f(0xfeac4b79u)) != 0;
+        auto setf = [&](float v) { if (held) rt.st.tag_set_float(gs->path, v); else rt.st.set_float(gs->path, v); };
+        auto seti = [&](int32_t v) { if (held) rt.st.tag_set_int(gs->path, v); else rt.st.set_int(gs->path, v); };
+        auto setb = [&](bool v) { if (held) rt.st.tag_set_bool(gs->path, v); else rt.st.set_bool(gs->path, v); };
         if (t.is_float) {
             /* FloatMode: Set 1, Multiply 2, Blend 3, Add 4, Subtract 5. Blend needs a
              * factor the asset does not carry, so it is reported rather than invented. */
             const float v = (float)numv(t.a->f(0x8cf424e7u));
             switch (mode) {
-            case 1: rt.st.set_float(gs->path, v); break;
-            case 2: rt.st.set_float(gs->path, t.fstore * v); break;
-            case 4: rt.st.set_float(gs->path, t.fstore + v); break;
-            case 5: rt.st.set_float(gs->path, t.fstore - v); break;
+            case 1: setf(v); break;
+            case 2: setf(t.fstore * v); break;
+            case 4: setf(t.fstore + v); break;
+            case 5: setf(t.fstore - v); break;
             case 3: rt.note("float tag Blend mode carries no factor, left alone: " + t.a->path); break;
             default: break;
             }
             return;
         }
         if (t.is_int) {
-            if (mode == 1) rt.st.set_int(gs->path, (int32_t)numv(t.a->f(0x8cf424e7u)));
+            if (mode == 1) seti((int32_t)numv(t.a->f(0x8cf424e7u)));
             else if (mode != 0) rt.note("integer tag mode " + std::to_string(mode) + " not implemented: " + t.a->path);
             return;
         }
-        if (mode == 1) rt.st.set_bool(gs->path, boolv(t.a->f(0x8cf424e7u)));
-        else if (mode == 2) rt.st.set_bool(gs->path, !t.store);
+        if (mode == 1) setb(boolv(t.a->f(0x8cf424e7u)));
+        else if (mode == 2) setb(!t.store);
     }
+    /* Reset: the tag's layer goes, and the state is the caller's value again - or, when
+     * the caller never set it, the authored default (ResetOnLeave 1). Restore (2) saved the
+     * value the tag found, which is that same caller value. */
     void reset(Runtime& rt, T& t) {
         const int mode = (int)numv(t.a->f(0xc755b26cu));
         const int rs = (int)numv(t.a->f(0xfeac4b79u));
         const Obj* gs = rt.g.resolve(t.a->f(0x6b01e323u), t.a);
         if (mode == 0 || rs == 0 || !gs) return;
-        if (rs == 1) rt.st.clear(gs->path);                     /* the state's authored default */
-        else if (t.is_float) rt.st.set_float(gs->path, t.fstore);
-        else if (t.is_int) rt.st.set_int(gs->path, t.istore);
-        else rt.st.set_bool(gs->path, t.store);
+        rt.st.tag_clear(gs->path);
     }
     void evaluate(Runtime& rt, float time) {
         prev = now; now = time;

@@ -1074,6 +1074,13 @@ const uint32_t kSettingByPath   = 0xBC999B66u;
  * a hash not in the list gives false. Operands (hash, hash, N): operand 0 repeats the
  * hash (measured on every call), operand 1 is the one the native reads. */
 const uint32_t kIntFieldIs      = 0x9132CD71u;
+/* IS THIS THE LOCAL PLAYER'S SOLDIER (reflected MotionMachine, bool CheckForSpectator ->
+ * bool; thunk 0x147EE5760, native 0x14432B690). On a client, flag 0 returns the player's
+ * is-local byte (+0x1D8) and flag 1 whether the soldier is the local player's controlled,
+ * or spectated, one; a server context returns 0. MODELLED, not read: offline the runner
+ * IS the local client's own soldier - the first-person walker - so both flags answer
+ * true. BF6_REMOTE_SOLDIER=1 models a remote soldier instead (false). */
+const uint32_t kIsLocalSoldier  = 0x56A77320u;
 /* THE DEBUG DRAWS. Reflected functions that return void and take only what to draw -
  * Position/Start/End/Transform, Color32, Wireframe, DepthTest, TimeVisible - per
  * ReflectedFunctions.tsv (DrawSphere, DrawText, DrawArrow, DrawBox, DrawLine, ...). They
@@ -1320,6 +1327,10 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {8, 1};
         out.output_width = 1;
         return true;
+    case kIsLocalSoldier:
+        out.input_widths = {1};
+        out.output_width = 1;
+        return true;
     case kIntFieldIs:
         if (!bf6::SoldierFields::get().loaded()) return false;
         out.input_widths = {4, 4, 4};
@@ -1468,6 +1479,11 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (!args[1].known || args[1].bytes.empty()) return false;
         served_[key] += 1;
         out = Value::from_bool(args[1].bytes[0] != 0);
+        return true;
+    }
+    if (key == kIsLocalSoldier) {
+        served_[key] += 1;
+        out = Value::from_bool(std::getenv("BF6_REMOTE_SOLDIER") == nullptr);
         return true;
     }
     if (key == kIntFieldIs) {

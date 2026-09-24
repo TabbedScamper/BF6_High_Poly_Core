@@ -1062,6 +1062,26 @@ const uint32_t kFieldXform    = 0xD927CB31u;
  * stores min(max(value, min), max) into the int / float field. Operand 4 is never read. */
 const uint32_t kClampStoreInt   = 0xB7428609u; /* native 144329F30 */
 const uint32_t kClampStoreFloat = 0x239DC415u; /* native 14432A010 -> FUN_14436A080 */
+/* THE "SETTINGS LOOKUP BY PATH" (dotted names such as VO.Enable in operand 0). Its native,
+ * 0x143B6A450 from expression_engine_nodes_6a1c1b.tsv, is three instructions:
+ * `movzx eax, byte [rdx]; mov [r8], al; ret` - the output IS operand 1, and the name in
+ * operand 0 is never read. Pure; known exactly when operand 1 is. */
+const uint32_t kSettingByPath   = 0xBC999B66u;
+/* THE DEBUG DRAWS. Reflected functions that return void and take only what to draw -
+ * Position/Start/End/Transform, Color32, Wireframe, DepthTest, TimeVisible - per
+ * ReflectedFunctions.tsv (DrawSphere, DrawText, DrawArrow, DrawBox, DrawLine, ...). They
+ * write nothing a graph can read back, so offline they draw nothing and produce nothing.
+ * Graphs pass a varying number of their parameters (observed arity 0..9), so each call
+ * consumes whatever operands it has. */
+static bool is_debug_draw(uint32_t key) {
+    switch (key) {
+    case 0x7B549E87u: case 0x21A2D460u: case 0x4F5E0255u: case 0xF086DE07u:
+    case 0xEAADFDD0u: case 0xCDF6B1BDu: case 0x290A3467u: case 0x96FE5D21u:
+    case 0xF7B11F4Eu: case 0xC7C9F7F4u: case 0xA73FDA72u: case 0x1CFF86BEu:
+        return true;
+    default: return false;
+    }
+}
 /* 0xEA5D1359 Aiming(EntryTagId -> Yaw, Pitch, Roll, ZoomLevel): thunk 0x14736B4A0 ->
  * FUN_1405794A0, which ZEROES all four outputs first and fills them only when an
  * entry in the vehicle's entry list carries the tag (vtable +0x250 gives the trio,
@@ -1126,6 +1146,8 @@ const uint32_t kWaterHeight = 0xED79777Au;
 
 bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
     out = OperatorSignature{};
+    /* no-operand default; describe_call sizes each call to its own operands */
+    if (is_debug_draw(key)) { out.output_width = 0; return true; }
     switch (key) {
     case kTweakFloat: out.input_widths = {4}; out.output_width = 4; return true;
     case kTweakBool:  out.input_widths = {4}; out.output_width = 1; return true;
@@ -1286,6 +1308,11 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {4, 4, key == kStoreBool ? 1u : 4u};
         out.output_width = 0;
         return true;
+    case kSettingByPath:
+        /* (CString name - never read, bool) -> bool */
+        out.input_widths = {8, 1};
+        out.output_width = 1;
+        return true;
     case kClampStoreInt:
     case kClampStoreFloat:
         /* Six operands here; describe_call also admits the five-operand form. */
@@ -1352,6 +1379,12 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
 
 bool WorldHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
                               OperatorSignature& out) {
+    if (is_debug_draw(key)) {
+        out = OperatorSignature{};
+        out.input_widths.assign(consts.size(), 4u);
+        out.output_width = 0;
+        return true;
+    }
     if ((key == kClampStoreInt || key == kClampStoreFloat) &&
         (consts.size() == 5 || consts.size() == 6)) {
         if (!describe(key, out)) return false;
@@ -1362,6 +1395,11 @@ bool WorldHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
 }
 
 bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
+    if (is_debug_draw(key)) {
+        served_[key] += 1;
+        out = Value{};
+        return true;
+    }
     if (key == kClampStoreInt || key == kClampStoreFloat) {
         if (std::getenv("BF6_LOG_FIELD_IDS")) {
             std::string hex;
@@ -1414,6 +1452,12 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
     }
     OperatorSignature sig;
     if (!describe(key, sig) || args.size() != sig.input_widths.size()) return false;
+    if (key == kSettingByPath) {
+        if (!args[1].known || args[1].bytes.empty()) return false;
+        served_[key] += 1;
+        out = Value::from_bool(args[1].bytes[0] != 0);
+        return true;
+    }
     /* FUN_1443EFC30 maps its missing-table sentinel (-FLT_MAX) to -1024.0f.
      * Offline there is no simulation table, so the result does not depend on
      * whether the position operand itself is known. */

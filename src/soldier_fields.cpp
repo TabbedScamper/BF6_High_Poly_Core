@@ -41,6 +41,26 @@ bool number(const EbxValue& v, double& out)
     }
 }
 
+/* A nested descriptor's u16 id (the reference descriptors inside a field instance: one
+ * under 81dd8149, three under a562e819, all 0xFFFF on LinearAcceleration and
+ * LocalGroundVelocity). */
+const uint32_t kDescId = 0x2b6f2936u;
+
+bool any_descriptor_set(const EbxValue& v, int depth)
+{
+    if (depth > 8) return false;
+    if (v.kind == EbxValue::Kind::Struct) {
+        for (const auto& kv : v.fields) {
+            double d = 0.0;
+            if (kv.first == kDescId && number(kv.second, d)) { if ((uint32_t)d != 0xFFFFu) return true; }
+            else if (any_descriptor_set(kv.second, depth + 1)) return true;
+        }
+    } else if (v.kind == EbxValue::Kind::Array) {
+        for (const auto& it : v.items) if (any_descriptor_set(it, depth + 1)) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 SoldierFields& SoldierFields::get()
@@ -88,6 +108,7 @@ bool SoldierFields::load(Source& src, TypeDb& types, std::string& err)
                     if (ok) { for (int j = 0; j < 3; ++j) f.def[j] = (float)c[j]; break; }
                 }
         if (id < 0.0 || f.name.empty()) continue;
+        f.space_ref = any_descriptor_set(v, 0);
         f.id = (int)id;
         f.lane = (int)lane;
         by_key_[key(f.kind, f.lane, f.id)] = f;

@@ -1087,6 +1087,15 @@ const uint32_t kIsLocalSoldier  = 0x56A77320u;
  * atan2(z, x) of the scaled lanes, wrapped to [-pi, pi] by the fmodf pair. The valid flag
  * is the last native output, so it is the VM primary and the angle the extra output. */
 const uint32_t kAngleAroundY    = 0x6D534FD9u;
+/* VEC FIELD STORES WITH A SPACE MODE. 0x47D7C5A6 (native 144329850) names the field by
+ * descriptor, 0x62FE6638 (native 144329BA0) by link hash; operands (key or hash,
+ * descriptor or hash, mode, Vec3). Mode 0 is the plain store (FUN_14436A850); any other
+ * mode goes through FUN_14436AF10, which zeroes a non-finite vector and, in mode 2,
+ * converts through the field's reference space - and when the field names none (its
+ * reference descriptors all 0xFFFF) falls through to the same plain store. Measured
+ * modes: 0 and 2 only. A field with a reference space, or another mode, is refused. */
+const uint32_t kVecStoreDesc    = 0x47D7C5A6u;
+const uint32_t kVecStoreHash    = 0x62FE6638u;
 /* THE DEBUG DRAWS. Reflected functions that return void and take only what to draw -
  * Position/Start/End/Transform, Color32, Wireframe, DepthTest, TimeVisible - per
  * ReflectedFunctions.tsv (DrawSphere, DrawText, DrawArrow, DrawBox, DrawLine, ...). They
@@ -1337,6 +1346,12 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {1};
         out.output_width = 1;
         return true;
+    case kVecStoreDesc:
+    case kVecStoreHash:
+        if (!bf6::SoldierFields::get().loaded()) return false;
+        out.input_widths = {4, 4, 4, 16};
+        out.output_width = 0;
+        return true;
     case kAngleAroundY:
         out.input_widths = {16};
         out.extra_output_widths = {4};
@@ -1490,6 +1505,42 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (!args[1].known || args[1].bytes.empty()) return false;
         served_[key] += 1;
         out = Value::from_bool(args[1].bytes[0] != 0);
+        return true;
+    }
+    if (key == kVecStoreDesc || key == kVecStoreHash) {
+        if (!args[1].known || !args[2].known || args[1].bytes.size() < 4 || args[2].bytes.size() < 4)
+            return false;
+        bf6::SoldierFields& sf = bf6::SoldierFields::get();
+        const bf6::SoldierFields::Field* f = nullptr;
+        if (key == kVecStoreDesc) {
+            uint16_t id = 0;
+            std::memcpy(&id, args[1].bytes.data(), 2);
+            if (id == 0xFFFFu) { served_[key] += 1; out = Value{}; return true; }
+            f = sf.find(bf6::SoldierFields::kVec, args[1].bytes[3], id);
+        } else {
+            uint32_t h = 0;
+            std::memcpy(&h, args[1].bytes.data(), 4);
+            f = sf.by_hash(h);
+        }
+        int32_t mode = 0;
+        std::memcpy(&mode, args[2].bytes.data(), 4);
+        if (!f || f->kind != bf6::SoldierFields::kVec) return false;
+        if (mode != 0 && (mode != 2 || f->space_ref)) return false;
+        served_[key] += 1;
+        out = Value{};
+        /* x, y and z known is enough: the pad lane of a Vec3 assembled lane by lane is
+         * never written (the same rule PureOps applies to its Float3 operators). */
+        bool xyz = args[3].known && args[3].bytes.size() >= 12;
+        if (!xyz && args[3].bytes.size() >= 12 && args[3].known_bytes.size() >= 12) {
+            xyz = true;
+            for (int i = 0; i < 12; ++i) xyz = xyz && args[3].known_bytes[(size_t)i] != 0;
+        }
+        if (!xyz) { sf.store_unknown(*f); return true; }
+        float v[4] = {0, 0, 0, 0};
+        std::memcpy(v, args[3].bytes.data(), 12);
+        if (mode != 0 && (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])))
+            v[0] = v[1] = v[2] = v[3] = 0.0f;
+        sf.store(*f, v, 4);
         return true;
     }
     if (key == kAngleAroundY) {

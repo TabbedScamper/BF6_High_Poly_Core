@@ -41,6 +41,10 @@ public:
         std::string name;
         int kind = 0, lane = 0, id = 0;
         float def[4] = {0, 0, 0, 0};
+        /* The field names a reference space: some nested descriptor on its instance has an
+         * id other than 0xFFFF. A space-mode vec store (FUN_14436AF10, mode 2) converts
+         * through that reference; with none it is the plain store. */
+        bool space_ref = false;
     };
 
     static SoldierFields& get();

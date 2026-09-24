@@ -1930,8 +1930,10 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         point[0] += auth2 * roll * c(0xA4);
         point[2] -= auth2 * pitch * c(0xA0) + fv4 * 0.005f;
         push(base * c(0x9C) * collective, up, point);            /* the main lift */
-        push(base * (collective < 0.0f ? c(0x7C) : c(0xA8)) * collective, up,
-             body_.com);                                         /* the torque path */
+        /* FUN_1443EB0B0 clamps only the main term above. Its second term selects
+         * 0x7C/0xA8 and multiplies both by raw param_2 (Throttle). */
+        push(base * (throttle < 0.0f ? c(0x7C) : c(0xA8)) * throttle, up,
+             body_.com);                                         /* secondary lift */
         /* The disc-tilt penalty: nothing at level, full downforce inverted. */
         float tilt = (up[1] - 1.0f) * -0.5f;
         tilt = tilt < 0.0f ? 0.0f : (tilt > 1.0f ? 1.0f : tilt);

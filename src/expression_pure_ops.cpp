@@ -213,6 +213,24 @@ const Spec kSpecs[] = {
      *   the other: the two bodies really do cross in opposite orders. */
     {"LookAtTransformForward",   3, {kV, kV, kV}, kT},  /* s,k,s */
     {"LookAtTransform",          3, {kV, kV, kV}, kT},  /* s,s,k */
+    /* Seven more, all outside any function Ghidra made, read from the disassembly:
+     *   ClampFloat3        0x142495920  (v, lo, hi): minps(hi, maxps(lo, v)), lane-wise
+     *   AverageFloat       0x1408F77B0  (a + b) * 0.5 (the constant read at 0x149318708)
+     *   ToVec2Float3       0x1424A30E0 / 0x143B30E50 (two registries): (x, y) of the Vec3
+     *   ScaleFloat3LinearTransform 0x143B59070  v -> diag(v.x, v.y, v.z), no translation
+     *   MultiplyLinearTransformFloatLinearTransform 0x143B57000  every row * s, the
+     *                                   translation row included
+     *   RotationAndTranslation 0x143B57FD0  (T, p): T's rows 0-2, row 3 = p
+     *   InverseTransform   0x143B59350  (p, T): d = p - T.row3, then
+     *                                   (d.r0, d.r1, d.r2) / |r0|^2 - a point into T's
+     *                                   frame, exact for a uniformly scaled T */
+    {"ClampFloat3",              3, {kV, kV, kV}, kV},  /* s,k,k */
+    {"AverageFloat",             2, {kF, kF}, kF},      /* s,s */
+    {"ToVec2Float3",             1, {kV},     kF * 2},  /* s */
+    {"ScaleFloat3LinearTransform",1,{kV},     kT},
+    {"MultiplyLinearTransformFloatLinearTransform", 2, {kT, kF}, kT},
+    {"RotationAndTranslation",   2, {kT, kV}, kT},
+    {"InverseTransform",         2, {kV, kT}, kV},
 };
 
 /* The engine's own angle wrap, as FUN_142495080 and FUN_14249A0C0 both inline it. */
@@ -348,7 +366,8 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                             n == "NormalizeFloat3" ||
                             n == "MultiplyFloat3Float3Float3" || n == "CrossVec3" ||
                             n == "NegateFloat3" || n == "EulerToQuaternion" ||
-                            n == "LookAtTransformForward" || n == "LookAtTransform");
+                            n == "LookAtTransformForward" || n == "LookAtTransform" ||
+                            n == "ClampFloat3" || n == "ToVec2Float3" || n == "ScaleFloat3LinearTransform");
     /* BF6_FLOAT3_ONLY=<name>[,<name>]: apply the relaxation to named operators only, so
      * which one changes a vehicle can be found by bisection. Diagnostic. */
     bool relax = all_float3;
@@ -409,6 +428,57 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         return true;
     }
     if (n == "AngularDistanceRad")   { out = put_f32(wrap_pi(wrap_pi(f32(a[0])) - wrap_pi(f32(a[1])))); return true; }
+    if (n == "ClampFloat3") {
+        float v[3], lo[3], hi[3], r[3];
+        vec3(a[0], v); vec3(a[1], lo); vec3(a[2], hi);
+        for (int i = 0; i < 3; ++i) {
+            const float t = lo[i] > v[i] ? lo[i] : v[i];   /* maxps(lo, v) */
+            r[i] = hi[i] < t ? hi[i] : t;                  /* minps(hi, t) */
+        }
+        out = put_vec3(r);
+        return true;
+    }
+    if (n == "AverageFloat")         { out = put_f32((f32(a[0]) + f32(a[1])) * 0.5f); return true; }
+    if (n == "ToVec2Float3") {
+        out = Value{};
+        out.bytes.assign(a[0].bytes.begin(), a[0].bytes.begin() + 8);
+        out.known = true;
+        return true;
+    }
+    if (n == "ScaleFloat3LinearTransform") {
+        float v[3];
+        vec3(a[0], v);
+        const float m[4][3] = {{v[0], 0, 0}, {0, v[1], 0}, {0, 0, v[2]}, {0, 0, 0}};
+        out = put_xform(m);
+        return true;
+    }
+    if (n == "MultiplyLinearTransformFloatLinearTransform") {
+        float m[4][3];
+        xform(a[0], m);
+        const float s = f32(a[1]);
+        for (auto& row : m) for (float& c : row) c *= s;
+        out = put_xform(m);
+        return true;
+    }
+    if (n == "RotationAndTranslation") {
+        float m[4][3], p[3];
+        xform(a[0], m);
+        vec3(a[1], p);
+        for (int c = 0; c < 3; ++c) m[3][c] = p[c];
+        out = put_xform(m);
+        return true;
+    }
+    if (n == "InverseTransform") {
+        float p[3], m[4][3];
+        vec3(a[0], p);
+        xform(a[1], m);
+        const float d[3] = {p[0] - m[3][0], p[1] - m[3][1], p[2] - m[3][2]};
+        const float inv = 1.0f / (m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]);
+        float r[3];
+        for (int k = 0; k < 3; ++k) r[k] = (d[0] * m[k][0] + d[1] * m[k][1] + d[2] * m[k][2]) * inv;
+        out = put_vec3(r);
+        return true;
+    }
     if (n == "LookAtTransformForward" || n == "LookAtTransform") {
         float p[3], b[3], u[3], f[3];
         vec3(a[0], p); vec3(a[1], b); vec3(a[2], u);

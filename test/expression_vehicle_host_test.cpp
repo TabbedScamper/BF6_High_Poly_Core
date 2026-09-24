@@ -84,7 +84,10 @@ static int self_check() {
                           "AddFloat2", "SubtractFloat2", "AbsoluteFloat2", "MinFloat2",
                           "MultiplyFloat2FloatFloat2", "NegateFloat3", "Xor", "EqualsUInt",
                           "SubtractUInt", "ToVec3Float", "AngularDistanceRad",
-                          "EulerToQuaternion", "LookAtTransformForward", "LookAtTransform"}) {
+                          "EulerToQuaternion", "LookAtTransformForward", "LookAtTransform",
+                          "ClampFloat3", "AverageFloat", "ToVec2Float3", "ScaleFloat3LinearTransform",
+                          "MultiplyLinearTransformFloatLinearTransform", "RotationAndTranslation",
+                          "InverseTransform"}) {
         key[n] = k; ops.add(k, n); ++k;
     }
     auto f = [](float v) {
@@ -361,6 +364,47 @@ static int self_check() {
             if (m[0][0] != 1.f || m[1][1] != 1.f || m[2][2] != 1.f || m[3][2] != 3.f) {
                 std::printf("   LookAtTransformForward\n"); ++bad;
             }
+        }
+        if (!ops.invoke(key["ClampFloat3"], {v3(5.f, -5.f, 0.f), v3(-1.f, -1.f, -1.f), v3(1.f, 1.f, 1.f)}, out)) ++bad;
+        else {
+            float v[3]; std::memcpy(v, out.bytes.data(), 12);
+            if (v[0] != 1.f || v[1] != -1.f || v[2] != 0.f) { std::printf("   ClampFloat3\n"); ++bad; }
+        }
+        if (!ops.invoke(key["AverageFloat"], {f(1.f), f(4.f)}, out) || as_f(out) != 2.5f) {
+            std::printf("   AverageFloat\n"); ++bad;
+        }
+        {
+            /* a uniformly scaled, moved frame: (4,0,0) past its origin is 2 of its units */
+            const float sc[4][3] = {{2,0,0},{0,2,0},{0,0,2},{1,2,3}};
+            if (!ops.invoke(key["InverseTransform"], {v3(5.f, 2.f, 3.f), lt(sc)}, out)) ++bad;
+            else {
+                float v[3]; std::memcpy(v, out.bytes.data(), 12);
+                if (std::fabs(v[0] - 2.f) > 1e-5f || std::fabs(v[1]) > 1e-5f || std::fabs(v[2]) > 1e-5f) {
+                    std::printf("   InverseTransform (%g %g %g)\n", v[0], v[1], v[2]); ++bad;
+                }
+            }
+            if (!ops.invoke(key["RotationAndTranslation"], {lt(sc), v3(7.f, 8.f, 9.f)}, out)) ++bad;
+            else {
+                float m[4][3]; lt_rows(out, m);
+                if (m[0][0] != 2.f || m[3][0] != 7.f || m[3][2] != 9.f) { std::printf("   RotationAndTranslation\n"); ++bad; }
+            }
+            if (!ops.invoke(key["MultiplyLinearTransformFloatLinearTransform"], {lt(sc), f(0.5f)}, out)) ++bad;
+            else {
+                float m[4][3]; lt_rows(out, m);
+                if (m[0][0] != 1.f || m[3][1] != 1.f) { std::printf("   MultiplyLinearTransformFloatLinearTransform\n"); ++bad; }
+            }
+        }
+        if (!ops.invoke(key["ScaleFloat3LinearTransform"], {v3(2.f, 3.f, 4.f)}, out)) ++bad;
+        else {
+            float m[4][3]; lt_rows(out, m);
+            if (m[0][0] != 2.f || m[1][1] != 3.f || m[2][2] != 4.f || m[0][1] != 0.f || m[3][0] != 0.f) {
+                std::printf("   ScaleFloat3LinearTransform\n"); ++bad;
+            }
+        }
+        if (!ops.invoke(key["ToVec2Float3"], {v3(6.f, 7.f, 8.f)}, out) || out.bytes.size() != 8) ++bad;
+        else {
+            float v[2]; std::memcpy(v, out.bytes.data(), 8);
+            if (v[0] != 6.f || v[1] != 7.f) { std::printf("   ToVec2Float3\n"); ++bad; }
         }
         /* the same aim through LookAtTransform crosses f x u' = -x, then f x r = -y */
         if (!ops.invoke(key["LookAtTransform"], {v3(0.f, 0.f, 0.f), v3(0.f, 0.f, 5.f), v3(0.f, 1.f, 0.f)}, out)) ++bad;

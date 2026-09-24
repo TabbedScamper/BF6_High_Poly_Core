@@ -1,4 +1,5 @@
 #include "expression_state_host.h"
+#include "soldier_fields.h"
 
 #include <algorithm>
 #include <cmath>
@@ -323,6 +324,14 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
 
 static const uint32_t kPartTransform = 0x04BEFF62u;
 static const uint32_t kSetPartTransform = 0x4899CB44u;
+
+/* A known 16-byte value, for the soldier vec4 field reader. */
+static Value vec16_value(const std::vector<uint8_t>& b) {
+    Value v;
+    v.bytes = b;
+    v.known = true;
+    return v;
+}
 
 static void lt_identity(float out[16]) {
     std::memset(out, 0, 64);
@@ -1037,6 +1046,11 @@ const uint32_t kGameplayFlags = 0x39497415u; /* engine node 14172B810 */
 const uint32_t kPlayerTeam    = 0x2948B3E1u; /* native 1475F4920       */
 /* A setting/rule bool on the soldier, by descriptor: 626 uses, 43 soldier graphs. */
 const uint32_t kSettingBool   = 0x63E71248u; /* native 144328E80       */
+/* The soldier's float / int / vec4 field readers by descriptor (FC_N1): not served yet -
+ * which field an id names is being established - only logged under BF6_LOG_FIELD_IDS. */
+const uint32_t kFieldFloat    = 0xF4311C3Du; /* native 144328FC0       */
+const uint32_t kFieldInt      = 0x9FC488C4u; /* native 144328F40       */
+const uint32_t kFieldVec      = 0x32E399EBu; /* native 144329040       */
 /* 0xEA5D1359 Aiming(EntryTagId -> Yaw, Pitch, Roll, ZoomLevel): thunk 0x14736B4A0 ->
  * FUN_1405794A0, which ZEROES all four outputs first and fills them only when an
  * entry in the vehicle's entry list carries the tag (vtable +0x250 gives the trio,
@@ -1250,6 +1264,16 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {4, 4};
         out.output_width = 1;
         return true;
+    case kFieldFloat:
+    case kFieldInt:
+    case kFieldVec:
+        /* Served from the soldier field table (soldier_fields.h) once it is loaded;
+         * without it these are not described at all, as before. BF6_LOG_FIELD_IDS
+         * describes them anyway so the descriptors can be logged. */
+        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        out.input_widths = key == kFieldVec ? std::vector<uint32_t>{4, 4, 4} : std::vector<uint32_t>{4, 4};
+        out.output_width = key == kFieldVec ? 16u : 4u;
+        return true;
     case kShooterStatus:
         /* Native outputs status first, secondary state last (the VM primary). */
         out.input_widths = {};
@@ -1303,15 +1327,87 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out = Value::from_u32(0);
         return true;
     }
+    if (key == kFieldFloat || key == kFieldInt || key == kFieldVec ||
+        (key == kSettingBool && std::getenv("BF6_LOG_FIELD_IDS"))) {
+        /* BF6_LOG_FIELD_IDS: which soldier field each descriptor names, as (reader, id,
+         * lane) - to test whether the u16 id is the field's index in its type's list in
+         * common/gameplay/soldier/soldiermotionmachine. */
+        if (std::getenv("BF6_LOG_FIELD_IDS") && args.size() >= 2 && args[1].known &&
+            args[1].bytes.size() >= 4) {
+            /* Operand 1 is the descriptor (u16 id, flags byte, lane byte). */
+            uint16_t id = 0; uint8_t lane = args[1].bytes[3];
+            std::memcpy(&id, args[1].bytes.data(), 2);
+            std::string hex;
+            for (size_t a = 0; a < args.size(); ++a) {
+                hex += a ? " | " : "";
+                for (size_t b = 0; b < args[a].bytes.size() && b < 16; ++b) {
+                    char t[4]; std::snprintf(t, sizeof t, "%02x", args[a].bytes[b]); hex += t;
+                }
+                hex += args[a].known ? "" : "?";
+            }
+            std::fprintf(stderr, "fieldid %08X id %u lane %u flags %02X raw %s\n", key, id,
+                         lane, args[1].bytes[2], hex.c_str());
+        }
+        if (key != kSettingBool && !bf6::SoldierFields::get().loaded()) return false;
+    }
+    /* THE SOLDIER'S NAMED FIELDS. Operand 1 is the descriptor: u16 id, flags byte, lane
+     * byte. The field table names it; its value is the walker's live value for that name,
+     * else the authored default. A descriptor that names no field is refused. */
+    if ((key == kFieldFloat || key == kFieldInt || key == kFieldVec) && bf6::SoldierFields::get().loaded()) {
+        if (args.size() < 2 || !args[1].known || args[1].bytes.size() < 4) return false;
+        uint16_t id = 0;
+        std::memcpy(&id, args[1].bytes.data(), 2);
+        const int lane = args[1].bytes[3];
+        if (id == 0xFFFFu) {
+            /* the native's own miss: 0 / 0.0 / (0,0,0,0) */
+            out = key == kFieldVec ? vec16_value(std::vector<uint8_t>(16, 0)) : Value::from_u32(0);
+            served_[key] += 1;
+            return true;
+        }
+        const int kind = key == kFieldFloat ? bf6::SoldierFields::kFloat
+                       : key == kFieldInt ? bf6::SoldierFields::kInt : bf6::SoldierFields::kVec;
+        const bf6::SoldierFields::Field* f = bf6::SoldierFields::get().find(kind, lane, id);
+        if (!f) return false;
+        float v[4];
+        bf6::SoldierFields::get().value(*f, v);
+        if (key == kFieldInt) out = Value::from_u32((uint32_t)(int32_t)v[0]);
+        else if (key == kFieldFloat) {
+            uint32_t raw = 0;
+            std::memcpy(&raw, &v[0], 4);
+            out = Value::from_u32(raw);
+        } else {
+            std::vector<uint8_t> b(16, 0);
+            std::memcpy(b.data(), v, 16);
+            out = vec16_value(b);
+        }
+        served_[key] += 1;
+        return true;
+    }
+    if (key == kSettingBool && bf6::SoldierFields::get().loaded() && args.size() >= 2 &&
+        args[1].known && args[1].bytes.size() >= 4) {
+        uint16_t id = 0;
+        std::memcpy(&id, args[1].bytes.data(), 2);
+        if (const bf6::SoldierFields::Field* f = bf6::SoldierFields::get().find(bf6::SoldierFields::kBool,
+                                                                      args[1].bytes[3], id)) {
+            float v[4];
+            bf6::SoldierFields::get().value(*f, v);
+            out = Value::from_bool(v[0] != 0.0f);
+            served_[key] += 1;
+            return true;
+        }
+    }
     if (key == kSettingBool) {
         /* FUN_144328E80: the descriptor (u16 id, u16 flags) indexes an override bitmap
          * (+0x60) and a value bitmap (+0x10); with no override set it returns the
          * authored default, (flags >> 1) & 1. Offline nothing is overridden - there is
          * no server or gameplay code writing these - so the default IS the value.
-         * The descriptor must be known; an unknown one is refused, not defaulted. */
-        if (args.empty() || !args[0].known || args[0].bytes.size() < 4) return false;
+         * The descriptor must be known; an unknown one is refused, not defaulted.
+         * It is OPERAND 1: operand 0 is the same constant 0xF263DF78 in every soldier
+         * call (the state collection's key), measured under BF6_LOG_FIELD_IDS - and
+         * reading the default bit from it returned true for every setting. */
+        if (args.size() < 2 || !args[1].known || args[1].bytes.size() < 4) return false;
         uint16_t flags = 0;
-        std::memcpy(&flags, args[0].bytes.data() + 2, 2);
+        std::memcpy(&flags, args[1].bytes.data() + 2, 2);
         served_[key] += 1;
         out = Value::from_bool(((flags >> 1) & 1) != 0);
         return true;

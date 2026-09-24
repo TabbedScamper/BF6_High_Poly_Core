@@ -58,6 +58,7 @@ set(BF6_SOURCES
     src/expression_registry.cpp
     src/expression_vm.cpp
     src/expression_state_host.cpp
+    src/soldier_fields.cpp
     src/vehicle_sim.cpp
     src/vehicle_dynamics.cpp
     src/vehicle_wheel_ops.cpp
@@ -1959,3 +1960,9 @@ target_include_directories(ant_weaponpose_probe PRIVATE src include)
 add_executable(ebx_numbers_probe test/ebx_numbers_probe.cpp)
 target_link_libraries(ebx_numbers_probe PRIVATE bf6_core_static)
 target_include_directories(ebx_numbers_probe PRIVATE src include)
+add_executable(list_assets_probe test/list_assets_probe.cpp)
+target_link_libraries(list_assets_probe PRIVATE bf6_core_static)
+target_include_directories(list_assets_probe PRIVATE src include)
+add_executable(ebx_strings_probe test/ebx_strings_probe.cpp)
+target_link_libraries(ebx_strings_probe PRIVATE bf6_core_static)
+target_include_directories(ebx_strings_probe PRIVATE src include)

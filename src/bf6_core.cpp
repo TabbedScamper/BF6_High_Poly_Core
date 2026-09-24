@@ -4944,6 +4944,7 @@ extern "C" uint32_t bf6__type_field_offsets_by_hash(bf6_ctx* c, uint32_t name_ha
 #include "vehicle_api_ext.inc"
 #include "ebx_import_ext.inc"
 #include "armory_ext.inc" // installed armory and field-upgrade providers
+#include "soldier_fields_ext.inc" // the soldier motion machine's named state fields
 #include "options_ext.inc"
 #include "rime_ext.inc"
 #include "bones_ext.inc"

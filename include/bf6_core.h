@@ -3507,6 +3507,16 @@ typedef struct {
 BF6_API int bf6_base_weapon_stats(bf6_ctx*, const char* weapon_class,
                                   const char* weapon, bf6_weapon_base_stats* out);
 
+/* THE SOLDIER'S NAMED STATE FIELDS, read from common/gameplay/soldier/soldiermotionmachine
+ * (name, u16 id, lane, authored default per field; 571 fields in four kinds). The motion-
+ * machine graphs read them by (id, lane) descriptor; once loaded, the expression host
+ * serves those reads - the live value set by name, else the authored default. Returns the
+ * field count, 0 if the asset did not read. */
+BF6_API int  bf6_soldier_fields_load(bf6_ctx*);
+/* A field's live value by its name as the asset spells it (e.g. "CurrentSpeed"); up to four
+ * lanes for a vector field. Replaces the authored default until changed. */
+BF6_API void bf6_soldier_field_set(const char* name, const float* v, int32_t n);
+
 /* Read the customization allowance from equipment_<weapon> in the mounted
  * install.  The value is field 0x3CE3B411 on the weapon's customization
  * registry (100 on current primaries, 60 on current sidearms).  Returns -1

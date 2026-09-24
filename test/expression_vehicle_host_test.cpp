@@ -325,6 +325,11 @@ int main(int argc, char** argv) {
     if (!bf6_mount_all(ctx, 1, err, (int)sizeof(err))) {
         std::fprintf(stderr, "mount_all: %s\n", err); bf6_close(ctx); return 2;
     }
+    /* The soldier graphs read the soldier's named fields; load their table from the
+     * motion-machine asset so the host serves them (authored defaults: an idle soldier). */
+    if (const char* scope = std::getenv("BF6_HOST_SCOPE"))
+        if (std::strcmp(scope, "soldier") == 0)
+            std::printf("soldier fields: %d\n", bf6_soldier_fields_load(ctx));
     bf6_ray_scene* scene = bf6_ray_scene_create();
     {
         const float verts[12] = {-200.f, 0.f, -200.f,  200.f, 0.f, -200.f,

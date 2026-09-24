@@ -14,6 +14,8 @@
 #include "vehicle_sim.h"
 #include "vehicle_dynamics.h"
 
+struct bf6_vehicle_collision_point { float p[3]; };
+
 struct bf6_vehicle {
     bf6::VehicleSim sim;
     bf6::VehicleDynamics dyn;
@@ -31,6 +33,9 @@ struct bf6_vehicle {
     bool boost = false;
     double time = 0.0;
     std::string name;
+    std::vector<bf6_vehicle_collision_point> collision_points;
+    bool physics_body_valid = false, use_physics_body = false, graph_com_written = false;
+    float physics_mass = 0.0f, physics_com[3] = {}, physics_inertia_per_kg[3] = {};
 };
 
 namespace {
@@ -112,6 +117,107 @@ void bf6__vehicle_blueprint(bf6_ctx* c, const std::string& vb, bf6::VehicleDynam
     if (best_r > 0.0f && best_d < 0.2f)
         for (auto& w : p.wheel) w.radius = best_r;
     (void)best_w;
+}
+
+/* Preserve the authored rigid-body fallback. SetInertia's all-zero argument
+ * means "keep the physics body", rather than "use arbitrary host defaults". */
+void bf6__vehicle_physics(bf6_ctx* c, const std::string& dir, const std::string& cls,
+                          const std::string& veh, bf6_vehicle* v) {
+    const std::string name = dir + "/art/ob_veh_" + cls + "_" + veh + "_base.physics";
+    bf6_physics* ph = bf6_physics_read(c, name.c_str());
+    if (!ph || ph->body_rec_count <= 0) {
+        if (ph) bf6_free(c, ph);
+        return;
+    }
+    const bf6_phys_body& b = ph->bodies[0];
+    if (b.reciprocal_mass > 0.0f) {
+        v->physics_body_valid = true;
+        v->physics_mass = 1.0f / b.reciprocal_mass;
+        for (int i = 0; i < 3; ++i) {
+            v->physics_com[i] = b.center_of_mass[i];
+            if (b.inv_inertia[i] > 0.0f) v->physics_inertia_per_kg[i] = 1.0f / b.inv_inertia[i];
+        }
+    }
+    /* Four low vertices per x/z quadrant and shape retain a compact chassis
+     * support polygon. Ignore the game's explicit NoCollision preset. */
+    for (int j = 0; b.motion_type == 3 && j < ph->inst_count; ++j) {
+        const bf6_phys_inst& in = ph->instances[j];
+        if (in.body_index != 0 || in.preset_a == 0x2AF24804u ||
+            in.shape_index < 0 || in.shape_index >= ph->shape_count) continue;
+        const bf6_phys_shape& sh = ph->shapes[in.shape_index];
+        if (sh.vertex_first < 0 || sh.vertex_count == 0) continue;
+        float low[4][3] = {};
+        bool have[4] = {};
+        const float scale = in.scale_or_halfheight != 0.0f ? in.scale_or_halfheight : 1.0f;
+        for (uint32_t k = 0; k < sh.vertex_count; ++k) {
+            const float* src = ph->vertices + 3 * (sh.vertex_first + k);
+            float sv[3] = {src[0] * scale, src[1] * scale, src[2] * scale}, rv[3];
+            bf6__qrot(in.quat, sv, rv);
+            for (int q = 0; q < 3; ++q) rv[q] += in.pos[q];
+            const int bin = (rv[0] >= in.pos[0] ? 1 : 0) | (rv[2] >= in.pos[2] ? 2 : 0);
+            if (!have[bin] || rv[1] < low[bin][1]) {
+                for (int q = 0; q < 3; ++q) low[bin][q] = rv[q];
+                have[bin] = true;
+            }
+        }
+        for (int bin = 0; bin < 4; ++bin) if (have[bin]) {
+            bf6_vehicle_collision_point cp{};
+            for (int q = 0; q < 3; ++q) cp.p[q] = low[bin][q];
+            v->collision_points.push_back(cp);
+        }
+    }
+    bf6_free(c, ph);
+}
+
+/* Normal-only rigid-body contact. Tyre operators continue to supply the
+ * authored tangential forces. */
+void bf6__collide_vehicle(bf6_vehicle* v, float dt) {
+    if (!v || dt <= 0.0f || v->collision_points.empty()) return;
+    bf6::VehicleDynamics& d = v->dyn;
+    for (int pass = 0; pass < 4; ++pass) {
+        float deepest = 0.0f;
+        for (const auto& cp : v->collision_points) {
+            float rp[3], wp[3];
+            bf6__qrot(d.quat, cp.p, rp);
+            for (int i = 0; i < 3; ++i) wp[i] = d.pos[i] + rp[i];
+            double from[3] = {wp[0], wp[1] + 0.25, wp[2]};
+            double to[3] = {wp[0], wp[1] - 0.25, wp[2]}, hit[3], nd[3];
+            if (!bf6__vehicle_trace(v, from, to, hit, nd)) continue;
+            float n[3] = {(float)nd[0], (float)nd[1], (float)nd[2]};
+            const float penetration = (float)((hit[0] - wp[0]) * nd[0] +
+                                              (hit[1] - wp[1]) * nd[1] +
+                                              (hit[2] - wp[2]) * nd[2]);
+            if (penetration < -1e-4f) continue;
+            if (penetration > deepest) deepest = penetration;
+            float comb[3], comw[3], r[3];
+            bf6__qrot(d.quat, d.p.com, comb);
+            for (int i = 0; i < 3; ++i) { comw[i] = d.pos[i] + comb[i]; r[i] = wp[i] - comw[i]; }
+            float wxr[3] = {d.angvel[1] * r[2] - d.angvel[2] * r[1],
+                            d.angvel[2] * r[0] - d.angvel[0] * r[2],
+                            d.angvel[0] * r[1] - d.angvel[1] * r[0]};
+            const float vn = (d.vel[0] + wxr[0]) * n[0] + (d.vel[1] + wxr[1]) * n[1] +
+                             (d.vel[2] + wxr[2]) * n[2];
+            if (vn >= 0.0f) continue;
+            float rxn[3] = {r[1] * n[2] - r[2] * n[1],
+                            r[2] * n[0] - r[0] * n[2],
+                            r[0] * n[1] - r[1] * n[0]};
+            float qi[4] = {-d.quat[0], -d.quat[1], -d.quat[2], d.quat[3]}, tb[3], dwb[3], dww[3];
+            bf6__qrot(qi, rxn, tb);
+            for (int i = 0; i < 3; ++i) dwb[i] = tb[i] / (d.p.mass * d.p.inertia_per_kg[i]);
+            bf6__qrot(d.quat, dwb, dww);
+            const float cr[3] = {dww[1] * r[2] - dww[2] * r[1],
+                                 dww[2] * r[0] - dww[0] * r[2],
+                                 dww[0] * r[1] - dww[1] * r[0]};
+            const float k = 1.0f / d.p.mass + cr[0] * n[0] + cr[1] * n[1] + cr[2] * n[2];
+            if (k <= 0.0f) continue;
+            const float impulse = -vn / k;
+            for (int i = 0; i < 3; ++i) {
+                d.vel[i] += n[i] * impulse / d.p.mass;
+                d.angvel[i] += dww[i] * impulse;
+            }
+        }
+        if (pass == 3 && deepest > 0.0f) d.pos[1] += deepest;
+    }
 }
 
 } // namespace
@@ -250,6 +356,7 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
         v->no_wheel_locators = true;
     }
     bf6__vehicle_blueprint(c, dir + "/vb_veh_" + cls + "_" + veh, v->dyn.p);
+    bf6__vehicle_physics(c, dir, cls, veh, v.get());
     v->dyn.init();
     if (std::getenv("BF6_DYN_DEBUG")) std::fprintf(stderr, "%s", v->dyn.describe_params().c_str());
     return v.release();
@@ -487,6 +594,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             s.state_mut().clear_unseeded_frame_reads();
         }
         if (s.wheel_ops().com_set()) {
+            v->graph_com_written = true;
             if (std::getenv("BF6_COM_DEBUG"))
                 std::fprintf(stderr, "com: host (%g %g %g) -> graph (%g %g %g)\n",
                              d.p.com[0], d.p.com[1], d.p.com[2], s.wheel_ops().body().com[0],
@@ -506,8 +614,19 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             if (std::fabs(gi[0]) > 1e-6f || std::fabs(gi[1]) > 1e-6f || std::fabs(gi[2]) > 1e-6f)
                 for (int i = 0; i < 3; ++i) d.p.inertia_per_kg[i] = gi[i];
         }
+        if (s.wheel_ops().inertia_set() && v->physics_body_valid) {
+            const float* gi = s.wheel_ops().inertia_per_kg();
+            if (std::fabs(gi[0]) <= 1e-6f && std::fabs(gi[1]) <= 1e-6f && std::fabs(gi[2]) <= 1e-6f) {
+                v->use_physics_body = true;
+                d.p.mass = v->physics_mass;
+                for (int i = 0; i < 3; ++i) d.p.inertia_per_kg[i] = v->physics_inertia_per_kg[i];
+                if (!v->graph_com_written)
+                    for (int i = 0; i < 3; ++i) d.p.com[i] = v->physics_com[i];
+            }
+        }
         s.wheel_ops().clear_inertia_set();
         d.integrate_body_accel(dt, la, aa, std::getenv("BF6_GRAPH_GRAVITY") != nullptr);
+        if (v->use_physics_body) bf6__collide_vehicle(v, dt);
         /* Keep the established extra linear hull delta (it supplies the calibrated
          * drag path), but not the angular delta: the graph already adds the hull
          * operator's AngularAccelerationOut to AngularAcceleration. Applying hull_dw

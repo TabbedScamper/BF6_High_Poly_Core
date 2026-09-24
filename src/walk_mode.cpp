@@ -325,11 +325,12 @@ int32_t bf6_ray_scene_trace(bf6_ray_scene* s, const double* from, const double* 
     int32_t best_i = -1;
     V3 best_n{0, 1, 0};
     for (const auto& c : s->candidates) {
-        if (c.first >= best_u) break;
+        if (c.first > best_u) break;
         const Instance& in = s->instances[c.second];
         const V3 la = xform(in.inv, o), lb = xform(in.inv, e);
         double u; V3 ln;
-        if (!s->meshes[in.mesh]->trace(la, lb, u, ln) || u >= best_u) continue;
+        /* A hit at u == 1 is still on the requested closed segment. */
+        if (!s->meshes[in.mesh]->trace(la, lb, u, ln) || u > best_u) continue;
         best_u = u;
         best_i = c.second;
         // a normal goes through the inverse transpose

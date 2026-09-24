@@ -155,10 +155,10 @@ const Spec kSpecs[] = {
      * existing DivideFloat3FloatFloat3 is (Float3, Float) -> Float3), and the VM
      * checks it: a record whose operand count disagrees is refused and named in the
      * run report, so a wrong line here surfaces as a refusal rather than as a
-     * quietly wrong number. ToVec3Float and EnumEqualFunc are deliberately absent:
-     * their behaviour cannot be read off the name, and guessing it is how a wrong
-     * number gets in. AngleBetweenFloat was in that list until its body was read
-     * (see below); it is no longer a guess.
+     * quietly wrong number. EnumEqualFunc is deliberately absent:
+     * its behaviour cannot be read off the name, and guessing it is how a wrong
+     * number gets in. AngleBetweenFloat and ToVec3Float were in that list until their bodies were read
+     * (see below); they are no longer guesses.
      *
      * Float modulo is left to the hardware, which is what the game's own code does;
      * a guard here would invent a value the game never had. */
@@ -191,7 +191,35 @@ const Spec kSpecs[] = {
     {"EqualsUInt",               2, {kF, kF}, kB},      /* s,k, 144 uses; NotEqualsUInt's twin */
     {"SubtractUInt",             2, {kF, kF}, kF},      /* s,s - wraps, as unsigned does */
     {"OneOverPi",                0, {},       kF},      /* a constant */
+    /* READ FROM THEIR BODIES, found through the name's lazy crc32 initializer (its
+     * returned descriptor's first qword is the implementation):
+     *   ToVec3Float        0x1424A3BF0  (x) -> (x, x, x, 0)
+     *   AngularDistanceRad 0x142495080  wrap(wrap(a) - wrap(b)), wrap = the fmodf pair
+     *                                   below, to [-pi, pi] */
+    {"ToVec3Float",              1, {kF},     kV},      /* s */
+    {"AngularDistanceRad",       2, {kF, kF}, kF},
+    /*   EulerToQuaternion  0x1405D8B80  Vec3 of angles -> quaternion (x, y, z, w). A
+     *   vectorised polynomial sin/cos of the half angles (sx.. and cx..), combined as
+     *     x = cy*sx*cz - sy*sz*cx     y = cy*sx*sz + sy*cz*cx
+     *     z = cy*sz*cx - sy*sx*cz     w = sy*sx*sz + cy*cz*cx
+     *   Lane 3 of the input is computed and never reaches the result. std::sin/cos stand
+     *   in for the polynomial (they agree to float rounding). */
+    {"EulerToQuaternion",        1, {kV},     kV},      /* s */
+    /*   LookAtTransformForward 0x143B59E40 (pos, forward, up) -> LinearTransform
+     *   LookAtTransform        0x143B59BB0 (eye, target, up)  -> LinearTransform
+     *   f = forward as given / normalize(target - eye), (0,0,1) when that is < 1e-6 long.
+     *   u' = up, or (up.y, up.z, up.x) when |up . f| > 0.9999. Rows: right, f x right, f,
+     *   pos - with right = normalize(u' x f) in the Forward one and normalize(f x u') in
+     *   the other: the two bodies really do cross in opposite orders. */
+    {"LookAtTransformForward",   3, {kV, kV, kV}, kT},  /* s,k,s */
+    {"LookAtTransform",          3, {kV, kV, kV}, kT},  /* s,s,k */
 };
+
+/* The engine's own angle wrap, as FUN_142495080 and FUN_14249A0C0 both inline it. */
+float wrap_pi(float a) {
+    return a < 0.0f ? std::fmod(a - 3.1415927f, 6.2831855f) + 3.1415927f
+                    : std::fmod(a + 3.1415927f, 6.2831855f) - 3.1415927f;
+}
 
 const Spec* spec_for(const std::string& name) {
     for (const Spec& s : kSpecs)
@@ -318,7 +346,9 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                             n == "EqualsFloat3" || n == "NotEqualsFloat3" ||
                             n == "MagnitudeFloat3" || n == "MagnitudeSquaredFloat3" ||
                             n == "NormalizeFloat3" ||
-                            n == "MultiplyFloat3Float3Float3" || n == "CrossVec3");
+                            n == "MultiplyFloat3Float3Float3" || n == "CrossVec3" ||
+                            n == "NegateFloat3" || n == "EulerToQuaternion" ||
+                            n == "LookAtTransformForward" || n == "LookAtTransform");
     /* BF6_FLOAT3_ONLY=<name>[,<name>]: apply the relaxation to named operators only, so
      * which one changes a vehicle can be found by bisection. Diagnostic. */
     bool relax = all_float3;
@@ -372,6 +402,55 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     if (n == "EqualsUInt")           { out = Value::from_bool(a[0].as_u32() == a[1].as_u32()); return true; }
     if (n == "SubtractUInt")         { out = Value::from_u32(a[0].as_u32() - a[1].as_u32()); return true; }
     if (n == "OneOverPi")            { out = put_f32(0.318309886183791f); return true; }
+    if (n == "ToVec3Float") {
+        const float x = f32(a[0]);
+        const float r[3] = {x, x, x};
+        out = put_vec3(r);
+        return true;
+    }
+    if (n == "AngularDistanceRad")   { out = put_f32(wrap_pi(wrap_pi(f32(a[0])) - wrap_pi(f32(a[1])))); return true; }
+    if (n == "LookAtTransformForward" || n == "LookAtTransform") {
+        float p[3], b[3], u[3], f[3];
+        vec3(a[0], p); vec3(a[1], b); vec3(a[2], u);
+        const bool fwd = n == "LookAtTransformForward";
+        if (fwd) { f[0] = b[0]; f[1] = b[1]; f[2] = b[2]; }
+        else {
+            const float d[3] = {b[0] - p[0], b[1] - p[1], b[2] - p[2]};
+            const float l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if (l2 < 1e-6f) { f[0] = 0.f; f[1] = 0.f; f[2] = 1.f; }
+            else { const float s = 1.0f / std::sqrt(l2); f[0] = d[0] * s; f[1] = d[1] * s; f[2] = d[2] * s; }
+        }
+        float w[3] = {u[0], u[1], u[2]};
+        if (std::fabs(u[0] * f[0] + u[1] * f[1] + u[2] * f[2]) > 0.9999f) { w[0] = u[1]; w[1] = u[2]; w[2] = u[0]; }
+        auto cross = [](const float x[3], const float y[3], float o[3]) {
+            o[0] = x[1] * y[2] - x[2] * y[1];
+            o[1] = x[2] * y[0] - x[0] * y[2];
+            o[2] = x[0] * y[1] - x[1] * y[0];
+        };
+        float r[3];
+        if (fwd) cross(w, f, r); else cross(f, w, r);
+        const float s = 1.0f / std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+        for (float& c : r) c *= s;
+        float m[4][3];
+        for (int c = 0; c < 3; ++c) { m[0][c] = r[c]; m[2][c] = f[c]; m[3][c] = p[c]; }
+        cross(f, r, m[1]);
+        out = put_xform(m);
+        return true;
+    }
+    if (n == "EulerToQuaternion") {
+        float e[3];
+        vec3(a[0], e);
+        const float sx = std::sin(e[0] * 0.5f), cx = std::cos(e[0] * 0.5f);
+        const float sy = std::sin(e[1] * 0.5f), cy = std::cos(e[1] * 0.5f);
+        const float sz = std::sin(e[2] * 0.5f), cz = std::cos(e[2] * 0.5f);
+        const float q[4] = {cy * (sx * cz) - sy * (sz * cx), cy * (sx * sz) + sy * (cz * cx),
+                            cy * (sz * cx) - sy * (sx * cz), sy * (sx * sz) + cy * (cz * cx)};
+        out = Value{};
+        out.bytes.resize(16);
+        std::memcpy(out.bytes.data(), q, 16);
+        out.known = true;
+        return true;
+    }
     if (n == "NegateFloat")          { out = put_f32(-f32(a[0])); return true; }
     if (n == "AbsoluteFloat")        { out = put_f32(std::fabs(f32(a[0]))); return true; }
     if (n == "MagnitudeSquaredFloat3" || n == "MagnitudeFloat2") {

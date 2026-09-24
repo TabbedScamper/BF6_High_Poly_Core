@@ -1081,6 +1081,12 @@ const uint32_t kIntFieldIs      = 0x9132CD71u;
  * IS the local client's own soldier - the first-person walker - so both flags answer
  * true. BF6_REMOTE_SOLDIER=1 models a remote soldier instead (false). */
 const uint32_t kIsLocalSoldier  = 0x56A77320u;
+/* AngleAroundYVec (Vec3) -> (angle, valid). Its body, 0x14249A0C0 (found through the
+ * name's crc32 initializer): x^2 + z^2 <= 0 gives angle 0 and valid false; otherwise the
+ * vector is scaled by a Newton-refined rsqrt of its full length^2 and the angle is
+ * atan2(z, x) of the scaled lanes, wrapped to [-pi, pi] by the fmodf pair. The valid flag
+ * is the last native output, so it is the VM primary and the angle the extra output. */
+const uint32_t kAngleAroundY    = 0x6D534FD9u;
 /* THE DEBUG DRAWS. Reflected functions that return void and take only what to draw -
  * Position/Start/End/Transform, Color32, Wireframe, DepthTest, TimeVisible - per
  * ReflectedFunctions.tsv (DrawSphere, DrawText, DrawArrow, DrawBox, DrawLine, ...). They
@@ -1331,6 +1337,11 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {1};
         out.output_width = 1;
         return true;
+    case kAngleAroundY:
+        out.input_widths = {16};
+        out.extra_output_widths = {4};
+        out.output_width = 1;
+        return true;
     case kIntFieldIs:
         if (!bf6::SoldierFields::get().loaded()) return false;
         out.input_widths = {4, 4, 4};
@@ -1479,6 +1490,27 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (!args[1].known || args[1].bytes.empty()) return false;
         served_[key] += 1;
         out = Value::from_bool(args[1].bytes[0] != 0);
+        return true;
+    }
+    if (key == kAngleAroundY) {
+        if (!args[0].known || args[0].bytes.size() < 12) return false;
+        float v[3];
+        std::memcpy(v, args[0].bytes.data(), 12);
+        float angle = 0.0f;
+        bool valid = false;
+        if (v[0] * v[0] + v[2] * v[2] > 0.0f) {
+            const float s = 1.0f / std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            angle = std::atan2(v[2] * s, v[0] * s);
+            angle = angle < 0.0f ? std::fmod(angle - 3.1415927f, 6.2831855f) + 3.1415927f
+                                 : std::fmod(angle + 3.1415927f, 6.2831855f) - 3.1415927f;
+            valid = true;
+        }
+        served_[key] += 1;
+        out = Value{};
+        out.bytes.resize(5);
+        out.bytes[0] = valid ? 1 : 0;
+        std::memcpy(out.bytes.data() + 1, &angle, 4);
+        out.known = true;
         return true;
     }
     if (key == kIsLocalSoldier) {

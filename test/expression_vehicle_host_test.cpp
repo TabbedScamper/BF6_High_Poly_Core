@@ -83,7 +83,8 @@ static int self_check() {
                           "RotateFloat3", "MultiplyFloat3LinearTransformFloat3",
                           "AddFloat2", "SubtractFloat2", "AbsoluteFloat2", "MinFloat2",
                           "MultiplyFloat2FloatFloat2", "NegateFloat3", "Xor", "EqualsUInt",
-                          "SubtractUInt"}) {
+                          "SubtractUInt", "ToVec3Float", "AngularDistanceRad",
+                          "EulerToQuaternion", "LookAtTransformForward", "LookAtTransform"}) {
         key[n] = k; ops.add(k, n); ++k;
     }
     auto f = [](float v) {
@@ -335,6 +336,40 @@ static int self_check() {
             out.bytes[0] != 1) { std::printf("   EqualsUInt\n"); ++bad; }
         if (!ops.invoke(key["SubtractUInt"], {Value::from_u32(2), Value::from_u32(3)}, out) ||
             out.as_u32() != 0xFFFFFFFFu) { std::printf("   SubtractUInt does not wrap\n"); ++bad; }
+        /* From their bodies. */
+        if (!ops.invoke(key["ToVec3Float"], {f(2.5f)}, out)) ++bad;
+        else {
+            float v[3]; std::memcpy(v, out.bytes.data(), 12);
+            if (v[0] != 2.5f || v[1] != 2.5f || v[2] != 2.5f) { std::printf("   ToVec3Float\n"); ++bad; }
+        }
+        /* 3 - (-3) = 6, wrapped: 6 - 2pi */
+        if (!ops.invoke(key["AngularDistanceRad"], {f(3.f), f(-3.f)}, out) ||
+            std::fabs(as_f(out) - (6.f - 6.2831855f)) > 1e-5f) { std::printf("   AngularDistanceRad\n"); ++bad; }
+        /* a pure yaw of 1 rad is (0, sin .5, 0, cos .5) */
+        if (!ops.invoke(key["EulerToQuaternion"], {v3(0.f, 1.f, 0.f)}, out)) ++bad;
+        else {
+            float q[4]; std::memcpy(q, out.bytes.data(), 16);
+            if (std::fabs(q[0]) > 1e-6f || std::fabs(q[1] - std::sin(0.5f)) > 1e-6f ||
+                std::fabs(q[2]) > 1e-6f || std::fabs(q[3] - std::cos(0.5f)) > 1e-6f) {
+                std::printf("   EulerToQuaternion yaw\n"); ++bad;
+            }
+        }
+        /* forward +z, up +y: u' x f = +x, so the Forward look-at is the identity at pos */
+        if (!ops.invoke(key["LookAtTransformForward"], {v3(1.f, 2.f, 3.f), v3(0.f, 0.f, 1.f), v3(0.f, 1.f, 0.f)}, out)) ++bad;
+        else {
+            float m[4][3]; lt_rows(out, m);
+            if (m[0][0] != 1.f || m[1][1] != 1.f || m[2][2] != 1.f || m[3][2] != 3.f) {
+                std::printf("   LookAtTransformForward\n"); ++bad;
+            }
+        }
+        /* the same aim through LookAtTransform crosses f x u' = -x, then f x r = -y */
+        if (!ops.invoke(key["LookAtTransform"], {v3(0.f, 0.f, 0.f), v3(0.f, 0.f, 5.f), v3(0.f, 1.f, 0.f)}, out)) ++bad;
+        else {
+            float m[4][3]; lt_rows(out, m);
+            if (m[0][0] != -1.f || m[1][1] != -1.f || m[2][2] != 1.f) {
+                std::printf("   LookAtTransform (%g %g %g)\n", m[0][0], m[1][1], m[2][2]); ++bad;
+            }
+        }
     }
 
     std::printf("PureOps self-check: %s\n",

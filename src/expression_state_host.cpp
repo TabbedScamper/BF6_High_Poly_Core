@@ -831,8 +831,28 @@ void PhysicsQueryHost::add(uint32_t key, const std::string& name) {
  * Entities and material stay zero: nothing offline knows what was hit. */
 static const uint32_t kSyncRay = 0x040F4924u;
 
+/* THE SOLDIER'S RAY, __physicsRayQueryNode 0xC087CFCD: (Start, End, preset, flag) ->
+ * PhysicsQueryHit. The result TYPE is read from the graphs' own slot declarations (every
+ * call's output slot is 0xAEE2957B PhysicsQueryHit, MotionMachineShared, 0x50 bytes), and
+ * its CONTENT from the engine function that writes it, FUN_144338970 (called by the
+ * single-hit query FUN_14434E360 after FUN_14434EC40 "RayQueryNode"):
+ *
+ *   hit:  0x00 hit position  0x10 hit normal  0x30 |start - hit|  0x41 HasHit = 1
+ *         0x42 IsTerrainHit, 0x2C/0x3C material, 0x28 a component float, 0x43 a material
+ *         flag, 0x20 the entity - none of which exist offline: left 0 (OURS, not read).
+ *   miss: 0x00 End  0x10 (0, 1, 0, 0)  0x20 00100000 0000FFFF (the no-entity sentinels)
+ *         0x30 |start - End|  everything else 0.
+ *   0x34 and 0x38 are written 0 by the miss path and never by the hit path, so they read 0.
+ * A non-finite Start or End (FUN_1443380A0) leaves the result untouched - refused here. */
+static const uint32_t kSoldierRay = 0xC087CFCDu;
+
 bool PhysicsQueryHost::describe(uint32_t key, OperatorSignature& out) {
     out = OperatorSignature{};
+    if (key == kSoldierRay) {
+        out.input_widths = {16, 16, 4, 4};
+        out.output_width = 0x50;
+        return true;
+    }
     if (key == kSyncRay) {
         /* Six inputs and TWO outputs. The seventh operand (a byte-aligned slot such
          * as 0x32DE) is written, not read: nothing in the graph writes it, and the
@@ -903,6 +923,48 @@ static void write_query_result(Value& out, const double from[3], const double to
 
 bool PhysicsQueryHost::invoke(uint32_t key, const std::vector<Value>& args,
                               Value& out) {
+    if (key == kSoldierRay) {
+        if (!trace_ || args.size() != 4) return false;
+        ++attempts_;
+        auto xyz = [](const Value& v, float o[3]) {
+            if (v.bytes.size() < 12) return false;
+            if (!v.known) {
+                if (v.known_bytes.size() < 12) return false;
+                for (int i = 0; i < 12; ++i) if (!v.known_bytes[(size_t)i]) return false;
+            }
+            std::memcpy(o, v.bytes.data(), 12);
+            return true;
+        };
+        float f[3], t[3];
+        if (!xyz(args[0], f) || !xyz(args[1], t)) { ++unknown_ends_; return false; }
+        for (int i = 0; i < 3; ++i)
+            if (!std::isfinite(f[i]) || !std::isfinite(t[i])) return false;
+        const double from[3] = {f[0], f[1], f[2]};
+        const double to[3] = {t[0], t[1], t[2]};
+        double hit[3] = {to[0], to[1], to[2]}, normal[3] = {0, 1, 0};
+        ++queries_;
+        const bool got = trace_(user_, from, to, hit, normal) != 0;
+        if (got) ++hits_;
+        ray_log_.push_back({{f[0], f[1], f[2]}, {t[0], t[1], t[2]}, got, true});
+        out = Value{};
+        out.bytes.assign(0x50, 0);
+        const float hp[4] = {(float)hit[0], (float)hit[1], (float)hit[2], 0.0f};
+        const float hn[4] = {(float)normal[0], (float)normal[1], (float)normal[2], 0.0f};
+        const float up[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+        std::memcpy(out.bytes.data() + 0x00, hp, 16);
+        std::memcpy(out.bytes.data() + 0x10, got ? hn : up, 16);
+        if (!got) {
+            const uint32_t e0 = 0x00100000u, e1 = 0x0000FFFFu;
+            std::memcpy(out.bytes.data() + 0x20, &e0, 4);
+            std::memcpy(out.bytes.data() + 0x24, &e1, 4);
+        }
+        const float dx = (float)hit[0] - f[0], dy = (float)hit[1] - f[1], dz = (float)hit[2] - f[2];
+        const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        std::memcpy(out.bytes.data() + 0x30, &dist, 4);
+        out.bytes[0x41] = got ? 1 : 0;
+        out.known = true;
+        return true;
+    }
     if (key == kSyncRay) {
         if (!trace_ || args.size() != 6) return false;
         ++attempts_;
@@ -1155,7 +1217,15 @@ const uint32_t kEntityFlags   = 0xE029A05Du; /* FUN_14172B9B0: id -> ten values 
 const uint32_t kRelated       = 0x76E6401Cu; /* FUN_141737FC0: set -> set */
 const uint32_t kApplyAffector = 0x329770B8u; /* FUN_141726A10: query -> bool */
 const uint32_t kSetBytes      = 260u;        /* u32 count + 64 x u32                   */
-const uint32_t kNoId          = 0x000FFFFFu; /* DAT_149b71b48                          */
+const uint32_t kNoId          = 0x000FFFFFu; /* DAT_149b71b48, read from the exe .data */
+/* 0x09D1F6BA, reflected MotionMachine () -> GameQueryResult: native 0x147EE9340 is
+ * `FUN_147f13ab0(out); return out;` - the empty set, always. */
+const uint32_t kEmptyQuery    = 0x09D1F6BAu;
+/* 0xD95D4A17, reflected MotionMachine (ToFilter, FilterData, Transform) -> GameQueryResult:
+ * native 0x147EEAFA0 -> FUN_14433BD10 clears the output, then loops over ToFilter's count
+ * keeping the ids whose measure lies in [min, max]. With a count of 0 the loop never runs:
+ * empty in, empty out. A non-empty input needs the entities' live positions - refused. */
+const uint32_t kFilterByTransform = 0xD95D4A17u;
 
 Value empty_set() {
     Value v;
@@ -1346,6 +1416,15 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {1};
         out.output_width = 1;
         return true;
+    case kEmptyQuery:
+        out.input_widths = {};
+        out.output_width = kSetBytes;
+        return true;
+    case kFilterByTransform:
+        /* Three operands here; describe_call sizes the call to its own operand count. */
+        out.input_widths = {kSetBytes, 4, 64};
+        out.output_width = kSetBytes;
+        return true;
     case kVecStoreDesc:
     case kVecStoreHash:
         if (!bf6::SoldierFields::get().loaded()) return false;
@@ -1434,6 +1513,15 @@ bool WorldHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
         out.output_width = 0;
         return true;
     }
+    /* Only the first input (the set) is read; the filter struct's width is not in data,
+     * so the rest are consumed at 4 bytes whatever their count. */
+    if (key == kFilterByTransform && !consts.empty()) {
+        out = OperatorSignature{};
+        out.input_widths.assign(consts.size(), 4u);
+        out.input_widths[0] = kSetBytes;
+        out.output_width = kSetBytes;
+        return true;
+    }
     if ((key == kClampStoreInt || key == kClampStoreFloat) &&
         (consts.size() == 5 || consts.size() == 6)) {
         if (!describe(key, out)) return false;
@@ -1444,6 +1532,20 @@ bool WorldHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
 }
 
 bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
+    if (key == kEmptyQuery) {
+        served_[key] += 1;
+        out = empty_set();
+        return true;
+    }
+    if (key == kFilterByTransform) {
+        if (args.empty() || !args[0].known || args[0].bytes.size() < 4) return false;
+        uint32_t count = 0;
+        std::memcpy(&count, args[0].bytes.data(), 4);
+        if (count != 0) return false;
+        served_[key] += 1;
+        out = empty_set();
+        return true;
+    }
     if (is_debug_draw(key)) {
         served_[key] += 1;
         out = Value{};

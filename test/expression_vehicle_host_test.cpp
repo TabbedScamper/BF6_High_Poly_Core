@@ -161,8 +161,10 @@ static int self_check() {
                        {f(1.f), f(2.f), f(2.f), f(0.f), f(1.f)}, out)) {
             std::printf("   RangeChange accepted a zero input span\n"); ++bad;
         }
-        if (ops.invoke(key["NormalizeFloat3"], {v3(0.f, 0.f, 0.f)}, out)) {
-            std::printf("   NormalizeFloat3 accepted a zero vector\n"); ++bad;
+        /* The native (0x142493da7) returns zero for a zero vector; it does not refuse. */
+        if (!ops.invoke(key["NormalizeFloat3"], {v3(0.f, 0.f, 0.f)}, out) ||
+            out.bytes.size() < 12 || out.bytes[0] || out.bytes[4] || out.bytes[8]) {
+            std::printf("   NormalizeFloat3 did not return zero for a zero vector\n"); ++bad;
         }
     }
     want("ComplementFloat", {f(0.25f)}, 0.75f);

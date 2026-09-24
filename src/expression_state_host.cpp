@@ -582,7 +582,10 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
             if (const char* tr = std::getenv("BF6_CHANNEL_TRACE"))
                 if ((uint32_t)ck == (uint32_t)std::strtoul(tr, nullptr, 16)) {
                     float f[3] = {0, 0, 0};
-                    if (v.bytes.size() >= 12) std::memcpy(f, v.bytes.data(), 12);
+                    if (v.bytes.size() == 1)
+                        f[0] = v.bytes[0] ? 1.0f : 0.0f;
+                    else if (!v.bytes.empty())
+                        std::memcpy(f, v.bytes.data(), std::min<size_t>(v.bytes.size(), 12));
                     std::fprintf(stderr, "chtrace %08X rec 0x%X %s %g %g %g\n", (uint32_t)ck,
                                  cur_record_, v.known ? "known" : "UNKNOWN", f[0], f[1], f[2]);
                 }

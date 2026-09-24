@@ -192,6 +192,89 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
     std::vector<bf6::EbxValue> kept;
     kept.reserve(e.instance_count());
     for (size_t i = 0; i < e.instance_count(); ++i) kept.push_back(e.read_instance(i));
+
+    /* SEED THE SHARED BOOST FEATURE'S AUTHORED CHARGE.
+     *
+     * StateHost cannot apply a StateListDescriptor's defaults on its own: its keys
+     * contain the runtime PUSH frame, while only this resource walk can associate
+     * that frame with the descriptor and follow the descriptor's DefaultValue
+     * reference.  Leaving a missing cell at StateHost's diagnostic zero makes
+     * SimEx_Sub_Boost read Boost Remaining = 0 on its first tick and immediately
+     * write IsOverheated = true.  The resource itself says otherwise: the
+     * Vars_Boost list's "Boost Remaining" descriptor references a float property
+     * whose DefaultValue is 1.0.
+     *
+     * Keep this data-driven and deliberately narrow.  The feature path supplies
+     * the runtime frame, the descriptor order supplies the field index, and the
+     * referenced property supplies the bits; no frame id, field number, or charge
+     * value is hard-coded. */
+    {
+        const uint32_t kStateDescriptors = 0xD65D1B09u;
+        const uint32_t kDebugName        = 0x820EC965u;
+        const uint32_t kDebugTypeName    = 0x77820947u;
+        const uint32_t kProperty         = 0xCAD42E1Du;
+        const uint32_t kDefaultValue     = 0x42C8B257u;
+        const bf6::EbxValue* boost_list = nullptr;
+        std::function<void(const bf6::EbxValue&, int)> find_boost =
+            [&](const bf6::EbxValue& v, int depth) {
+                if (boost_list || depth > 24) return;
+                if (v.kind == bf6::EbxValue::Kind::Struct) {
+                    const bf6::EbxValue* type = v.field(kDebugTypeName);
+                    if (type && type->kind == bf6::EbxValue::Kind::Str &&
+                        type->s == "Vars_Boost" && v.field(kStateDescriptors)) {
+                        boost_list = &v;
+                        return;
+                    }
+                }
+                for (const auto& kv : v.fields) find_boost(kv.second, depth + 1);
+                for (const auto& it : v.items) find_boost(it, depth + 1);
+            };
+        for (const auto& v : kept) find_boost(v, 0);
+
+        uint32_t boost_frame = 0;
+        for (const auto& rel : gr->relocations) {
+            if (rel.target >= gr->constant_pool.size()) continue;
+            size_t end = rel.target;
+            while (end < gr->constant_pool.size() && gr->constant_pool[end] >= 32 &&
+                   gr->constant_pool[end] < 127) ++end;
+            std::string ref((const char*)gr->constant_pool.data() + rel.target,
+                            end - rel.target);
+            for (char& ch : ref) ch = (char)std::tolower((unsigned char)ch);
+            if (ref.find("/simex_sub_boost]]") != std::string::npos) {
+                boost_frame = rel.target;
+                break;
+            }
+        }
+
+        if (boost_list && boost_frame) {
+            const bf6::EbxValue* descs = boost_list->field(kStateDescriptors);
+            if (descs && descs->kind == bf6::EbxValue::Kind::Array) {
+                for (size_t field = 0; field < descs->items.size(); ++field) {
+                    const bf6::EbxValue& desc = descs->items[field];
+                    const bf6::EbxValue* debug = desc.field(kDebugName);
+                    const bf6::EbxValue* prop = desc.field(kProperty);
+                    if (!debug || debug->kind != bf6::EbxValue::Kind::Str ||
+                        debug->s != "Boost Remaining" || !prop ||
+                        prop->kind != bf6::EbxValue::Kind::InstanceRef || prop->instance < 0 ||
+                        (size_t)prop->instance >= kept.size()) continue;
+                    const bf6::EbxValue* def = kept[(size_t)prop->instance].field(kDefaultValue);
+                    uint32_t bits = 0;
+                    if (!def || !bf6__as_bits(*def, bits)) continue;
+                    sim.state_mut().set_frame_cell(boost_frame, 0xFFFFFFFFu, 0,
+                                                   (uint32_t)field, bits);
+                    if (dbg) {
+                        float f = 0.0f;
+                        std::memcpy(&f, &bits, 4);
+                        std::fprintf(stderr,
+                                     "seed: Vars_Boost frame 0x%X field %zu Boost Remaining"
+                                     " <- authored DefaultValue 0x%08X (%g)\n",
+                                     boost_frame, field, bits, f);
+                    }
+                    break;
+                }
+            }
+        }
+    }
     std::vector<bf6__placement> places, ref_places;
     for (const auto& v : kept) bf6__collect_placements(v, places, 0, &kept, &ref_places);
     if (dbg) std::fprintf(stderr, "seed: %zu placement(s) declared by %s\n",

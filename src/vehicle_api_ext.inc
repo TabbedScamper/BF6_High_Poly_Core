@@ -34,7 +34,7 @@ struct bf6_vehicle {
     double time = 0.0;
     std::string name;
     std::vector<bf6_vehicle_collision_point> collision_points;
-    bool physics_body_valid = false, use_physics_body = false, graph_com_written = false;
+    bool physics_body_valid = false, chassis_contact = false, graph_com_written = false;
     float physics_mass = 0.0f, physics_com[3] = {}, physics_inertia_per_kg[3] = {};
 };
 
@@ -140,10 +140,16 @@ void bf6__vehicle_physics(bf6_ctx* c, const std::string& dir, const std::string&
     }
     /* Four low vertices per x/z quadrant and shape retain a compact chassis
      * support polygon. Ignore the game's explicit NoCollision preset. */
-    for (int j = 0; b.motion_type == 3 && j < ph->inst_count; ++j) {
+    float detail_low[4][3] = {};
+    bool detail_have[4] = {};
+    const bool placeholder_body = std::fabs(b.reciprocal_mass - 1.0f) <= 1e-6f &&
+        b.inv_inertia[0] == 0.0f && b.inv_inertia[1] == 0.0f && b.inv_inertia[2] == 0.0f;
+    for (int j = 0; j < ph->inst_count; ++j) {
         const bf6_phys_inst& in = ph->instances[j];
-        if (in.body_index != 0 || in.preset_a == 0x2AF24804u ||
-            in.shape_index < 0 || in.shape_index >= ph->shape_count) continue;
+        if (in.body_index != 0 || in.shape_index < 0 || in.shape_index >= ph->shape_count) continue;
+        const bool detail_fallback = placeholder_body && in.preset_a == 0x2AF24804u &&
+            in.preset_b == 0x2AF24804u && in.preset_c == 0xBD957D4Au;
+        if (in.preset_a == 0x2AF24804u && !detail_fallback) continue;
         const bf6_phys_shape& sh = ph->shapes[in.shape_index];
         if (sh.vertex_first < 0 || sh.vertex_count == 0) continue;
         float low[4][3] = {};
@@ -155,17 +161,39 @@ void bf6__vehicle_physics(bf6_ctx* c, const std::string& dir, const std::string&
             bf6__qrot(in.quat, sv, rv);
             for (int q = 0; q < 3; ++q) rv[q] += in.pos[q];
             const int bin = (rv[0] >= in.pos[0] ? 1 : 0) | (rv[2] >= in.pos[2] ? 2 : 0);
+            if (detail_fallback) {
+                const int global_bin = (rv[0] >= 0.0f ? 1 : 0) | (rv[2] >= 0.0f ? 2 : 0);
+                if (!detail_have[global_bin] || rv[1] < detail_low[global_bin][1]) {
+                    for (int q = 0; q < 3; ++q) detail_low[global_bin][q] = rv[q];
+                    detail_have[global_bin] = true;
+                }
+                continue;
+            }
             if (!have[bin] || rv[1] < low[bin][1]) {
                 for (int q = 0; q < 3; ++q) low[bin][q] = rv[q];
                 have[bin] = true;
             }
         }
+        if (detail_fallback) continue;
         for (int bin = 0; bin < 4; ++bin) if (have[bin]) {
             bf6_vehicle_collision_point cp{};
             for (int q = 0; q < 3; ++q) cp.p[q] = low[bin][q];
             v->collision_points.push_back(cp);
         }
     }
+    /* Some cinematic/gameplay DefinitionMeshes (notably the MH-47) link a
+     * placeholder Fixed body whose only authored geometry is the detailed
+     * PhysicsAsset: mass 1, zero inertia, and NoCollision/NoCollision/Detail.
+     * It is not honest to treat all 41 detail pieces as normal collision. When
+     * no solid hull exists, reduce that linked geometry to its four lowest
+     * chassis supports; the vehicle host supplies the dynamic mass properties. */
+    if (v->collision_points.empty())
+        for (int bin = 0; bin < 4; ++bin) if (detail_have[bin]) {
+            bf6_vehicle_collision_point cp{};
+            for (int q = 0; q < 3; ++q) cp.p[q] = detail_low[bin][q];
+            v->collision_points.push_back(cp);
+        }
+    v->chassis_contact = !v->collision_points.empty();
     bf6_free(c, ph);
 }
 
@@ -617,7 +645,6 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         if (s.wheel_ops().inertia_set() && v->physics_body_valid) {
             const float* gi = s.wheel_ops().inertia_per_kg();
             if (std::fabs(gi[0]) <= 1e-6f && std::fabs(gi[1]) <= 1e-6f && std::fabs(gi[2]) <= 1e-6f) {
-                v->use_physics_body = true;
                 d.p.mass = v->physics_mass;
                 for (int i = 0; i < 3; ++i) d.p.inertia_per_kg[i] = v->physics_inertia_per_kg[i];
                 if (!v->graph_com_written)
@@ -626,7 +653,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         }
         s.wheel_ops().clear_inertia_set();
         d.integrate_body_accel(dt, la, aa, std::getenv("BF6_GRAPH_GRAVITY") != nullptr);
-        if (v->use_physics_body) bf6__collide_vehicle(v, dt);
+        if (v->chassis_contact) bf6__collide_vehicle(v, dt);
         /* Keep the established extra linear hull delta (it supplies the calibrated
          * drag path), but not the angular delta: the graph already adds the hull
          * operator's AngularAccelerationOut to AngularAcceleration. Applying hull_dw

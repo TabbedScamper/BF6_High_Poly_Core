@@ -15,16 +15,25 @@ int main(int argc, char** argv) {
     char err[1024] = {};
     bf6_ctx* ctx = bf6_open(game, err, (int)sizeof(err));
     if (!ctx || !bf6_mount_all(ctx, 1, err, (int)sizeof(err))) { std::fprintf(stderr, "%s\n", err); return 2; }
+    const char* water = std::getenv("BF6_WATER");
+    const float water_y = water ? (float)std::atof(water) : 0.0f;
+    /* Godot passes the level's actual ground triangles, independently of its water
+     * surface. Keep the synthetic harness equally honest: a water test has seabed,
+     * not terrain coincident with the surface. Twenty metres keeps every fleet boat
+     * afloat while remaining a plausible coastal test depth. */
+    const float seabed_depth = std::getenv("BF6_WATER_DEPTH")
+        ? (float)std::atof(std::getenv("BF6_WATER_DEPTH")) : 20.0f;
+    const float ground_y = water ? water_y - std::max(0.0f, seabed_depth) : 0.0f;
     const float s = 2000.0f;
-    const float tris[18] = {-s, 0, -s, s, 0, -s, s, 0, s, -s, 0, -s, s, 0, s, -s, 0, s};
+    const float tris[18] = {-s, ground_y, -s, s, ground_y, -s, s, ground_y, s,
+                            -s, ground_y, -s, s, ground_y, s, -s, ground_y, s};
     const char* dir = argc > 1 ? argv[1] : "common/hardware/vehicles/car/flyer60";
     bf6_vehicle* v = bf6_vehicle_open(ctx, dir, tris, 6, err, (int32_t)sizeof(err));
     if (!v) { std::fprintf(stderr, "open: %s\n", err); return 2; }
     /* BF6_WATER=<height>: the surface anything that floats reads. A boat needs it;
      * without it its hull is above water and pushes nothing, which is the same
      * honest answer a land map gives. */
-    if (const char* w = std::getenv("BF6_WATER"))
-        bf6_vehicle_set_water(v, (float)std::atof(w), 1);
+    if (water) bf6_vehicle_set_water(v, water_y, 1);
     float out[40] = {};
     float last_ratio = 0.0f;
     int shifts = 0;

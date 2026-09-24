@@ -1035,6 +1035,8 @@ const uint32_t kWeaponState   = 0x75BF546Fu; /* 147B6ADA0 -> 142CC9850 */
 const uint32_t kGameplayFlags = 0x39497415u; /* engine node 14172B810 */
 /* Native-backed offline fallback for the reflected Player query. */
 const uint32_t kPlayerTeam    = 0x2948B3E1u; /* native 1475F4920       */
+/* A setting/rule bool on the soldier, by descriptor: 626 uses, 43 soldier graphs. */
+const uint32_t kSettingBool   = 0x63E71248u; /* native 144328E80       */
 /* 0xEA5D1359 Aiming(EntryTagId -> Yaw, Pitch, Roll, ZoomLevel): thunk 0x14736B4A0 ->
  * FUN_1405794A0, which ZEROES all four outputs first and fills them only when an
  * entry in the vehicle's entry list carries the tag (vtable +0x250 gives the trio,
@@ -1243,6 +1245,11 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {8};
         out.output_width = 4;
         return true;
+    case kSettingBool:
+        /* (descriptor, second constant) -> bool; engine arity 2, atlas shape k,k. */
+        out.input_widths = {4, 4};
+        out.output_width = 1;
+        return true;
     case kShooterStatus:
         /* Native outputs status first, secondary state last (the VM primary). */
         out.input_widths = {};
@@ -1289,11 +1296,6 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
     /* FUN_1443EFC30 maps its missing-table sentinel (-FLT_MAX) to -1024.0f.
      * Offline there is no simulation table, so the result does not depend on
      * whether the position operand itself is known. */
-    if (key == kWaterHeight) {
-        const float value = -1024.0f;
-        uint32_t raw = 0;
-        std::memcpy(&raw, &value, sizeof(raw));
-        served_[key] += 1;
     if (key == kPlayerTeam) {
         /* 0x1475F4920 returns zero if either link in the Player PointerRef chain is
          * null; only the live-object path reads TeamId at object +0x60. */
@@ -1301,6 +1303,24 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out = Value::from_u32(0);
         return true;
     }
+    if (key == kSettingBool) {
+        /* FUN_144328E80: the descriptor (u16 id, u16 flags) indexes an override bitmap
+         * (+0x60) and a value bitmap (+0x10); with no override set it returns the
+         * authored default, (flags >> 1) & 1. Offline nothing is overridden - there is
+         * no server or gameplay code writing these - so the default IS the value.
+         * The descriptor must be known; an unknown one is refused, not defaulted. */
+        if (args.empty() || !args[0].known || args[0].bytes.size() < 4) return false;
+        uint16_t flags = 0;
+        std::memcpy(&flags, args[0].bytes.data() + 2, 2);
+        served_[key] += 1;
+        out = Value::from_bool(((flags >> 1) & 1) != 0);
+        return true;
+    }
+    if (key == kWaterHeight) {
+        const float value = -1024.0f;
+        uint32_t raw = 0;
+        std::memcpy(&raw, &value, sizeof(raw));
+        served_[key] += 1;
         out = Value::from_u32(raw);
         return true;
     }

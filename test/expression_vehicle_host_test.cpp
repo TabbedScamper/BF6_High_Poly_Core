@@ -41,6 +41,11 @@ static const uint32_t kExpressionType = 0x7dd4cc89u;
 
 static bool is_vehicle(const char* name) {
     if (!name) return false;
+    /* BF6_HOST_SCOPE=soldier scores the soldier's own motion-machine graphs
+     * (common/gameplay/soldier/...) instead of the vehicles, through the same host. */
+    static const char* scope = std::getenv("BF6_HOST_SCOPE");
+    if (scope && std::strcmp(scope, "soldier") == 0)
+        return std::strstr(name, "gameplay/soldier") != nullptr;
     return std::strstr(name, "hardware/vehicles") != nullptr ||
            std::strstr(name, "fx/vehicles") != nullptr ||
            std::strstr(name, "gameplay/vehicles") != nullptr;

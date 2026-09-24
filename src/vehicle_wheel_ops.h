@@ -105,6 +105,9 @@ public:
         std::vector<uint32_t> widths;       /* per argument */
     };
     void set_builder(const BuilderLayout& b) { builders_[b.offsets.size()] = b; }
+    void set_suspension_defaults(std::vector<uint8_t> bytes) {
+        suspension_defaults_ = std::move(bytes);
+    }
     const BuilderLayout* builder_for(size_t count) const {
         const auto it = builders_.find(count);
         return it == builders_.end() ? nullptr : &it->second;
@@ -143,6 +146,7 @@ private:
     std::map<uint32_t, uint32_t> served_;
     std::vector<std::vector<float>> curves_;
     std::map<size_t, BuilderLayout> builders_;
+    std::vector<uint8_t> suspension_defaults_;
 };
 
 } // namespace expression

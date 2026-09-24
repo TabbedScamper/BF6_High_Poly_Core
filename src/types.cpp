@@ -267,6 +267,86 @@ bool TypeDb::guid_by_name_hash(uint32_t name_hash, TypeGuid& out)
     return false;
 }
 
+bool TypeDb::default_bytes_by_name_hash(uint32_t name_hash, std::vector<uint8_t>& out)
+{
+    out.clear();
+    if (!name_hash || !ti_found_ || ti_end_ <= ti_off_ + 0x68) return false;
+    for (size_t o = ti_off_; o + 0x68 <= ti_end_; o += 4)
+    {
+        if (rd<uint32_t>(data_, o) != name_hash) continue;
+        const uint16_t flags = rd<uint16_t>(data_, o + 4);
+        const uint16_t size = rd<uint16_t>(data_, o + 6);
+        if (((flags >> 5) & 0x1f) != 2 || !size) continue;
+        TypeGuid g;
+        std::memcpy(g.data(), data_.data() + o + 8, 16);
+        const TypeLayout& lay = layout(g);
+        if (!lay.valid || lay.name_hash != name_hash || lay.size != size) continue;
+
+        /* A native Struct TypeInfo stores its default constructor at +0x30.
+         * The ordinary POD constructors used by expression structs are a run of
+         * immediate stores to [rcx+offset], followed by ret.  Decode only those
+         * proven forms; an unfamiliar instruction refuses the default rather
+         * than inventing bytes. */
+        const uint64_t ctor_va = rd<uint64_t>(data_, o + 0x30);
+        const int64_t ctor_fo = offset_of(ctor_va);
+        if (ctor_fo < 0) continue;
+        std::vector<uint8_t> bytes(size, 0), known(size, 0);
+        size_t p = (size_t)ctor_fo;
+        bool ended = false;
+        for (size_t n = 0; n < 256 && p < data_.size();)
+        {
+            const uint8_t* q = data_.data() + p;
+            uint32_t at = 0, width = 0, insn = 0;
+            uint64_t bits = 0;
+            if (fits(data_, p, 7) && q[0] == 0x48 && q[1] == 0xc7 && q[2] == 0x01) {
+                const int32_t v = rd<int32_t>(data_, p + 3);
+                bits = (uint64_t)(int64_t)v; width = 8; insn = 7;
+            } else if (fits(data_, p, 8) && q[0] == 0x48 && q[1] == 0xc7 && q[2] == 0x41) {
+                at = q[3]; const int32_t v = rd<int32_t>(data_, p + 4);
+                bits = (uint64_t)(int64_t)v; width = 8; insn = 8;
+            } else if (fits(data_, p, 6) && q[0] == 0xc7 && q[1] == 0x01) {
+                bits = rd<uint32_t>(data_, p + 2); width = 4; insn = 6;
+            } else if (fits(data_, p, 7) && q[0] == 0xc7 && q[1] == 0x41) {
+                at = q[2]; bits = rd<uint32_t>(data_, p + 3); width = 4; insn = 7;
+            } else if (fits(data_, p, 7) && q[0] == 0x66 && q[1] == 0xc7 && q[2] == 0x41) {
+                at = q[3]; bits = rd<uint16_t>(data_, p + 4); width = 2; insn = 6;
+            } else if (fits(data_, p, 4) && q[0] == 0xc6 && q[1] == 0x41) {
+                at = q[2]; bits = q[3]; width = 1; insn = 4;
+            } else if (fits(data_, p, 3) && q[0] == 0x48 && q[1] == 0x8b && q[2] == 0xc1) {
+                p += 3; n += 3; continue;                 /* mov rax, rcx */
+            } else if (q[0] == 0xc3) {
+                ended = true; break;
+            } else {
+                break;
+            }
+            if ((uint64_t)at + width > bytes.size()) break;
+            std::memcpy(bytes.data() + at, &bits, width);
+            std::fill(known.begin() + at, known.begin() + at + width, uint8_t{1});
+            p += insn; n += insn;
+        }
+        if (!ended) continue;
+        /* Trailing alignment padding need not be written, but every declared
+         * field byte must be. */
+        bool fields_known = true;
+        for (const FieldInfo& f : lay.fields) {
+            ResolvedType t = resolve(f.type_va);
+            uint32_t width = 1;
+            if (t.valid) {
+                const TypeLayout& tl = layout(t.guid);
+                if (tl.valid && tl.size) width = tl.size;
+            }
+            if (f.offset > known.size() || width > known.size() - f.offset) {
+                fields_known = false;
+                continue;
+            }
+            for (uint32_t i = 0; i < width; ++i)
+                if (!known[f.offset + i]) fields_known = false;
+        }
+        if (fields_known) { out.swap(bytes); return true; }
+    }
+    return false;
+}
+
 uint32_t TypeDb::size_by_name_hash(uint32_t name_hash)
 {
     const auto c = size_by_hash_cache_.find(name_hash);

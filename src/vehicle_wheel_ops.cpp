@@ -1126,15 +1126,33 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         }
     }
     static const bool susp_strict = std::getenv("BF6_SUSP_TAIL_STRICT") != nullptr;
-    if (key == kSuspension && !susp_strict && a.size() > 6 && !a[6].known &&
+    if ((key == kSuspension || key == kTrackSuspension) && !susp_strict &&
+        a.size() > 6 && !a[6].known &&
         a[6].bytes.size() >= 0x54 && a[6].known_bytes.size() >= 0x54) {
         bool head = true;
         for (uint32_t i = 0; i < 0x34 && head; ++i) head = a[6].known_bytes[i] != 0;
         if (head) {
             std::vector<Value> b = a;
             Value& cfg = b[6];
-            for (uint32_t i = 0x34; i < 0x54; ++i)
-                if (!cfg.known_bytes[i]) { cfg.bytes[i] = 0; cfg.known_bytes[i] = 1; }
+            bool tail_empty = true;
+            for (uint32_t i = 0x34; i < 0x54 && tail_empty; ++i)
+                tail_empty = cfg.known_bytes[i] == 0;
+            /* A legacy tracked graph builds only the old 0x34-byte form.  Start
+             * its appended fields from Struct_98ca22cc's native TypeInfo default,
+             * read from the installed game by vehicle_typed_seed.inc. */
+            const bool have_track_defaults = suspension_defaults_.size() >= cfg.bytes.size();
+            if (key != kTrackSuspension || !tail_empty || have_track_defaults) {
+                for (uint32_t i = 0x34; i < 0x54; ++i)
+                    if (!cfg.known_bytes[i]) { cfg.bytes[i] = 0; cfg.known_bytes[i] = 1; }
+            }
+            if (key == kTrackSuspension && tail_empty && have_track_defaults) {
+                for (uint32_t i = 0x34; i < 0x54; ++i)
+                    cfg.bytes[i] = suspension_defaults_[i];
+                /* The AAV's legacy +0x24 value reproduces modern behaviour when
+                 * carried to the current +0x44 top mount.  Preserve that vehicle-
+                 * authored value rather than copying a modern tank's literal. */
+                wf(cfg.bytes, SC_TOP_MOUNT, rf(cfg, SC_KNEE_REBOUND));
+            }
             cfg.known = true;
             for (uint8_t kb : cfg.known_bytes) if (!kb) { cfg.known = false; break; }
             if (cfg.known) return invoke(key, b, out);
@@ -1269,7 +1287,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         {kForceAtPos, 3}, {kAeroDrag, 7}, {kStandStill, 10}, {kBuoyancy, 3},
         {kTrackContacts, 5},
         {kCopy16, 1}, {kDownRay, 2}, {kIdIsNot, 1},
-        {kTrackSuspension, 8},
+        {kTrackSuspension, 7},
         {kTrackShare, 15},
         {kCurveKeyed, 2},
         {kBoatHull, 7},
@@ -2697,7 +2715,11 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         const Value& HO = a[2];
         const Value& W = a[3];
         const Value& SC = a[6];
-        const float K = rf(a[4], 0), D = rf(a[5], 0), p8 = rf(a[7], 0);
+        /* CompressionPreviousFrame is the reflected trailing input, but legacy tank
+         * graphs may omit it.  Their upgraded config uses velocity-derived travel, so
+         * the native does not consume this value; zero is the safe ABI placeholder. */
+        const float K = rf(a[4], 0), D = rf(a[5], 0);
+        const float p8 = a.size() > 7 ? rf(a[7], 0) : 0.0f;
         Snapshot s;
         s.mass = body_.mass;
         s.inv_mass = body_.mass != 0.0f ? 1.0f / body_.mass : 0.0f;

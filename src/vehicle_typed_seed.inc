@@ -179,6 +179,12 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
 {
     std::string err;
     if (!ensure_types(ctx, err)) return;
+    /* The graph's legacy struct builders omit fields added after they shipped.
+     * Hand the wheel host the reflected struct's native default, decoded from
+     * this installed executable's TypeInfo constructor. */
+    std::vector<uint8_t> suspension_default;
+    if (ctx->types->default_bytes_by_name_hash(0x98CA22CCu, suspension_default))
+        sim.wheel_ops().set_suspension_defaults(std::move(suspension_default));
     std::vector<uint8_t> raw = ctx->src.get_ebx(name, err);
     if (raw.empty()) return;
     bf6::Ebx e(*ctx->types);

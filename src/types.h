@@ -105,6 +105,12 @@ public:
     /* The guid of the type a name hash names, false when nothing carries it. */
     bool guid_by_name_hash(uint32_t name_hash, TypeGuid& out);
 
+    /* Construct one reflected struct's native default from the constructor the
+     * TypeInfo record points at.  This reads the installed executable's data;
+     * false means the constructor is not the simple immediate-store form this
+     * offline reader can prove. */
+    bool default_bytes_by_name_hash(uint32_t name_hash, std::vector<uint8_t>& out);
+
     // Research: the first `n` qwords of the TypeInfoData a type_va points at,
     // so a record whose layout resolve() does not know can be read directly.
     std::vector<uint64_t> debug_typeinfo_qwords(uint64_t type_va, int n) const;

@@ -119,6 +119,7 @@ const Spec kSpecs[] = {
     {"GreaterThanUInt",          2, {kF, kF}, kB},      /* 3 */
     {"LessThanUInt",             2, {kF, kF}, kB},      /* 3 */
     {"InterpolateFloat",         3, {kF, kF, kF}, kF},  /* 4 */
+    {"InterpolateFloat3",        3, {kV, kV, kF}, kV},  /* 4 */
     {"InterpolateLinearTransform",3,{kT, kT, kF}, kT},  /* 4 */
     /* Transform a Float3 BY a LinearTransform. Two of these exist and the pair is
      * what tells them apart: `RotateFloat3` rotates only, so the one that is spelled
@@ -585,6 +586,17 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     if (n == "InterpolateFloat") {
         const float x = f32(a[0]), y = f32(a[1]), t = f32(a[2]);
         out = put_f32(x + (y - x) * t); return true;
+    }
+    if (n == "InterpolateFloat3") {
+        vec3(a[0], u); vec3(a[1], v);
+        const float t = f32(a[2]);
+        /* The native uses the same per-lane interpolation as InterpolateFloat:
+         * (a - a*t) + b*t. Keep that operation order rather than substituting a
+         * mathematically equivalent form, since the expression VM is float32. */
+        const float r[3] = {(u[0] - u[0]*t) + v[0]*t,
+                            (u[1] - u[1]*t) + v[1]*t,
+                            (u[2] - u[2]*t) + v[2]*t};
+        out = put_vec3(r); return true;
     }
 
     float ma[4][3], mb[4][3], mr[4][3];

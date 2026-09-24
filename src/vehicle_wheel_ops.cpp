@@ -1144,6 +1144,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
      * writes does not make the call unknown. {input, offset, length}. */
     struct Need { size_t in; uint32_t off, len; };
     static const Need kRay[] = {{0, 0x00, 12}, {0, WC_RADIUS, 4}};
+    static const Need kDown[] = {{0, 0x00, 12}};
     /* the track pass reads the same fields of the same structs, minus the single
      * contact: its contacts come from the heap block, not from an operand */
     static const Need kTrackSusp[] = {{2, 0, 12}, {3, 0x00, 12}, {3, WC_RADIUS, 4}, {6, 0x00, 0x54}};
@@ -1190,6 +1191,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                                  {10, 0, 12}, {11, 0, 12}, {12, 0x10, 0x48}, {12, WC_RADIUS, 8}};
     auto struct_input = [&](size_t i) {
         if (key == kWheelRay || key == kTrackContacts) return i == 0;
+        if (key == kDownRay) return i == 0;
         if (key == kTrackSuspension) return i == 2 || i == 3 || i == 6;
         if (key == kTrackShare) return i % 5 == 0 || i % 5 == 3 || i % 5 == 4;
         if (key == kBoatHull) return i == 1 || i == 2 || i == 3 || i == 4;
@@ -1215,7 +1217,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         bool ok = a[i].known;
         if (!ok && struct_input(i)) {
             ok = true;
-            const Need* nb = key == kWheelRay ? kRay : key == kSuspension ? kSusp
+            const Need* nb = key == kWheelRay ? kRay : key == kDownRay ? kDown : key == kSuspension ? kSusp
                            : key == kContactForce ? kContact : key == kForceAtPos ? kForce
                            : key == kWaterPlane ? kPlane
                            : (key == kBoatHull || key == kJetSkiHull) ? kHull
@@ -1225,6 +1227,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                            : key == kStandStill ? kStill : key == kAeroDrag ? kAero
                            : kTyre;
             const size_t nn = key == kWheelRay ? sizeof kRay / sizeof *kRay
+                            : key == kDownRay ? sizeof kDown / sizeof *kDown
                             : key == kSuspension ? sizeof kSusp / sizeof *kSusp
                             : key == kContactForce ? sizeof kContact / sizeof *kContact
                             : key == kForceAtPos ? sizeof kForce / sizeof *kForce

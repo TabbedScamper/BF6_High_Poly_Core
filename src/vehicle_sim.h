@@ -106,6 +106,17 @@ public:
         for (const auto& g : graphs_) if (g->name == name) return &g->graph;
         return nullptr;
     }
+    /* The pool word at `off` as the loader patched it (false when not patched). */
+    bool pool_patch(const std::string& name, uint32_t off, uint32_t& v) const {
+        for (const auto& g : graphs_)
+            if (g->name == name) {
+                const auto it = g->inst.pool_patches.find(off);
+                if (it == g->inst.pool_patches.end()) return false;
+                v = it->second;
+                return true;
+            }
+        return false;
+    }
     void add_pool_patches(const std::string& name, const std::map<uint32_t, uint32_t>& p) {
         for (auto& g : graphs_)
             if (g->name == name)

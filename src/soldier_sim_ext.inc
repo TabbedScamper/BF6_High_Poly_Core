@@ -147,7 +147,65 @@ int32_t bf6_soldier_reads(char* buf, int32_t cap) {
 /* The last tick's per-graph report (termination, unresolved operators). */
 int32_t bf6_soldier_report(bf6_soldier* s, char* buf, int32_t cap) {
     if (!s) return 0;
-    const std::string& r = s->sim.report();
+    std::string r = s->sim.report();
+    /* BF6_SOLDIER_LAYOUT=1: each graph's typed slot groups too - which slot holds which
+     * reflected type, the way to confirm an operator's result type from data. */
+    if (std::getenv("BF6_SOLDIER_LAYOUT")) r += "\n" + s->sim.instance_layout();
+    /* BF6_SOLDIER_LIST=<graph substring>:<lo hex>:<hi hex> - those records, for reading
+     * what a graph does with a value. */
+    if (const char* want = std::getenv("BF6_SOLDIER_LIST")) {
+        const std::string w = want;
+        const size_t a = w.find(':'), b = w.find(':', a == std::string::npos ? 0 : a + 1);
+        if (a != std::string::npos && b != std::string::npos)
+            r += "\n" + s->sim.list(w.substr(0, a), (uint32_t)std::strtoul(w.substr(a + 1, b - a - 1).c_str(), nullptr, 16),
+                                    (uint32_t)std::strtoul(w.substr(b + 1).c_str(), nullptr, 16));
+    }
+    /* BF6_SLOT_TYPE_OF=<hex key>: every call of that operator, its output slot and the
+     * data type the graph DECLARES for that slot (slot_values) - an operator's result
+     * type read from data rather than from its consumers. */
+    if (const char* want = std::getenv("BF6_SLOT_TYPE_OF")) {
+        const uint32_t k = (uint32_t)std::strtoul(want, nullptr, 16);
+        char line[256];
+        for (const std::string& gname : s->graphs) {
+            const bf6::expression::Graph* g = s->sim.graph_named(gname);
+            if (!g) continue;
+            std::map<uint32_t, uint32_t> type_at;
+            for (const auto& grp : g->slot_values)
+                for (uint32_t off : grp.offsets) type_at[off] = grp.data_type_id;
+            for (const auto& rec : g->records) {
+                if (rec.operator_key != k) continue;
+                uint32_t outslot = 0xFFFFFFFFu;
+                for (auto it = rec.operands.rbegin(); it != rec.operands.rend(); ++it)
+                    if (it->region == 2) { outslot = it->offset; break; }
+                const auto t = type_at.find(outslot);
+                std::snprintf(line, sizeof line, "slottype %08X rec 0x%X in %s: out slot 0x%X type %s%08X\n",
+                              k, rec.offset, gname.c_str(), outslot,
+                              t == type_at.end() ? "none " : "0x", t == type_at.end() ? 0u : t->second);
+                r += line;
+                /* and every field reference taken on that result (0x88030F01 / 0x532B3BA9
+                 * with it as operand 0), with each operand's constant-pool word on disk */
+                for (const auto& use : g->records) {
+                    if (use.operator_key != 0x88030F01u && use.operator_key != 0x532B3BA9u) continue;
+                    if (use.operands.empty() || use.operands[0].region != 2 || use.operands[0].offset != outslot)
+                        continue;
+                    std::string w;
+                    for (const auto& op : use.operands) {
+                        uint32_t v = 0xFFFFFFFFu;
+                        if (op.region == 0 && op.offset + 4 <= g->constant_pool.size())
+                            std::memcpy(&v, g->constant_pool.data() + op.offset, 4);
+                        uint32_t pv = 0;
+                        const bool patched = op.region == 0 && s->sim.pool_patch(gname, op.offset, pv);
+                        char t2[40];
+                        if (patched) std::snprintf(t2, sizeof t2, " r0:%08X->%X", v, pv);
+                        else std::snprintf(t2, sizeof t2, " r%u:%08X", op.region, v);
+                        w += t2;
+                    }
+                    std::snprintf(line, sizeof line, "    fieldref %08X rec 0x%X%s\n", use.operator_key, use.offset, w.c_str());
+                    r += line;
+                }
+            }
+        }
+    }
     if (buf && cap > 0) std::snprintf(buf, (size_t)cap, "%s", r.c_str());
     return (int32_t)r.size();
 }

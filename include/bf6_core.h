@@ -3494,6 +3494,12 @@ typedef struct {
     int32_t damage;
     int32_t rate_of_fire;
     int32_t magazine;
+    /* What a shot does after it leaves the barrel. muzzle_speed is the forward lane
+     * of the weapon's ShotConfig initial speed (0x58d70acb -> 0x0bf4f62b ->
+     * 0x32a99b9c): m4a1 590, mp7a2 576, sv98m 680, m250 724 m/s. gravity is the
+     * ProjectileData's 0xd9d33d20, -9.81 on the 5.56 carbine round. 0 when absent. */
+    float muzzle_speed;
+    float gravity;
 } bf6_weapon_base_stats;
 
 /* Read <weapon>_wb plus its ProjectileData import at runtime. Returns 1 when

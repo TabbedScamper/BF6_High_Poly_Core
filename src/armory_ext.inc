@@ -1444,6 +1444,21 @@ int bf6_base_weapon_stats(bf6_ctx* c, const char* weapon_class,
     double rof = 0.0, mag = 0.0;
     bool haveRof = false, haveMag = false;
     std::string projectile;
+    /* THE MUZZLE SPEED, reached by its full path: ShotConfig 0x58d70acb -> initial
+     * speed 0x0bf4f62b (x, y, z) -> the forward lane 0x32a99b9c. A bare search for
+     * 0x0bf4f62b finds a scalar 350 elsewhere in the block, which is not it. */
+    double speed = 0.0;
+    for (size_t i = 0; i < wb.instance_count() && speed == 0.0; i++)
+    {
+        const bf6::EbxValue v = wb.read_instance(i);
+        const bf6::EbxValue* sc = bf6__armory_find_value(v, 0x58d70acbu);
+        if (!sc || sc->kind != bf6::EbxValue::Kind::Struct) continue;
+        const bf6::EbxValue* iv = sc->field(0x0bf4f62bu);
+        if (!iv || iv->kind != bf6::EbxValue::Kind::Struct) continue;
+        double z = 0.0;
+        if (const bf6::EbxValue* f = iv->field(0x32a99b9cu))
+            if (bf6__armory_number(f, z) && z > 0.0) speed = z;
+    }
     for (size_t i = 0; i < wb.instance_count(); i++)
     {
         const bf6::EbxValue v = wb.read_instance(i);
@@ -1527,9 +1542,14 @@ int bf6_base_weapon_stats(bf6_ctx* c, const char* weapon_class,
      * BFRoundingEntityData in Round mode before PropertyCast converts it for
      * the label.  Keep the public integer projection consistent with that
      * graph (M4A1's authored 899.999... RPM is displayed as 900). */
+    double gravity = 0.0;
+    for (size_t i = 0; i < pe.instance_count() && gravity == 0.0; i++)
+        bf6__armory_find_number(pe.read_instance(i), 0xd9d33d20u, gravity);
     out->damage = (int32_t)std::lround(damage);
     out->rate_of_fire = (int32_t)std::lround(rof);
     out->magazine = (int32_t)std::lround(mag);
+    out->muzzle_speed = (float)speed;
+    out->gravity = (float)gravity;
     const std::string cls = weapon_class ? weapon_class : "";
     if (cls != "mg" && cls != "shotgun") out->magazine -= 1; /* closed-bolt chamber */
     return 1;

@@ -2167,7 +2167,8 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         std::vector<Tri> tris;
         const float hw = width * 0.5f, hl = length * 0.5f;
         auto quad = [&](const float A[3], const float B[3], const float C[3], const float D[3]) {
-            const float* q[4][3] = {{A, B, C}, {A, C, D}};
+            /* FUN_1443E2B10 splits the cell across B--D: (B,D,A), (B,C,D). */
+            const float* q[4][3] = {{B, D, A}, {B, C, D}};
             for (int t = 0; t < 2; ++t) {
                 Tri e{};
                 for (int k = 0; k < 3; ++k)
@@ -2261,11 +2262,16 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                     else quad(a, b, c, d);
                 }
         }
-        {   /* the transom, at the aft end, closing the section */
+        {   /* FUN_1443E1960 closes the transom as two half-width quads, not one
+             * full-width quad.  Its clipping kernel uses a per-triangle vertex-average
+             * centroid for a partially submerged polygon, so this native tessellation
+             * is physically observable even though both meshes cover the same plane. */
             const float zb = oz - hl;
-            const float a0[3] = {ox - hw, oy, zb}, a1[3] = {ox + hw, oy, zb};
-            const float a2[3] = {ox + hw, y_top, zb}, a3[3] = {ox - hw, y_top, zb};
-            quad(a0, a3, a2, a1);
+            const float bl[3] = {ox - hw, oy, zb}, tl[3] = {ox - hw, y_top, zb};
+            const float bc[3] = {ox, oy, zb}, tc[3] = {ox, y_top, zb};
+            const float br[3] = {ox + hw, oy, zb}, tr[3] = {ox + hw, y_top, zb};
+            quad(bl, tl, tc, bc);
+            quad(bc, tc, tr, br);
         }
 
         /* THE GAINS, exactly as the native scales them. */
@@ -2314,8 +2320,15 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                      * as transcribed disagree on whether the answer is an area or a
                      * fraction, and everything downstream multiplies by the area again,
                      * so a fraction is the reading that is dimensionally sound. */
-                    int dry = 0, w0 = 0, w1 = 0;
-                    for (int k = 0; k < 3; ++k) (d[k] > 0.0f ? (w0 ? w1 : w0) = k : dry = k);
+                    int dry = 0, w0 = 0, w1 = 0, wet_count = 0;
+                    for (int k = 0; k < 3; ++k) {
+                        if (d[k] > 0.0f) {
+                            if (wet_count++ == 0) w0 = k;
+                            else w1 = k;
+                        } else {
+                            dry = k;
+                        }
+                    }
                     const int A_ = wet == 1 ? w0 : dry;
                     const int B_ = wet == 1 ? (A_ + 1) % 3 : w0;
                     const int C_ = wet == 1 ? (A_ + 2) % 3 : w1;

@@ -508,20 +508,16 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         }
         s.wheel_ops().clear_inertia_set();
         d.integrate_body_accel(dt, la, aa, std::getenv("BF6_GRAPH_GRAVITY") != nullptr);
-        /* THE HULL'S OWN VELOCITY CHANGE. A boat's hull function integrates its
-         * forces into the body block itself rather than handing accelerations to the
-         * graph, so its change is applied here, after the channel sums, in the world
-         * frame the dynamics keeps. */
+        /* Keep the established extra linear hull delta (it supplies the calibrated
+         * drag path), but not the angular delta: the graph already adds the hull
+         * operator's AngularAccelerationOut to AngularAcceleration. Applying hull_dw
+         * here a second time is what destabilizes a turning boat. */
         if (s.wheel_ops().hull_ran()) {
             const float* hv = s.wheel_ops().hull_dv();
-            const float* hw = s.wheel_ops().hull_dw();
-            float wv[3], ww[3];
+            float wv[3];
             bf6__qrot(d.quat, hv, wv);
-            bf6__qrot(d.quat, hw, ww);
-            const bool no_spin = std::getenv("BF6_HULL_NO_TORQUE") != nullptr;
             for (int i = 0; i < 3; ++i) {
                 d.vel[i] += wv[i];
-                if (!no_spin) d.angvel[i] += ww[i];
             }
         }
     }

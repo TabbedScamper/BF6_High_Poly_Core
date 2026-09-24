@@ -1367,7 +1367,26 @@ struct SuperLayersCtrl : Ctrl {
              * at 1p.poselayer.slc became 0.0 one level up. */
             if (L.mask_lost) continue;
             if (mode == 0) pose_blend(out, lp, L.W, L.mask);
-            else if (mode == 1 || mode == 4) pose_add(out, lp, mode == 4 ? -L.W : L.W, L.mask);
+            else if (mode == 1 || mode == 4) {
+                /* BF6_ANT_WHY_ADD=<path part of the super-layers asset>: how many slots the
+                 * additive claims, how many the pose under it claims, and how many are lost
+                 * because only the additive has them - pose_add adds only where both do. */
+                static const char* why_add = std::getenv("BF6_ANT_WHY_ADD");
+                if (why_add && *why_add && asset && asset->path.find(why_add) != std::string::npos) {
+                    int aq = 0, dq = 0, lostq = 0, at = 0, dt_ = 0, lostt = 0;
+                    for (size_t i = 0; i < lp.vq.size() && i < out.vq.size(); ++i) {
+                        aq += lp.vq[i] ? 1 : 0; dq += out.vq[i] ? 1 : 0;
+                        lostq += (lp.vq[i] && !out.vq[i]) ? 1 : 0;
+                        at += lp.vt[i] ? 1 : 0; dt_ += out.vt[i] ? 1 : 0;
+                        lostt += (lp.vt[i] && !out.vt[i]) ? 1 : 0;
+                    }
+                    const Obj* le = L.e ? rt.g.resolve(L.e->f(0x81309ef7u), L.e) : nullptr;
+                    std::fprintf(stderr, "add %s layer %s W %.2f: rot add %d base %d lost %d | tr add %d base %d lost %d\n",
+                                 asset->path.c_str(), le ? le->path.c_str() : "?", L.W,
+                                 aq, dq, lostq, at, dt_, lostt);
+                }
+                pose_add(out, lp, mode == 4 ? -L.W : L.W, L.mask);
+            }
         }
         /* timing from the sync layer's newest instance, else the base */
         Ctrl* src = base.get();

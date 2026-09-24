@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -67,6 +68,50 @@ int main(int argc, char** argv)
     /* BF6_LIST_TYPE=<guid>: every instance of that type IN ORDER, with its ordinal among
      * that type, its name (0x0c59fa06) and every scalar field - to read which field a
      * motion-machine descriptor id names, and what (if anything) records the id. */
+    /* BF6_INSTANCES=i,j,...: those instances whole - type and every field, nested - to see
+     * what an instance that only showed up as a number (a name hash) actually is. */
+    if (const char* want = std::getenv("BF6_INSTANCES")) {
+        std::function<void(const EbxValue&, const std::string&, int)> dump =
+            [&](const EbxValue& v, const std::string& path, int depth) {
+            if (depth > 8) return;
+            switch (v.kind) {
+            case EbxValue::Kind::Struct:
+                for (const auto& f : v.fields) {
+                    char h[16]; std::snprintf(h, sizeof h, "%08x", f.first);
+                    dump(f.second, path + "." + h, depth + 1);
+                }
+                return;
+            case EbxValue::Kind::Array:
+                for (size_t k = 0; k < v.items.size() && k < 64; ++k)
+                    dump(v.items[k], path + "[" + std::to_string(k) + "]", depth + 1);
+                return;
+            case EbxValue::Kind::Str:  std::printf("  %-60s \"%s\"\n", path.c_str(), v.s.c_str()); return;
+            case EbxValue::Kind::Bool: std::printf("  %-60s %d\n", path.c_str(), v.b ? 1 : 0); return;
+            case EbxValue::Kind::Int:  std::printf("  %-60s %lld\n", path.c_str(), (long long)v.i); return;
+            case EbxValue::Kind::Uint: std::printf("  %-60s %llu (0x%llx)\n", path.c_str(),
+                                                   (unsigned long long)v.u, (unsigned long long)v.u); return;
+            case EbxValue::Kind::Real: std::printf("  %-60s %g\n", path.c_str(), v.f); return;
+            case EbxValue::Kind::InstanceRef:
+                std::printf("  %-60s -> inst %d%s\n", path.c_str(), v.instance,
+                            v.instance >= 0 ? (" type " + TypeDb::guid_str(ebx.instance_type((size_t)v.instance))).c_str() : "");
+                return;
+            case EbxValue::Kind::ImportRef:
+                std::printf("  %-60s -> import %s %s\n", path.c_str(), v.import_path.c_str(), v.s.c_str());
+                return;
+            default: std::printf("  %-60s <kind %d>\n", path.c_str(), (int)v.kind); return;
+            }
+        };
+        for (const char* p = want; *p;) {
+            const size_t i = (size_t)std::strtoul(p, nullptr, 10);
+            if (i < ebx.instance_count()) {
+                std::printf("== inst %zu type %s\n", i, TypeDb::guid_str(ebx.instance_type(i)).c_str());
+                dump(ebx.read_instance(i), "", 0);
+            }
+            while (*p && *p != ',') ++p;
+            if (*p == ',') ++p;
+        }
+        return 0;
+    }
     if (const char* want = std::getenv("BF6_LIST_TYPE")) {
         int ord = 0;
         for (size_t i = 0; i < ebx.instance_count(); ++i) {

@@ -1067,6 +1067,13 @@ const uint32_t kClampStoreFloat = 0x239DC415u; /* native 14432A010 -> FUN_14436A
  * `movzx eax, byte [rdx]; mov [r8], al; ret` - the output IS operand 1, and the name in
  * operand 0 is never read. Pure; known exactly when operand 1 is. */
 const uint32_t kSettingByPath   = 0xBC999B66u;
+/* "IS THIS INT FIELD EQUAL TO N", the field named by its link HASH, not a descriptor.
+ * Native 0x14432B240 (expression_engine_nodes_6a1c1b.tsv): FUN_1442E0F00 finds the hash in
+ * the machine's hash list, FUN_14436B890 reads that field - the stored value if its
+ * presence bit is set, else the authored default at +0x54 - and the output is value == N;
+ * a hash not in the list gives false. Operands (hash, hash, N): operand 0 repeats the
+ * hash (measured on every call), operand 1 is the one the native reads. */
+const uint32_t kIntFieldIs      = 0x9132CD71u;
 /* THE DEBUG DRAWS. Reflected functions that return void and take only what to draw -
  * Position/Start/End/Transform, Color32, Wireframe, DepthTest, TimeVisible - per
  * ReflectedFunctions.tsv (DrawSphere, DrawText, DrawArrow, DrawBox, DrawLine, ...). They
@@ -1313,6 +1320,11 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {8, 1};
         out.output_width = 1;
         return true;
+    case kIntFieldIs:
+        if (!bf6::SoldierFields::get().loaded()) return false;
+        out.input_widths = {4, 4, 4};
+        out.output_width = 1;
+        return true;
     case kClampStoreInt:
     case kClampStoreFloat:
         /* Six operands here; describe_call also admits the five-operand form. */
@@ -1456,6 +1468,24 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (!args[1].known || args[1].bytes.empty()) return false;
         served_[key] += 1;
         out = Value::from_bool(args[1].bytes[0] != 0);
+        return true;
+    }
+    if (key == kIntFieldIs) {
+        if (!args[1].known || !args[2].known || args[1].bytes.size() < 4 || args[2].bytes.size() < 4)
+            return false;
+        uint32_t h = 0; int32_t n = 0;
+        std::memcpy(&h, args[1].bytes.data(), 4);
+        std::memcpy(&n, args[2].bytes.data(), 4);
+        const bf6::SoldierFields& sf = bf6::SoldierFields::get();
+        const bf6::SoldierFields::Field* f = sf.by_hash(h);
+        /* The native reads false for a hash not in its list, but a hash missing from THIS
+         * table may only mean a link that did not load - refused, not answered false. */
+        if (!f) return false;
+        if (f->kind != bf6::SoldierFields::kInt || !sf.known(*f)) return false;
+        float v[4];
+        sf.value(*f, v);
+        served_[key] += 1;
+        out = Value::from_bool((int32_t)v[0] == n);
         return true;
     }
     /* FUN_1443EFC30 maps its missing-table sentinel (-FLT_MAX) to -1024.0f.

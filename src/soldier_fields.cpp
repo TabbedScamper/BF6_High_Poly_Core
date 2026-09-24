@@ -25,6 +25,10 @@ const uint32_t kName    = 0x0c59fa06u;
 const uint32_t kId      = 0x51480447u;
 const uint32_t kLane    = 0xdfd68748u;
 const uint32_t kDefault = 0x42c8b257u;
+/* The hash -> field links (see load). */
+const char* const kLinkType = "66241550-c062-e216-c829-980775109117";
+const uint32_t kLinkHash  = 0xbf1ccee0u;
+const uint32_t kLinkField = 0xef857f66u;
 
 bool number(const EbxValue& v, double& out)
 {
@@ -54,6 +58,7 @@ bool SoldierFields::load(Source& src, TypeDb& types, std::string& err)
     Ebx ebx(types);
     ebx.set_guid_index(&src.armory_partition_index());
     if (!ebx.parse(std::move(raw), err)) return false;
+    std::map<size_t, uint64_t> by_instance;   /* instance index -> field key */
     for (size_t i = 0; i < ebx.instance_count(); ++i) {
         const std::string t = TypeDb::guid_str(ebx.instance_type(i));
         int kind = -1;
@@ -86,8 +91,29 @@ bool SoldierFields::load(Source& src, TypeDb& types, std::string& err)
         f.id = (int)id;
         f.lane = (int)lane;
         by_key_[key(f.kind, f.lane, f.id)] = f;
+        by_instance[i] = key(f.kind, f.lane, f.id);
     }
     for (const auto& kv : by_key_) by_name_[kv.second.name] = &kv.second;
+    /* THE HASH LINKS. Instances of kLinkType carry a 32-bit hash (kLinkHash), a reference
+     * to one of the fields above (kLinkField) and the public channel collection it belongs
+     * to. The operators that name a field by hash rather than by descriptor - 0x9132CD71,
+     * "is this int field equal to N" - look the hash up in exactly this table (native
+     * FUN_1442E0F00 over the machine's hash list). Measured: 0x346E1C6B, 0x7F615680 and
+     * 0x24E8D360 each resolve through one of these to an int field. */
+    for (size_t i = 0; i < ebx.instance_count(); ++i) {
+        if (TypeDb::guid_str(ebx.instance_type(i)) != kLinkType) continue;
+        const EbxValue v = ebx.read_instance(i);
+        double h = -1.0;
+        int target = -1;
+        for (const auto& kv : v.fields) {
+            if (kv.first == kLinkHash) number(kv.second, h);
+            else if (kv.first == kLinkField && kv.second.kind == EbxValue::Kind::InstanceRef)
+                target = kv.second.instance;
+        }
+        auto it = target >= 0 ? by_instance.find((size_t)target) : by_instance.end();
+        if (h < 0.0 || it == by_instance.end()) continue;
+        by_hash_[(uint32_t)h] = &by_key_[it->second];
+    }
     loaded_ = !by_key_.empty();
     if (!loaded_) err = "no soldier field instances in " + std::string(kAsset);
     return loaded_;

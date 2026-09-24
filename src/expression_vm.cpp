@@ -1450,6 +1450,15 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 (signature.output_width && !call.output)) {
                 add_unresolved(result, record.operator_key);
                 last_written.tainted = true;
+                /* BF6_UNRES_CONSTS=<hex key>: the constant-pool words of each unresolved
+                 * call of that key (FFFFFFFF where an operand is not a constant) - what an
+                 * undescribed operator was asked, before a host exists to log it. */
+                if (const char* want = std::getenv("BF6_UNRES_CONSTS"))
+                    if ((uint32_t)std::strtoul(want, nullptr, 16) == record.operator_key) {
+                        std::fprintf(stderr, "unres %08X rec 0x%X consts", record.operator_key, record.offset);
+                        for (uint32_t v : call_consts) std::fprintf(stderr, " %08X", v);
+                        std::fprintf(stderr, "\n");
+                    }
                 /* why: not described, an input count that does not match, or no output */
                 result.diagnostics.push_back(
                     "unresolved at record " + std::to_string(record.offset) + " key " +

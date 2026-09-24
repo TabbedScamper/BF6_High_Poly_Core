@@ -51,13 +51,14 @@ bf6_soldier* bf6_soldier_open(bf6_ctx* c, const char* graphs_csv, const float* t
         p = q + 1;
     }
     if (s->graphs.empty()) return fail("no graphs named");
-    /* The soldier graphs live in the shared gameplay packages, which a level mount may not
-     * carry; widen once, which only ever adds names. */
+    /* The soldier graphs live in shared gameplay packages, and a few only in level packages
+     * (stance transitions, swimming physics); widen once, levels included, which only ever
+     * adds names. */
     {
         const uint8_t* probe = nullptr;
         if (bf6_read_raw(c, BF6_RAW_RES, s->graphs[0].c_str(), &probe) <= 0) {
             char merr[256] = {};
-            bf6_mount_all(c, 0, merr, (int)sizeof(merr));
+            bf6_mount_all(c, 1, merr, (int)sizeof(merr));
         }
     }
     s->scene = bf6_ray_scene_create();

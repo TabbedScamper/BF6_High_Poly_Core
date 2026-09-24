@@ -75,6 +75,12 @@ public:
         for (const std::string& n : unknown_) if (!live_.count(n)) out.push_back(n);
         return out;
     }
+    /* A field named by its 32-bit link hash (the machine's hash list), or null. */
+    const Field* by_hash(uint32_t h) const {
+        auto it = by_hash_.find(h);
+        return it == by_hash_.end() ? nullptr : it->second;
+    }
+    size_t hash_count() const { return by_hash_.size(); }
     const Field* by_name(const std::string& name) const {
         auto it = by_name_.find(name);
         return it == by_name_.end() ? nullptr : it->second;
@@ -92,6 +98,7 @@ private:
     std::map<std::string, std::array<float, 16>> xform_live_;
     std::map<std::string, const Field*> by_name_;
     std::set<std::string> unknown_;
+    std::map<uint32_t, const Field*> by_hash_;
 };
 
 }  // namespace bf6

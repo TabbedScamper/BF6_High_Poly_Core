@@ -24,7 +24,8 @@ int main(int argc, char** argv)
     char err[512] = {0};
     bf6_ctx* c = bf6_open(argv[1], err, (int)sizeof(err));
     if (!c) { std::printf("open: %s\n", err); return 1; }
-    if (!bf6_mount_all(c, 0, err, (int)sizeof(err))) std::printf("note: mount_all said %s\n", err);
+    /* Levels too: some soldier graphs ship only in level packages (as the scoreboard mounts). */
+    if (!bf6_mount_all(c, 1, err, (int)sizeof(err))) std::printf("note: mount_all said %s\n", err);
     std::printf("soldier fields: %d\n", bf6_soldier_fields_load(c));
     bf6_soldier* s = bf6_soldier_open(c, argv[2], nullptr, 0, err, (int)sizeof(err));
     if (!s) { std::printf("soldier_open: %s\n", err); return 1; }

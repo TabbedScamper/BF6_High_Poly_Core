@@ -173,6 +173,24 @@ const Spec kSpecs[] = {
      * and one output, all written by 16-byte moves - and the name says what is done
      * with them. Flagged so that a tank rotating oddly is checked here first. */
     {"AverageFloat3",            2, {kV, kV}, kV},      /* 3 */
+
+    /* THE SOLDIER GRAPHS' ARITHMETIC. Operand counts from expression_key_atlas.tsv (its
+     * shape column lists inputs): each is one whose result the name fixes completely -
+     * a negation, a lane-wise add, a comparison. ClampFloat3, ToVec3Float, ToVec2Float3
+     * and AverageFloat are NOT here: which lanes they take, or whether their bounds are
+     * scalars, cannot be read off the name. A Float2 is two floats, eight bytes, as
+     * MagnitudeFloat2 and NormalizeFloat2 above already read it. */
+    {"NegateFloat3",             1, {kV},     kV},      /* shape s, 85 uses */
+    {"NegFloat",                 1, {kF},     kF},      /* s */
+    {"AddFloat2",                2, {kF * 2, kF * 2}, kF * 2},   /* k,s / s,s */
+    {"SubtractFloat2",           2, {kF * 2, kF * 2}, kF * 2},   /* s,s */
+    {"AbsoluteFloat2",           1, {kF * 2}, kF * 2},  /* s */
+    {"MinFloat2",                2, {kF * 2, kF * 2}, kF * 2},   /* s,s */
+    {"MultiplyFloat2FloatFloat2",2, {kF * 2, kF}, kF * 2},       /* s,s, 20 uses */
+    {"Xor",                      2, {kB, kB}, kB},      /* s,s - beside the And / Or bool trio */
+    {"EqualsUInt",               2, {kF, kF}, kB},      /* s,k, 144 uses; NotEqualsUInt's twin */
+    {"SubtractUInt",             2, {kF, kF}, kF},      /* s,s - wraps, as unsigned does */
+    {"OneOverPi",                0, {},       kF},      /* a constant */
 };
 
 const Spec* spec_for(const std::string& name) {
@@ -320,6 +338,40 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     served_[n] += 1;
 
     if (n == "SubtractFloat")        { out = put_f32(f32(a[0]) - f32(a[1])); return true; }
+    if (n == "NegFloat")             { out = put_f32(-f32(a[0])); return true; }
+    if (n == "NegateFloat3") {
+        float v[3];
+        vec3(a[0], v);
+        const float r[3] = {-v[0], -v[1], -v[2]};
+        out = put_vec3(r);
+        return true;
+    }
+    if (n == "AddFloat2" || n == "SubtractFloat2" || n == "AbsoluteFloat2" || n == "MinFloat2" ||
+        n == "MultiplyFloat2FloatFloat2") {
+        float x[2] = {0, 0}, y[2] = {0, 0}, r[2];
+        if (a[0].bytes.size() >= 8) std::memcpy(x, a[0].bytes.data(), 8);
+        if (a.size() > 1 && a[1].bytes.size() >= 8) std::memcpy(y, a[1].bytes.data(), 8);
+        const float s = a.size() > 1 ? f32(a[1]) : 0.f;
+        for (int i = 0; i < 2; ++i) {
+            if (n == "AddFloat2")           r[i] = x[i] + y[i];
+            else if (n == "SubtractFloat2") r[i] = x[i] - y[i];
+            else if (n == "AbsoluteFloat2") r[i] = std::fabs(x[i]);
+            else if (n == "MinFloat2")      r[i] = std::fmin(x[i], y[i]);
+            else                            r[i] = x[i] * s;
+        }
+        out = Value{};
+        out.bytes.resize(8);
+        std::memcpy(out.bytes.data(), r, 8);
+        out.known = true;
+        return true;
+    }
+    if (n == "Xor") {
+        out = Value::from_bool((a[0].bytes.size() && a[0].bytes[0]) != (a[1].bytes.size() && a[1].bytes[0]));
+        return true;
+    }
+    if (n == "EqualsUInt")           { out = Value::from_bool(a[0].as_u32() == a[1].as_u32()); return true; }
+    if (n == "SubtractUInt")         { out = Value::from_u32(a[0].as_u32() - a[1].as_u32()); return true; }
+    if (n == "OneOverPi")            { out = put_f32(0.318309886183791f); return true; }
     if (n == "NegateFloat")          { out = put_f32(-f32(a[0])); return true; }
     if (n == "AbsoluteFloat")        { out = put_f32(std::fabs(f32(a[0]))); return true; }
     if (n == "MagnitudeSquaredFloat3" || n == "MagnitudeFloat2") {

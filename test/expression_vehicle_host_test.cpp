@@ -80,7 +80,10 @@ static int self_check() {
                           "LinearTransformfromXangle", "LinearTransformfromYangle",
                           "CrossVec3", "DotFloat3", "ComplementFloat", "HalfPi",
                           "NormalizeAngleMinusPiToPi", "InterpolateFloat", "MinInt",
-                          "RotateFloat3", "MultiplyFloat3LinearTransformFloat3"}) {
+                          "RotateFloat3", "MultiplyFloat3LinearTransformFloat3",
+                          "AddFloat2", "SubtractFloat2", "AbsoluteFloat2", "MinFloat2",
+                          "MultiplyFloat2FloatFloat2", "NegateFloat3", "Xor", "EqualsUInt",
+                          "SubtractUInt"}) {
         key[n] = k; ops.add(k, n); ++k;
     }
     auto f = [](float v) {
@@ -293,6 +296,45 @@ static int self_check() {
                         ++bad; r = 3; break;
                     }
         }
+    }
+
+    /* The soldier graphs' arithmetic: a Float2 is eight bytes, (x, y). */
+    {
+        auto f2 = [](float x, float y) {
+            Value v; v.bytes.resize(8); v.known = true;
+            std::memcpy(v.bytes.data(), &x, 4); std::memcpy(v.bytes.data() + 4, &y, 4);
+            return v;
+        };
+        auto rd2 = [](const Value& v, float r[2]) { std::memcpy(r, v.bytes.data(), 8); };
+        Value out; float r[2];
+        struct C2 { const char* n; std::vector<Value> in; float x, y; };
+        const C2 cases[] = {
+            {"AddFloat2",                 {f2(1, 2), f2(10, 20)}, 11, 22},
+            {"SubtractFloat2",            {f2(1, 2), f2(10, 20)}, -9, -18},
+            {"AbsoluteFloat2",            {f2(-1, 2)},            1, 2},
+            {"MinFloat2",                 {f2(1, 20), f2(10, 2)}, 1, 2},
+            {"MultiplyFloat2FloatFloat2", {f2(1, -2), f(3.f)},    3, -6},
+        };
+        for (const C2& c : cases) {
+            if (!ops.invoke(key[c.n], c.in, out)) { std::printf("   %s refused\n", c.n); ++bad; continue; }
+            rd2(out, r);
+            if (std::fabs(r[0] - c.x) > 1e-5f || std::fabs(r[1] - c.y) > 1e-5f) {
+                std::printf("   %s gave (%g, %g)\n", c.n, r[0], r[1]); ++bad;
+            }
+        }
+        if (!ops.invoke(key["NegateFloat3"], {v3(1.f, -2.f, 3.f)}, out)) ++bad;
+        else {
+            float v[3]; std::memcpy(v, out.bytes.data(), 12);
+            if (v[0] != -1.f || v[1] != 2.f || v[2] != -3.f) { std::printf("   NegateFloat3\n"); ++bad; }
+        }
+        if (!ops.invoke(key["Xor"], {Value::from_bool(true), Value::from_bool(false)}, out) ||
+            out.bytes[0] != 1) { std::printf("   Xor(1,0)\n"); ++bad; }
+        if (!ops.invoke(key["Xor"], {Value::from_bool(true), Value::from_bool(true)}, out) ||
+            out.bytes[0] != 0) { std::printf("   Xor(1,1)\n"); ++bad; }
+        if (!ops.invoke(key["EqualsUInt"], {Value::from_u32(7), Value::from_u32(7)}, out) ||
+            out.bytes[0] != 1) { std::printf("   EqualsUInt\n"); ++bad; }
+        if (!ops.invoke(key["SubtractUInt"], {Value::from_u32(2), Value::from_u32(3)}, out) ||
+            out.as_u32() != 0xFFFFFFFFu) { std::printf("   SubtractUInt does not wrap\n"); ++bad; }
     }
 
     std::printf("PureOps self-check: %s\n",

@@ -20,6 +20,8 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
 {
     graphs_.clear();
     channel_hash_.clear();
+    bone_identity_.clear();
+    presented_bones_.clear();
     state_.set_allow_writes(true);
     physics_.set_tracer(tracer, tracer_user);
     wheel_.set_tracer(tracer, tracer_user);
@@ -207,18 +209,21 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
         std::map<uint32_t, int32_t> bone_of;
         for (int i = 0; i < nc && i < 1024; ++i) bone_of[hs[(size_t)i]] = bs[(size_t)i];
         if (sk) {
-            for (const auto& b : all_bone_binds) {
-                const auto bo = bone_of.find(b.channel_hash);
-                if (bo == bone_of.end() || bo->second < 0 || bo->second >= sk->bone_count) continue;
-                const float* m = sk->bones[bo->second].model;
-                const float* l = sk->bones[bo->second].local;
+            for (int32_t index = 0; index < sk->bone_count; ++index) {
+                const float* m = sk->bones[index].model;
+                const float* l = sk->bones[index].local;
                 const float mr[16] = {m[0], m[1], m[2], 0, m[3], m[4], m[5], 0,
                                       m[6], m[7], m[8], 0, m[9], m[10], m[11], 0};
                 const float lr[16] = {l[0], l[1], l[2], 0, l[3], l[4], l[5], 0,
                                       l[6], l[7], l[8], 0, l[9], l[10], l[11], 0};
-                state_.set_bone_pose(b.channel_hash, 0, lr);
-                state_.set_bone_pose(b.channel_hash, 1, mr);
-                state_.set_bone_pose(b.channel_hash, 2, mr);
+                state_.set_skeleton_bone(index, sk->bones[index].parent, lr, mr);
+            }
+            for (const auto& mapped : bone_of) {
+                const int32_t index = mapped.second;
+                if (index < 0 || index >= sk->bone_count) continue;
+                state_.map_skeleton_bone(mapped.first, index);
+                bone_identity_[mapped.first] = BoneIdentity{index,
+                    sk->bones[index].name ? sk->bones[index].name : ""};
             }
             bf6_free(ctx, sk);
         }
@@ -548,6 +553,7 @@ std::string VehicleSim::record_info(uint32_t offset) const {
 
 void VehicleSim::tick() {
     report_.clear();
+    state_.begin_bone_tick();
     for (auto& g : graphs_) {
         g->inst.trace.clear();
         expression::ChainHost chain;
@@ -832,6 +838,17 @@ void VehicleSim::tick() {
                 std::snprintf(line, sizeof line, "  guessed at rec 0x%lX: %s\n", off, d.substr(0, d.find(" @")).c_str());
                 report_ += line;
             }
+    }
+    presented_bones_.clear();
+    for (const auto& written : state_.bone_writes()) {
+        const auto identity = bone_identity_.find(written.first);
+        if (identity == bone_identity_.end() || written.second.size() < 64) continue;
+        PresentedBone out;
+        out.channel_hash = written.first;
+        out.bone_index = identity->second.index;
+        out.name = identity->second.name;
+        std::memcpy(out.local.data(), written.second.data(), 64);
+        presented_bones_.push_back(std::move(out));
     }
 }
 

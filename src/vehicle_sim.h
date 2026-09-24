@@ -26,6 +26,7 @@
 #include "vehicle_wheel_ops.h"
 
 #include <map>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,6 +35,12 @@ namespace bf6 {
 
 class VehicleSim {
 public:
+    struct PresentedBone {
+        uint32_t channel_hash = 0;
+        int32_t bone_index = -1;
+        std::string name;
+        std::array<float, 16> local{};
+    };
     /* graphs: EBX/RES names; skeleton: the vehicle's ske_veh_*_base (may be empty).
      * exe: the install's executable (operator names). A tracer + user for rays. */
     bool open(bf6_ctx* ctx, const std::string& exe, const std::vector<std::string>& graphs,
@@ -62,6 +69,7 @@ public:
     std::vector<std::string> channel_names() const;
     const expression::StateHost& state() const { return state_; }
     expression::StateHost& state_mut() { return state_; }
+    const std::vector<PresentedBone>& presented_bones() const { return presented_bones_; }
     /* The car wheel physics functions (tyre, ray contact, ...) and the chassis
      * snapshot they read; the caller sets the body each tick. */
     expression::WheelOps& wheel_ops() { return wheel_; }
@@ -123,6 +131,9 @@ private:
     expression::RecoveredOps recovered_;
     expression::WorldHost world_;
     expression::WheelOps wheel_;
+    struct BoneIdentity { int32_t index = -1; std::string name; };
+    std::map<uint32_t, BoneIdentity> bone_identity_;
+    std::vector<PresentedBone> presented_bones_;
     std::string wheel_err_;
     std::string report_;
 };

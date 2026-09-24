@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <array>
 #include <map>
 #include <set>
 #include <string>
@@ -202,6 +203,16 @@ public:
         std::memcpy(b.data(), rows, 64);
         bone_poses_[((uint64_t)mode << 32) | bone_hash] = b;
     }
+    /* Skeleton state used by SetPartTransform (0x4899CB44). The game's setter
+     * always commits an absolute LOCAL pose; model/world modes are converted
+     * through the current parent/root transforms first. */
+    void set_skeleton_bone(int32_t index, int32_t parent,
+                           const float local[16], const float model[16]);
+    void map_skeleton_bone(uint32_t channel_hash, int32_t index);
+    void begin_bone_tick();
+    const std::map<uint32_t, std::vector<uint8_t>>& bone_writes() const {
+        return bone_writes_;
+    }
     const std::map<uint32_t, uint32_t>& unsupplied_transforms() const {
         return unsupplied_transforms_;
     }
@@ -299,6 +310,17 @@ private:
     std::map<PartKey, std::vector<uint8_t>> part_transforms_;
     std::map<PartKey, uint32_t> unsupplied_parts_;
     std::map<uint64_t, std::vector<uint8_t>> bone_poses_;
+    struct SkeletonPose {
+        int32_t parent = -1;
+        std::array<float, 16> rest_local{};
+        std::array<float, 16> rest_model{};
+        std::array<float, 16> local{};
+        std::array<float, 16> model{};
+    };
+    std::vector<SkeletonPose> skeleton_poses_;
+    std::map<uint32_t, int32_t> skeleton_bone_index_;
+    /* Actual local transforms committed this tick, keyed by bone channel. */
+    std::map<uint32_t, std::vector<uint8_t>> bone_writes_;
     bool setting_default_ = false;
     bool allow_writes_ = false;
 };

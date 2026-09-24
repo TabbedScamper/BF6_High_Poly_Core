@@ -100,12 +100,30 @@ int main(int argc, char** argv) {
             cr = cr > lim ? lim : (cr < -lim ? -lim : cr);
         }
         bf6_vehicle_set_cyclic(v, cp, cr);
+        static const bool boost = std::getenv("BF6_BOOST") != nullptr;  /* hold InputSprint */
+        bf6_vehicle_set_boost(v, boost ? 1.0f : 0.0f);
         const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
         /* BF6_TIMING=1: the slowest step and the total, per simulated second - whether a
          * phase of flight (lift-off, say) makes the core itself stall the caller. */
         static double t_sum = 0.0, t_max = 0.0;
         const auto t0 = std::chrono::steady_clock::now();
         if (bf6_vehicle_step(v, in, out) < 33) { std::fprintf(stderr, "step failed\n"); return 2; }
+        /* BF6_BONES=<frames>: presentation-graph writes as absolute local rows.
+         * This makes control-surface and landing-gear response measurable without
+         * involving the Godot renderer. */
+        if (const char* be = std::getenv("BF6_BONES"))
+            if (f % std::max(1, std::atoi(be)) == 0) {
+                const int32_t count = bf6_vehicle_bone_count(v);
+                for (int32_t b = 0; b < count; ++b) {
+                    char name[128] = {};
+                    float m[16] = {};
+                    if (bf6_vehicle_bone(v, b, name, (int32_t)sizeof(name), m))
+                        std::printf("bone %d %s  r %.6f %.6f %.6f  u %.6f %.6f %.6f  "
+                                    "f %.6f %.6f %.6f  t %.6f %.6f %.6f\n",
+                                    f, name, m[0],m[1],m[2], m[4],m[5],m[6],
+                                    m[8],m[9],m[10], m[12],m[13],m[14]);
+                }
+            }
         if (std::getenv("BF6_TIMING")) {
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             t_sum += ms; if (ms > t_max) t_max = ms;

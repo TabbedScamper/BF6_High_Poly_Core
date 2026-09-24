@@ -3226,6 +3226,15 @@ BF6_API void bf6_vehicle_set_water(bf6_vehicle*, float height, int32_t present);
  * InputRoll channels, which every helicopter binds. Without them a helicopter offline has no
  * cyclic at all and its graph substitutes an autopilot whose output grows without bound. */
 BF6_API void bf6_vehicle_set_cyclic(bf6_vehicle*, float pitch, float roll);
+/* Vehicle boost: the Boolean InputSprint channel (true when boost > 0.5). The Godot binding
+ * takes it as an optional ninth step float and sends false for older callers. */
+BF6_API void bf6_vehicle_set_boost(bf6_vehicle*, float boost);
+/* Presentation-graph bone writes from the most recent step. Each transform is
+ * the absolute local Frostbite LinearTransform: right/up/forward/translation
+ * rows at float offsets 0/4/8/12. The name is the authored skeleton bone name. */
+BF6_API int32_t bf6_vehicle_bone_count(bf6_vehicle*);
+BF6_API int32_t bf6_vehicle_bone(bf6_vehicle*, int32_t index,
+                                 char* name, int32_t name_capacity, float local16[16]);
 /* Replace the ground under a running vehicle (world-space triangles, 9 floats each)
  * without touching its motion or graph state. Returns the triangle count added. Use
  * this, not close + open, when the ground is re-gathered as the vehicle travels. */

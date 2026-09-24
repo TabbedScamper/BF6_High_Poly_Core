@@ -39,7 +39,7 @@ const ContextOp kContextOps[] = {
      * Handled separately below as the frame delta. */
     /* 0xE2EEC2BE removed: it is the game CLOCK (WorldHost), zero inputs. */
     /* 0x9A39505A removed: the game TICK (WorldHost), zero inputs, three outputs. */
-    {0x4899CB44u, 2}, {0x2B65ED67u, 3},
+    {0x2B65ED67u, 3},
     {0xC8364385u, 1},
     /* 0xF83207B2 and 0xCA1E499E removed: they are shape-B node records (code takes
      * (ctx, outputs[], inputs[])), not context handles. 0xCA1E499E is the
@@ -296,6 +296,13 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
     if (key == 0xC58D8EA6u) { out.input_widths = {};           out.output_width = 4;  return true; }
     if (key == 0x6D98A861u) { out.input_widths = {16, 16, 16}; out.output_width = 64; return true; }
     if (key == 0xE22FCA6Fu) { out.input_widths = {8, 8, 4};    out.output_width = 1;  return true; }
+    if (key == 0x4899CB44u) {
+        /* Native 0x1443338E0: (int mode, ExpressionBoneId*, LinearTransform*).
+         * It is a side effect and has no output. */
+        out.input_widths = {4, 16, 64};
+        out.output_width = 0;
+        return true;
+    }
     if (const ContextOp* c = context_op(key)) {
         out.input_widths.assign((size_t)c->arity, 4u);
         out.output_width = 4;
@@ -305,6 +312,41 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
 }
 
 static const uint32_t kPartTransform = 0x04BEFF62u;
+static const uint32_t kSetPartTransform = 0x4899CB44u;
+
+static void lt_identity(float out[16]) {
+    std::memset(out, 0, 64);
+    out[0] = out[5] = out[10] = 1.0f;
+}
+
+/* Frostbite LinearTransform is four Vec3 rows (stride 16) and composes as a
+ * row-vector affine transform: p' = p * a * b. */
+static void lt_mul(const float a[16], const float b[16], float out[16]) {
+    std::memset(out, 0, 64);
+    for (int row = 0; row < 4; ++row)
+        for (int col = 0; col < 3; ++col) {
+            out[row * 4 + col] = a[row * 4 + 0] * b[0 * 4 + col] +
+                                 a[row * 4 + 1] * b[1 * 4 + col] +
+                                 a[row * 4 + 2] * b[2 * 4 + col];
+            if (row == 3) out[row * 4 + col] += b[3 * 4 + col];
+        }
+}
+
+static bool lt_inverse(const float m[16], float out[16]) {
+    const float a=m[0], b=m[1], c=m[2], d=m[4], e=m[5], f=m[6],
+                g=m[8], h=m[9], i=m[10];
+    const float det = a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g);
+    if (!std::isfinite(det) || std::fabs(det) < 1e-12f) return false;
+    const float q = 1.0f / det;
+    std::memset(out, 0, 64);
+    out[0]=(e*i-f*h)*q; out[1]=(c*h-b*i)*q; out[2]=(b*f-c*e)*q;
+    out[4]=(f*g-d*i)*q; out[5]=(a*i-c*g)*q; out[6]=(c*d-a*f)*q;
+    out[8]=(d*h-e*g)*q; out[9]=(b*g-a*h)*q; out[10]=(a*e-b*d)*q;
+    for (int col = 0; col < 3; ++col)
+        out[12 + col] = -(m[12] * out[col] + m[13] * out[4 + col] +
+                          m[14] * out[8 + col]);
+    return true;
+}
 
 /* THREE ROOT OPERATORS, each identified by measuring the records rather than trusting
  * the table's arity.
@@ -329,6 +371,41 @@ void StateHost::set_named_transform(uint32_t name_hash, const float rows[16]) {
     std::vector<uint8_t> bytes(64, 0);
     std::memcpy(bytes.data(), rows, 64);
     named_transforms_[name_hash] = bytes;
+}
+
+void StateHost::set_skeleton_bone(int32_t index, int32_t parent,
+                                  const float local[16], const float model[16]) {
+    if (index < 0) return;
+    if ((size_t)index >= skeleton_poses_.size()) skeleton_poses_.resize((size_t)index + 1);
+    SkeletonPose& p = skeleton_poses_[(size_t)index];
+    p.parent = parent;
+    std::memcpy(p.rest_local.data(), local, 64);
+    std::memcpy(p.rest_model.data(), model, 64);
+    std::memcpy(p.local.data(), local, 64);
+    std::memcpy(p.model.data(), model, 64);
+}
+
+void StateHost::begin_bone_tick() {
+    bone_writes_.clear();
+    for (SkeletonPose& p : skeleton_poses_) {
+        p.local = p.rest_local;
+        p.model = p.rest_model;
+    }
+    for (const auto& mapped : skeleton_bone_index_) {
+        const int32_t n = mapped.second;
+        if (n < 0 || (size_t)n >= skeleton_poses_.size()) continue;
+        set_bone_pose(mapped.first, 0, skeleton_poses_[(size_t)n].local.data());
+        set_bone_pose(mapped.first, 1, skeleton_poses_[(size_t)n].model.data());
+        set_bone_pose(mapped.first, 2, skeleton_poses_[(size_t)n].model.data());
+    }
+}
+
+void StateHost::map_skeleton_bone(uint32_t channel_hash, int32_t index) {
+    if (index < 0 || (size_t)index >= skeleton_poses_.size()) return;
+    skeleton_bone_index_[channel_hash] = index;
+    set_bone_pose(channel_hash, 0, skeleton_poses_[(size_t)index].local.data());
+    set_bone_pose(channel_hash, 1, skeleton_poses_[(size_t)index].model.data());
+    set_bone_pose(channel_hash, 2, skeleton_poses_[(size_t)index].model.data());
 }
 
 bool StateHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
@@ -361,6 +438,80 @@ bool StateHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
 }
 
 bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
+    if (key == kSetPartTransform) {
+        if (args.size() != 3 || !args[0].known || !args[1].known || !args[2].known ||
+            args[1].bytes.size() < 16 || args[2].bytes.size() < 64) return false;
+        const uint32_t mode = args[0].as_u32();
+        if (mode > 2u) return false;
+        uint32_t bone_hash = 0;
+        std::memcpy(&bone_hash, args[1].bytes.data(), 4);
+        float requested[16], local[16];
+        std::memcpy(requested, args[2].bytes.data(), 64);
+        /* Native 0x1443338E0 rejects a transform when any of its twelve
+         * meaningful floats is NaN or infinity. Padding lanes are ignored. */
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 3; ++col)
+                if (!std::isfinite(requested[row * 4 + col])) return false;
+        std::memcpy(local, requested, 64);
+
+        const auto bi = skeleton_bone_index_.find(bone_hash);
+        if (bi != skeleton_bone_index_.end() && bi->second >= 0 &&
+            (size_t)bi->second < skeleton_poses_.size()) {
+            const int32_t index = bi->second;
+            const int32_t parent = skeleton_poses_[(size_t)index].parent;
+            float desired_model[16];
+            std::memcpy(desired_model, requested, 64);
+            if (mode == 2u) {
+                float root[16], inv_root[16];
+                lt_identity(root);
+                const auto ri = named_transforms_.find(0x5F9C8163u);
+                if (ri != named_transforms_.end() && ri->second.size() >= 64)
+                    std::memcpy(root, ri->second.data(), 64);
+                if (!lt_inverse(root, inv_root)) return false;
+                lt_mul(requested, inv_root, desired_model);
+            }
+            if (mode != 0u && parent >= 0 && (size_t)parent < skeleton_poses_.size()) {
+                float inv_parent[16];
+                if (!lt_inverse(skeleton_poses_[(size_t)parent].model.data(), inv_parent)) return false;
+                lt_mul(desired_model, inv_parent, local);
+            } else if (mode != 0u) {
+                std::memcpy(local, desired_model, 64);
+            }
+            std::memcpy(skeleton_poses_[(size_t)index].local.data(), local, 64);
+
+            /* Bone indices are topological. Recompose the changed subtree so a
+             * later getter in this evaluation observes the setter immediately. */
+            std::vector<uint8_t> changed(skeleton_poses_.size(), 0);
+            changed[(size_t)index] = 1;
+            for (size_t n = (size_t)index; n < skeleton_poses_.size(); ++n) {
+                const int32_t p = skeleton_poses_[n].parent;
+                if (n != (size_t)index && p >= 0 && changed[(size_t)p]) changed[n] = 1;
+                if (!changed[n]) continue;
+                if (p >= 0 && (size_t)p < skeleton_poses_.size())
+                    lt_mul(skeleton_poses_[n].local.data(), skeleton_poses_[(size_t)p].model.data(),
+                           skeleton_poses_[n].model.data());
+                else
+                    std::memcpy(skeleton_poses_[n].model.data(), skeleton_poses_[n].local.data(), 64);
+            }
+            for (const auto& mapped : skeleton_bone_index_) {
+                const int32_t n = mapped.second;
+                if (n < 0 || (size_t)n >= changed.size() || !changed[(size_t)n]) continue;
+                set_bone_pose(mapped.first, 0, skeleton_poses_[(size_t)n].local.data());
+                set_bone_pose(mapped.first, 1, skeleton_poses_[(size_t)n].model.data());
+                set_bone_pose(mapped.first, 2, skeleton_poses_[(size_t)n].model.data());
+            }
+        } else {
+            /* Retain unknown channel writes too: a later same-mode getter still
+             * sees exactly what was written, even if this rig lacks the mapping. */
+            set_bone_pose(bone_hash, mode, requested);
+        }
+        std::vector<uint8_t>& written = bone_writes_[bone_hash];
+        written.resize(64);
+        std::memcpy(written.data(), local, 64);
+        served_[key] += 1;
+        out = Value{};
+        return true;
+    }
     if (key == kDeltaTime) {
         if (!args.empty()) return false;
         served_[key] += 1;

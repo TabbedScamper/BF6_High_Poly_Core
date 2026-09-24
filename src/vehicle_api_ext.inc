@@ -28,6 +28,7 @@ struct bf6_vehicle {
      * control input to compare it against. Out of band rather than a seventh element of
      * `in`, because the Godot binding only guarantees six and would read past its buffer. */
     float cyclic_pitch = 0.0f, cyclic_roll = 0.0f;
+    bool boost = false;
     double time = 0.0;
     std::string name;
 };
@@ -172,21 +173,31 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
         const double identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
         if (mesh >= 0) bf6_ray_scene_add_instance(v->scene, mesh, identity);
     }
-    /* THE WHEEL / GEAR GRAPH, again per class: cars ship
+    /* THE WHEEL / GEAR / AIRCRAFT PRESENTATION GRAPHS, again per class: cars ship
      * presex_<veh>_suspensionmovement (the flyer60 with a _1 suffix), helicopters
      * presex_helicopter_<veh>_wheelmovement, tanks presex_vehicle_<veh>_wheelmovement,
-     * airplanes presex_<veh>_landinggearandcontrolsurfaces. A vehicle that ships none
-     * of them opens with the drivetrain graph alone. */
-    const std::string cands[] = {
-        dir + "/presex_" + veh + "_suspensionmovement_1",
-        dir + "/presex_" + veh + "_suspensionmovement",
-        dir + "/presex_" + cls + "_" + veh + "_wheelmovement",
-        dir + "/presex_vehicle_" + veh + "_wheelmovement",
-        dir + "/presex_" + veh + "_landinggearandcontrolsurfaces",
-    };
+     * airplanes use either one combined landinggearandcontrolsurfaces partition or
+     * TWO split partitions. Stopping at the first presentation candidate omitted the
+     * F-16/JAS-39 control surfaces or gear entirely. */
     std::vector<std::string> graphs = {simex};
-    for (const std::string& cand : cands)
-        if (have(cand)) { graphs.push_back(cand); break; }
+    if (cls == "airplane") {
+        const std::string aircraft[] = {
+            dir + "/presex_" + veh + "_controlsurfaces",
+            dir + "/presex_" + veh + "_landinggear",
+            dir + "/presex_" + veh + "_landinggearandcontrolsurfaces",
+        };
+        for (const std::string& cand : aircraft)
+            if (have(cand)) graphs.push_back(cand);
+    } else {
+        const std::string cands[] = {
+            dir + "/presex_" + veh + "_suspensionmovement_1",
+            dir + "/presex_" + veh + "_suspensionmovement",
+            dir + "/presex_" + cls + "_" + veh + "_wheelmovement",
+            dir + "/presex_vehicle_" + veh + "_wheelmovement",
+        };
+        for (const std::string& cand : cands)
+            if (have(cand)) { graphs.push_back(cand); break; }
+    }
     const std::string ske = dir + "/art/ske_veh_" + cls + "_" + veh + "_base";
     std::string e;
     if (!v->sim.open(c, exe, graphs, ske, bf6__vehicle_trace, v.get(), e)) {
@@ -259,6 +270,25 @@ void bf6_vehicle_set_cyclic(bf6_vehicle* v, float pitch, float roll) {
     v->cyclic_roll = roll;
 }
 
+void bf6_vehicle_set_boost(bf6_vehicle* v, float boost) {
+    if (!v) return;
+    v->boost = boost > 0.5f;
+}
+
+int32_t bf6_vehicle_bone_count(bf6_vehicle* v) {
+    return v ? (int32_t)v->sim.presented_bones().size() : 0;
+}
+
+int32_t bf6_vehicle_bone(bf6_vehicle* v, int32_t index,
+                         char* name, int32_t name_capacity, float local16[16]) {
+    if (!v || index < 0 || (size_t)index >= v->sim.presented_bones().size()) return 0;
+    const bf6::VehicleSim::PresentedBone& bone = v->sim.presented_bones()[(size_t)index];
+    if (name && name_capacity > 0)
+        std::snprintf(name, (size_t)name_capacity, "%s", bone.name.c_str());
+    if (local16) std::memcpy(local16, bone.local.data(), 64);
+    return 1;
+}
+
 void bf6_vehicle_set_pose(bf6_vehicle* v, const float pos[3], const float quat[4]) {
     if (!v) return;
     for (int i = 0; i < 3; ++i) { v->dyn.pos[i] = pos[i]; v->dyn.vel[i] = 0; v->dyn.angvel[i] = 0; }
@@ -298,6 +328,13 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     s.set_float("InputThrottle", throttle);
     s.set_float("InputBrake", brake);
     s.set_float("InputYaw", steer);
+    /* These are presentation inputs supplied by the game's vehicle-control
+     * component, not outputs written by simex. The aircraft presex graphs bind
+     * them explicitly to drive elevator, aileron, and rudder animation. */
+    s.set_float("Flap_Elevator", v->cyclic_pitch);
+    s.set_float("Flap_Aileron", v->cyclic_roll);
+    s.set_float("Flap_Rudder", steer);
+    s.set_bool("InputSprint", v->boost);
     s.set_float("InputPitch", v->cyclic_pitch);
     s.set_float("InputRoll", v->cyclic_roll);
     s.set_bool("Handbrake", handbrake);

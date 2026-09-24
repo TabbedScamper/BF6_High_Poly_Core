@@ -15,6 +15,9 @@
 struct bf6_soldier {
     bf6::VehicleSim sim;
     bf6_ray_scene* scene = nullptr;
+    /* false when the scene is the caller's (bf6_soldier_open_scene): a walker's own
+     * collision, which it frees itself - after closing this. */
+    bool owns_scene = true;
     std::vector<std::string> graphs;
     double time = 0.0;
 };
@@ -27,8 +30,28 @@ static int bf6__soldier_trace(void* user, const double* from, const double* to, 
     return 1;
 }
 
+static bf6_soldier* bf6__soldier_open(bf6_ctx* c, const char* graphs_csv, const float* tris,
+                                      int32_t vert_count, bf6_ray_scene* borrowed,
+                                      char* err, int32_t err_len);
+
 bf6_soldier* bf6_soldier_open(bf6_ctx* c, const char* graphs_csv, const float* tris, int32_t vert_count,
                               char* err, int32_t err_len)
+{
+    return bf6__soldier_open(c, graphs_csv, tris, vert_count, nullptr, err, err_len);
+}
+
+/* The same, tracing its rays against a scene the caller owns - the walker's collision, so
+ * the motion machine's ledge and ground probes see exactly what the player stands on. The
+ * scene must outlive the soldier. */
+bf6_soldier* bf6_soldier_open_scene(bf6_ctx* c, const char* graphs_csv, bf6_ray_scene* scene,
+                                    char* err, int32_t err_len)
+{
+    return bf6__soldier_open(c, graphs_csv, nullptr, 0, scene, err, err_len);
+}
+
+static bf6_soldier* bf6__soldier_open(bf6_ctx* c, const char* graphs_csv, const float* tris,
+                                      int32_t vert_count, bf6_ray_scene* borrowed,
+                                      char* err, int32_t err_len)
 {
     auto fail = [&](const std::string& m) -> bf6_soldier* {
         if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", m.c_str());
@@ -61,8 +84,9 @@ bf6_soldier* bf6_soldier_open(bf6_ctx* c, const char* graphs_csv, const float* t
             bf6_mount_all(c, 1, merr, (int)sizeof(merr));
         }
     }
-    s->scene = bf6_ray_scene_create();
-    if (tris && vert_count >= 3) {
+    s->owns_scene = borrowed == nullptr;
+    s->scene = borrowed ? borrowed : bf6_ray_scene_create();
+    if (!borrowed && tris && vert_count >= 3) {
         std::vector<int32_t> idx((size_t)(vert_count - vert_count % 3));
         for (size_t i = 0; i < idx.size(); ++i) idx[i] = (int32_t)i;
         const int32_t mesh = bf6_ray_scene_add_mesh(s->scene, tris, vert_count, idx.data(), (int32_t)idx.size());
@@ -71,7 +95,7 @@ bf6_soldier* bf6_soldier_open(bf6_ctx* c, const char* graphs_csv, const float* t
     }
     std::string e;
     if (!s->sim.open(c, exe, s->graphs, "", bf6__soldier_trace, s.get(), e)) {
-        bf6_ray_scene_free(s->scene);
+        if (s->owns_scene) bf6_ray_scene_free(s->scene);
         return fail(e);
     }
     for (const std::string& g : s->graphs) bf6__seed_typed_values(c, g, s->sim);
@@ -110,6 +134,16 @@ int32_t bf6_soldier_written(char* buf, int32_t cap) {
     return (int32_t)all.size();
 }
 
+/* Every field the graphs READ so far, one per line as "name<TAB>stored": stored 1 when a
+ * graph also stores it, 0 when nothing but the caller supplies it - the graphs' inputs. */
+int32_t bf6_soldier_reads(char* buf, int32_t cap) {
+    const bf6::SoldierFields& f = bf6::SoldierFields::get();
+    std::string all;
+    for (const std::string& n : f.reads()) { all += n; all += f.was_stored(n) ? "\t1\n" : "\t0\n"; }
+    if (buf && cap > 0) std::snprintf(buf, (size_t)cap, "%s", all.c_str());
+    return (int32_t)all.size();
+}
+
 /* The last tick's per-graph report (termination, unresolved operators). */
 int32_t bf6_soldier_report(bf6_soldier* s, char* buf, int32_t cap) {
     if (!s) return 0;
@@ -120,6 +154,6 @@ int32_t bf6_soldier_report(bf6_soldier* s, char* buf, int32_t cap) {
 
 void bf6_soldier_close(bf6_soldier* s) {
     if (!s) return;
-    bf6_ray_scene_free(s->scene);
+    if (s->owns_scene) bf6_ray_scene_free(s->scene);
     delete s;
 }

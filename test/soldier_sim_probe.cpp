@@ -66,6 +66,23 @@ int main(int argc, char** argv)
         if (k == 1) std::printf("  %-44s %g %g %g %g\n", n.c_str(), v[0], v[1], v[2], v[3]);
         else std::printf("  %-44s UNKNOWN\n", n.c_str());
     }
+    /* THE INPUTS: fields the graphs read that no graph stores - what the walker must
+     * supply, with the value the graphs saw (the default unless set on the command line). */
+    bf6_soldier_reads(buf.data(), (int32_t)buf.size());
+    std::printf("---- inputs (read, never stored)\n");
+    const std::string reads = buf.data();
+    for (size_t p = 0; p < reads.size();) {
+        size_t q = reads.find('\n', p);
+        if (q == std::string::npos) q = reads.size();
+        const std::string line = reads.substr(p, q - p);
+        p = q + 1;
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos || line.substr(tab + 1) != "0") continue;
+        const std::string n = line.substr(0, tab);
+        float v[4] = {0, 0, 0, 0};
+        bf6_soldier_field_get(n.c_str(), v);
+        std::printf("  %-44s %g %g %g %g\n", n.c_str(), v[0], v[1], v[2], v[3]);
+    }
     bf6_soldier_close(s);
     return 0;
 }

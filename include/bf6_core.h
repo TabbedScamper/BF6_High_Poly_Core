@@ -3522,6 +3522,9 @@ BF6_API int32_t bf6_soldier_field_get(const char* name, float* out4);
 BF6_API void bf6_soldier_fields_reset(void);
 /* Every field written so far (live value or unknown store), newline-separated. */
 BF6_API int32_t bf6_soldier_written(char* buf, int32_t cap);
+/* Every field the graphs read, "name<TAB>stored" per line; stored 0 marks an input only the
+ * caller supplies. */
+BF6_API int32_t bf6_soldier_reads(char* buf, int32_t cap);
 
 /* THE SOLDIER'S MOTION-MACHINE GRAPHS run frame by frame (soldier_sim_ext.inc): a comma-
  * separated list of graph names under common/gameplay/soldier/, run in that order, with
@@ -3529,6 +3532,10 @@ BF6_API int32_t bf6_soldier_written(char* buf, int32_t cap);
 typedef struct bf6_soldier bf6_soldier;
 BF6_API bf6_soldier* bf6_soldier_open(bf6_ctx*, const char* graphs_csv, const float* tris,
                                       int32_t vert_count, char* err, int32_t err_len);
+/* The same, with its rays traced against a scene the caller owns (a walker's collision);
+ * the scene must outlive the soldier. */
+BF6_API bf6_soldier* bf6_soldier_open_scene(bf6_ctx*, const char* graphs_csv, bf6_ray_scene* scene,
+                                            char* err, int32_t err_len);
 BF6_API void    bf6_soldier_tick(bf6_soldier*, float dt);
 BF6_API int32_t bf6_soldier_report(bf6_soldier*, char* buf, int32_t cap);
 BF6_API void    bf6_soldier_close(bf6_soldier*);

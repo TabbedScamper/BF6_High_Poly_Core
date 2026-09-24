@@ -58,7 +58,13 @@ public:
      * authored default. `out` gets up to four lanes. */
     void value(const Field& f, float out[4]) const;
     void set_live(const std::string& name, const float* v, int n);
-    void clear_live() { live_.clear(); xform_live_.clear(); unknown_.clear(); }
+    void clear_live() { live_.clear(); xform_live_.clear(); unknown_.clear(); reads_.clear(); stored_.clear(); }
+    /* EVERY FIELD A GRAPH READ, recorded by the host's readers: with written() this is
+     * what the graphs ask the walker for - a field read and never stored is an input. */
+    void mark_read(const Field& f) const { reads_.insert(f.name); }
+    std::vector<std::string> reads() const { return std::vector<std::string>(reads_.begin(), reads_.end()); }
+    /* Whether a GRAPH stored to it (a walker's set_live is not a store). */
+    bool was_stored(const std::string& name) const { return stored_.count(name) != 0; }
     /* A transform field: 16 floats (Frostbite LinearTransform rows), identity when never
      * set. INFERRED default: these fields carry no scalar default in the asset, and a
      * soldier with no ladder or interaction has no transform to report. */
@@ -66,18 +72,15 @@ public:
     void set_live_xform(const std::string& name, const float m[16]);
     /* What a graph's STORE writes: the value lands on the field's live value, so later
      * graphs read it and the walker can read it back. */
-    void store(const Field& f, const float* v, int n) { set_live(f.name, v, n); unknown_.erase(f.name); }
+    void store(const Field& f, const float* v, int n) { set_live(f.name, v, n); unknown_.erase(f.name); stored_.insert(f.name); }
     /* A store whose value is not known: later reads of the field must refuse, not fall
      * back to the default the store overwrote. */
-    void store_unknown(const Field& f) { unknown_.insert(f.name); }
+    void store_unknown(const Field& f) { unknown_.insert(f.name); stored_.insert(f.name); }
     bool known(const Field& f) const { return unknown_.count(f.name) == 0; }
-    /* Every field something has written (a live value, or an unknown store), for a caller
-     * that wants to see what a graph changed. */
+    /* Every field a graph has stored (known or unknown value), for a caller that wants to
+     * see what the graphs changed; the walker's own set_live values are not in it. */
     std::vector<std::string> written() const {
-        std::vector<std::string> out;
-        for (const auto& kv : live_) out.push_back(kv.first);
-        for (const std::string& n : unknown_) if (!live_.count(n)) out.push_back(n);
-        return out;
+        return std::vector<std::string>(stored_.begin(), stored_.end());
     }
     /* A field named by its 32-bit link hash (the machine's hash list), or null. */
     const Field* by_hash(uint32_t h) const {
@@ -102,6 +105,8 @@ private:
     std::map<std::string, std::array<float, 16>> xform_live_;
     std::map<std::string, const Field*> by_name_;
     std::set<std::string> unknown_;
+    mutable std::set<std::string> reads_;
+    std::set<std::string> stored_;
     std::map<uint32_t, const Field*> by_hash_;
 };
 

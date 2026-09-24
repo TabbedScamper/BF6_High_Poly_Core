@@ -1580,6 +1580,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         /* The native reads false for a hash not in its list, but a hash missing from THIS
          * table may only mean a link that did not load - refused, not answered false. */
         if (!f) return false;
+        sf.mark_read(*f);
         if (f->kind != bf6::SoldierFields::kInt || !sf.known(*f)) return false;
         float v[4];
         sf.value(*f, v);
@@ -1633,6 +1634,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
                 m[15] = 1.0f;
             } else {
                 const bf6::SoldierFields::Field* f = sf.find(bf6::SoldierFields::kXform, lane, id);
+                if (f) sf.mark_read(*f);
                 if (!f || !sf.known(*f)) return false;
                 sf.xform(*f, m);
             }
@@ -1701,6 +1703,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         const int kind = key == kFieldFloat ? bf6::SoldierFields::kFloat
                        : key == kFieldInt ? bf6::SoldierFields::kInt : bf6::SoldierFields::kVec;
         const bf6::SoldierFields::Field* f = bf6::SoldierFields::get().find(kind, lane, id);
+        if (f) bf6::SoldierFields::get().mark_read(*f);
         if (!f || !bf6::SoldierFields::get().known(*f)) return false;
         float v[4];
         bf6::SoldierFields::get().value(*f, v);
@@ -1723,6 +1726,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         std::memcpy(&id, args[1].bytes.data(), 2);
         if (const bf6::SoldierFields::Field* f = bf6::SoldierFields::get().find(bf6::SoldierFields::kBool,
                                                                       args[1].bytes[3], id)) {
+            bf6::SoldierFields::get().mark_read(*f);
             if (!bf6::SoldierFields::get().known(*f)) return false;
             float v[4];
             bf6::SoldierFields::get().value(*f, v);

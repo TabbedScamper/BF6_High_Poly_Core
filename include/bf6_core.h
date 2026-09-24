@@ -5304,6 +5304,16 @@ BF6_API int bf6_ant_resolve_for_weapon(bf6_ctx*, const char* asset, int32_t spec
                                        int32_t weapon_type, char* out, int out_len);
 /* Advance by `seconds`. Returns 1, or 0 if the runtime has nothing to run. */
 BF6_API int  bf6_ant_runtime_update(bf6_ant_runtime*, float seconds);
+/* THE ENGINE'S HAND IK after each update: every hand 13p.wep.handikdisable leaves IK'd
+ * (0 Neither disabled, 1 Left, 2 Right, 3 Both) is solved onto the weapon's
+ * Wep_IK_LeftHand / Wep_IK_RightHand marker with a two-bone arm solve, and the arm bones
+ * are marked written. Off by default. */
+BF6_API void bf6_ant_runtime_set_hand_ik(bf6_ant_runtime*, int on);
+/* An int game state's current value as the graph sees it; *ok = 0 when not evaluable. */
+BF6_API int32_t bf6_ant_runtime_get_int(const bf6_ant_runtime*, const char* state, int* ok);
+/* Each hand's distance to its marker, metres: [0] left and [1] right BEFORE the last
+ * solve, [2] left and [3] right AFTER it (non-zero only when a marker was out of reach). */
+BF6_API void bf6_ant_runtime_hand_ik_miss(const bf6_ant_runtime*, float out[4]);
 /* The pose a LAYER machine sits on: 7 floats per bone, quaternion xyzw then
  * translation. Null or bones=0 clears it. Without it a machine that drives only
  * part of the body writes bind over the rest and destroys the pose underneath. */

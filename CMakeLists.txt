@@ -1973,3 +1973,7 @@ target_include_directories(fps_weapon_step_probe PRIVATE src include)
 add_executable(soldier_sim_probe test/soldier_sim_probe.cpp)
 target_link_libraries(soldier_sim_probe PRIVATE bf6_core_static)
 target_include_directories(soldier_sim_probe PRIVATE src include)
+
+add_executable(hand_ik_probe test/hand_ik_probe.cpp)
+target_link_libraries(hand_ik_probe PRIVATE bf6_core_static)
+target_include_directories(hand_ik_probe PRIVATE src include)

@@ -20,6 +20,7 @@
  * multiplied by 60 at the edge. */
 
 #include "ant_graph.h"
+#include "arm_ik.h"
 
 namespace bf6ant {
 
@@ -82,6 +83,7 @@ struct Runtime {
     std::map<std::string, std::unique_ptr<ClipSource>> clips;
     std::map<std::string, bf6_ant_cdb*> cdbs;
     std::map<std::string, int> bone_index;          /* skeleton bone name -> index */
+    std::vector<int> bone_parent;                   /* skeleton parent index, -1 at the root */
     std::map<std::string, std::unique_ptr<Mask>> masks;   /* blend-mask asset -> built mask */
     bool first_update = true;                        /* the root's first evaluation */
     /* How deep make() is: 1 while the ROOT controller is being built. A node
@@ -1419,6 +1421,13 @@ constexpr const char* kT_BoolGSTag   = "5b52f4b1-7679-5f5a-7f45-2b67ee1c7f84";
  * type and the mode enum differ. FloatMode is the game's own: Disabled 0, Set 1,
  * Multiply 2, Blend 3, Add 4, Subtract 5. */
 constexpr const char* kT_FloatGSTag  = "5c1a1e07-cace-7afd-6783-3c465c98eece";
+/* The same GameStateTagAsset shape, named in the research type corpus: an INTEGER tag
+ * (IntegerGameStateTagAsset, AnimationCommon 0xD92E213F) - it is how a clip sets an enum
+ * state such as 13p.wep.handikdisable while it plays (a knife attack sets Both, value 3,
+ * reset on leave) - and a quantized float tag (FloatGameStateQuantizedTagAsset). Only
+ * the integer tag's Set mode is applied; any other mode is reported, not invented. */
+constexpr const char* kT_IntGSTag    = "62522924-6863-02e4-6083-44886580a324";
+constexpr const char* kT_FloatQGSTag = "1ff34e08-82a0-8b6e-8853-1e3f04b8cea1";
 constexpr float kHuge = 3.4028235e38f;   /* DAT_149319c64, the "never ends" tag window end */
 
 /* A tag set evaluated against a running time (research spec_stateflow 3:
@@ -1428,7 +1437,8 @@ constexpr float kHuge = 3.4028235e38f;   /* DAT_149319c64, the "never ends" tag 
  * Apply FUN_1407e37d0, Reset FUN_1407e3870); others are named in notes. */
 struct TagSet {
     struct T { const Obj* a = nullptr; uint8_t s = 0; int16_t c = 0; bool store = false;
-               bool ever = false; bool is_float = false; float fstore = 0.f; };
+               bool ever = false; bool is_float = false; float fstore = 0.f;
+               bool is_int = false; int32_t istore = 0; };
     std::vector<T> tags;
     float prev = 0.f, now = 0.f, length = kNeverEnds;
     bool jumped = true;          /* Restart (FUN_1408cc170) sets it; the first evaluation sees it */
@@ -1439,11 +1449,15 @@ struct TagSet {
         tag_set_tags(rt, set, all);
         for (const Obj* a : all) {
             if (a->type == kT_BranchOutPointTag) continue;          /* windows, read by the transition test */
-            if (a->type != kT_BoolGSTag && a->type != kT_FloatGSTag) {
+            if (a->type != kT_BoolGSTag && a->type != kT_FloatGSTag && a->type != kT_IntGSTag &&
+                a->type != kT_FloatQGSTag) {
                 rt.note("tag kind not implemented: " + a->type + " (" + a->path + ")");
                 continue;
             }
-            T t; t.a = a; t.is_float = a->type == kT_FloatGSTag; tags.push_back(t);
+            T t; t.a = a;
+            t.is_float = a->type == kT_FloatGSTag || a->type == kT_FloatQGSTag;
+            t.is_int = a->type == kT_IntGSTag;
+            tags.push_back(t);
         }
     }
     static float start_of(const Obj* a) {                      /* getter vtbl+0x60 */
@@ -1499,6 +1513,7 @@ struct TagSet {
         const Obj* gs = rt.g.resolve(t.a->f(0x6b01e323u), t.a);
         bool ok = false;
         if (t.is_float) t.fstore = gs ? rt.st.as_float(rt.g, gs, ok) : 0.f;
+        else if (t.is_int) t.istore = gs ? rt.st.as_int(rt.g, gs, ok) : 0;
         else t.store = gs ? rt.st.as_bool(rt.g, gs, ok) : false;
     }
     void apply(Runtime& rt, T& t) {
@@ -1519,6 +1534,11 @@ struct TagSet {
             }
             return;
         }
+        if (t.is_int) {
+            if (mode == 1) rt.st.set_int(gs->path, (int32_t)numv(t.a->f(0x8cf424e7u)));
+            else if (mode != 0) rt.note("integer tag mode " + std::to_string(mode) + " not implemented: " + t.a->path);
+            return;
+        }
         if (mode == 1) rt.st.set_bool(gs->path, boolv(t.a->f(0x8cf424e7u)));
         else if (mode == 2) rt.st.set_bool(gs->path, !t.store);
     }
@@ -1529,6 +1549,7 @@ struct TagSet {
         if (mode == 0 || rs == 0 || !gs) return;
         if (rs == 1) rt.st.clear(gs->path);                     /* the state's authored default */
         else if (t.is_float) rt.st.set_float(gs->path, t.fstore);
+        else if (t.is_int) rt.st.set_int(gs->path, t.istore);
         else rt.st.set_bool(gs->path, t.store);
     }
     void evaluate(Runtime& rt, float time) {
@@ -3674,7 +3695,69 @@ struct AntRuntimeHandle {
     const bf6ant::Obj* root_obj = nullptr;   /* built into `root` on the first update */
     bf6ant::Pose pose;
     std::string root_path;
+    /* THE HANDS ON THE WEAPON (bf6_ant_runtime_set_hand_ik). Off by default, so every
+     * existing caller gets the pose it always got. */
+    bool hand_ik = false;
+    float hand_ik_miss[2] = {0, 0};   /* each hand's distance to its marker before the solve */
+    float hand_ik_after[2] = {0, 0};  /* and after it: 0 unless the marker was out of reach */
 };
+
+/* THE ENGINE'S HAND IK, after the graph.
+ *
+ * 13p.wep.handikdisable says which hands have their IK DISABLED (0 Neither, 1 Left,
+ * 2 Right, 3 Both), and the graph masks the upper body to match: with IK on, the layer
+ * animates the weapon and not the arm. The engine then places each IK'd hand on the
+ * weapon's marker - Wep_IK_LeftHand / Wep_IK_RightHand, under Wep_Align, which the clips
+ * move with the action (a tactical reload carries the left one ~600 mm to the magazine).
+ * Measured with IK disabled, the authored hands sit on those markers to 0.7 mm / 0.1 deg
+ * (core/test/hand_ik_probe), so the markers ARE the hand targets. The solve is the
+ * viewer's two-bone reconstruction (arm_ik.h); the elbow is its choice, not the engine's.
+ * The weapon hangs off the spine (Wep_SpineX), not a hand, so the arms solve independently. */
+static void bf6__hand_ik(AntRuntimeHandle& h)
+{
+    bf6ant::Runtime& rt = *h.rt;
+    bool ok = false;
+    const int32_t mode = rt.st.as_int(rt.g, rt.g.root("animations/glacier/global/gamestates/13p.wep.handikdisable.enumgs"), ok);
+    if (!ok) return;
+    /* A hand with its IK disabled is still MEASURED (its distance reported before and
+     * after, unchanged), so a caller can check the clips against the markers. */
+    const bool left = mode == 0 || mode == 2, right = mode == 0 || mode == 1;
+    auto idx = [&](const char* n) { auto it = rt.bone_index.find(n); return it == rt.bone_index.end() ? -1 : it->second; };
+    const int il = idx("Wep_IK_LeftHand"), ir = idx("Wep_IK_RightHand");
+    const int la = idx("LeftArm"), lf = idx("LeftForeArm"), lh = idx("LeftHand");
+    const int ra = idx("RightArm"), rf = idx("RightForeArm"), rh = idx("RightHand");
+    const size_t n = h.pose.q.size();
+    if (n != rt.bone_parent.size() || il < 0 || ir < 0) return;
+    std::vector<bf6ik::M> local(n), model(n);
+    for (size_t b = 0; b < n; ++b) {
+        bf6ant::rows_from_quat(h.pose.q[b].data(), local[b].m);
+        local[b].m[9] = h.pose.t[b][0]; local[b].m[10] = h.pose.t[b][1]; local[b].m[11] = h.pose.t[b][2];
+        const int p = rt.bone_parent[b];
+        model[b] = p >= 0 && p < (int)b ? bf6ik::mul(local[b], model[(size_t)p]) : local[b];
+    }
+    auto dist = [&](int a, int b) {
+        const float* x = model[(size_t)a].m + 9; const float* y = model[(size_t)b].m + 9;
+        return std::sqrt((x[0] - y[0]) * (x[0] - y[0]) + (x[1] - y[1]) * (x[1] - y[1]) + (x[2] - y[2]) * (x[2] - y[2]));
+    };
+    const bf6ik::M tl = model[(size_t)il], tr = model[(size_t)ir];
+    std::vector<int> changed;
+    h.hand_ik_miss[0] = lh >= 0 ? dist(lh, il) : 0.f;
+    h.hand_ik_miss[1] = rh >= 0 ? dist(rh, ir) : 0.f;
+    if (right && rh >= 0 && bf6ik::solve_arm(rt.bone_parent, ra, rf, rh, tr, local, model))
+        changed.insert(changed.end(), { ra, rf, rh });
+    if (left && lh >= 0 && bf6ik::solve_arm(rt.bone_parent, la, lf, lh, tl, local, model))
+        changed.insert(changed.end(), { la, lf, lh });
+    h.hand_ik_after[0] = lh >= 0 ? dist(lh, il) : 0.f;
+    h.hand_ik_after[1] = rh >= 0 ? dist(rh, ir) : 0.f;
+    for (int b : changed) {
+        float q[4];
+        bf6ant::quat_from_rows(local[(size_t)b].m, q);
+        h.pose.q[(size_t)b] = { q[0], q[1], q[2], q[3] };
+        h.pose.t[(size_t)b] = { local[(size_t)b].m[9], local[(size_t)b].m[10], local[(size_t)b].m[11] };
+        if ((size_t)b < h.pose.vq.size()) h.pose.vq[(size_t)b] = 1;
+        if ((size_t)b < h.pose.vt.size()) h.pose.vt[(size_t)b] = 1;
+    }
+}
 
 void bf6__antrt_delete(void* p) { delete (AntRuntimeHandle*)p; }
 
@@ -3694,7 +3777,9 @@ bf6_ant_runtime* bf6_ant_runtime_create(bf6_ctx* c, const char* root_asset, cons
     if (!s || s->bone_count < 1) { if (s) bf6_free(c, s); return fail(std::string("skeleton: ") + skeleton); }
     rt.bones = s->bone_count;
     rt.bind.resize((size_t)s->bone_count);
+    rt.bone_parent.assign((size_t)s->bone_count, -1);
     for (int i = 0; i < s->bone_count; ++i) {
+        rt.bone_parent[(size_t)i] = s->bones[i].parent;
         float q[4];
         bf6ant::quat_from_rows(s->bones[i].local, q);
         rt.bind.q[(size_t)i] = { q[0], q[1], q[2], q[3] };
@@ -3788,8 +3873,35 @@ int bf6_ant_runtime_update(bf6_ant_runtime* r, float seconds)
     h->root->update(*h->rt, seconds * bf6ant::kTicksPerSecond, p);
     if (p.q.size() != h->rt->bind.q.size()) p = h->rt->bind;
     h->pose = p;
+    if (h->hand_ik) bf6__hand_ik(*h);
     h->rt->first_update = false;
     return 1;
+}
+
+/* An int game state as the graph sees it now (the caller's value, one a tag wrote, or
+ * the authored default); *ok = 0 when not evaluable. */
+int32_t bf6_ant_runtime_get_int(const bf6_ant_runtime* r, const char* state, int* ok)
+{
+    if (ok) *ok = 0;
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    if (!h || !state) return 0;
+    bf6ant::Runtime& rt = *h->rt;
+    bool k = false;
+    const int32_t v = rt.st.as_int(rt.g, rt.g.root(state), k);
+    if (ok) *ok = k ? 1 : 0;
+    return v;
+}
+
+void bf6_ant_runtime_set_hand_ik(bf6_ant_runtime* r, int on)
+{ if (r) reinterpret_cast<AntRuntimeHandle*>(r)->hand_ik = on != 0; }
+
+void bf6_ant_runtime_hand_ik_miss(const bf6_ant_runtime* r, float out[4])
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    out[0] = h ? h->hand_ik_miss[0] : 0.f;
+    out[1] = h ? h->hand_ik_miss[1] : 0.f;
+    out[2] = h ? h->hand_ik_after[0] : 0.f;
+    out[3] = h ? h->hand_ik_after[1] : 0.f;
 }
 
 int bf6_ant_runtime_pose(const bf6_ant_runtime* r, float* out, int bone_max)

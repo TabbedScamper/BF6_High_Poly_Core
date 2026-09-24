@@ -151,6 +151,9 @@ int32_t bf6_soldier_report(bf6_soldier* s, char* buf, int32_t cap) {
     /* BF6_SOLDIER_LAYOUT=1: each graph's typed slot groups too - which slot holds which
      * reflected type, the way to confirm an operator's result type from data. */
     if (std::getenv("BF6_SOLDIER_LAYOUT")) r += "\n" + s->sim.instance_layout();
+    /* BF6_SOLDIER_CHANNELS=1: every public channel the loaded graphs bind, by name. */
+    if (std::getenv("BF6_SOLDIER_CHANNELS"))
+        for (const auto& kv : s->sim.channel_name_map()) r += "\nchannel " + kv.second;
     /* BF6_SOLDIER_LIST=<graph substring>:<lo hex>:<hi hex> - those records, for reading
      * what a graph does with a value. */
     if (const char* want = std::getenv("BF6_SOLDIER_LIST")) {

@@ -863,6 +863,23 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     s.set_float("InputCrawlSpeed", 0.0f);
     s.set_bool("Input Freelook", false);
     s.set_bool("ThermalCamera_Active", false);
+    s.set_float("InputJump", 0.0f);
+    s.set_float("InputStrafe", 0.0f);
+    /* nobody in the open seats: the driver is the only occupant */
+    s.set_bool("EntryActive_OpenSeat_Left", false);
+    s.set_bool("EntryActive_OpenSeat_Right", false);
+    /* the default load-out shows these parts (a customization hides them) */
+    s.set_bool("HideHMG", false);
+    s.set_bool("HideRopeHolder", false);
+    /* the driver seat's aim pitch target, by name the same aim as Aim_Driver_Pitch */
+    s.set_float("AimTargetPitch_0_Driver", v->aim_pitch);
+    /* THE INPUTS A DRIVETRAIN GRAPH DOES NOT FILTER. A car's simex writes
+     * VehicleThrottle / VehicleBrake from InputThrottle / InputBrake; a motorcycle's does
+     * not, and native code supplies them. Passed through unfiltered here (the native
+     * smoothing is not modelled); a graph that does write them overwrites this. */
+    s.set_float("VehicleThrottle", throttle);
+    s.set_float("VehicleBrake", brake);
+    s.set_bool("HandbrakeActive", handbrake);
     if (!v->water_present) s.set_bool("Vehicle.IsInWater", false);
     /* HEIGHT ABOVE WHAT IS UNDER IT: one ray straight down from the body through the
      * same ground the wheels trace (and the water plane when there is one). */

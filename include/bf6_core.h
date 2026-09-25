@@ -1870,6 +1870,11 @@ BF6_API void bf6_decal_draws_free(bf6_decal_draws*);
  * "anchors":{"scp":[x,y,z],...}}. A non-empty error means no weapon. */
 BF6_API int64_t bf6_loadout_catalogue(bf6_ctx*, uint8_t** out);
 BF6_API int64_t bf6_loadout_attachments(bf6_ctx*, const char* item_id, const char* portal_enums, uint8_t** out);
+/* The game states the configured weapon's fitted parts write - the same fits
+ * bf6_loadout_weapon draws - as bf6_weapon_md_states lines. */
+BF6_API int bf6_loadout_md_states(bf6_ctx*, const char* item_id, const char* fits,
+                                  const char* portal_enums, char* out, int out_len,
+                                  char* error_out, int error_len);
 BF6_API int64_t bf6_loadout_weapon(bf6_ctx*, const char* item_id, const char* fits,
                                    const char* portal_enums, uint8_t** out);
 
@@ -5319,6 +5324,11 @@ BF6_API int  bf6_ant_runtime_update(bf6_ant_runtime*, float seconds);
 BF6_API int  bf6_ant_runtime_set_ex(bf6_ant_runtime*, const char* pre, const char* post, char* err, int err_len);
 /* A vector3/quaternion game state for the scene ops, x y z w. */
 BF6_API void bf6_ant_runtime_set_vec(bf6_ant_runtime*, const char* state, const float v[4]);
+/* Game states from "<path> <kind v|q|b|f|i> x y z w" lines (bf6_loadout_md_states). */
+BF6_API int  bf6_ant_runtime_set_states_text(bf6_ant_runtime*, const char* text);
+/* The weapon's zoom levels' sight types (level 0 the hip); fb.wep.sighttype.enumgs
+ * follows the current level (fb.ads.bool picks level 1) before each pre-update. */
+BF6_API void bf6_ant_runtime_set_zoom_sight_types(bf6_ant_runtime*, const int32_t* types, int n);
 /* What the scene ops did (seeds, missing kernels, notes, states written). */
 BF6_API int  bf6_ant_runtime_ex_report(const bf6_ant_runtime*, char* out, int out_len);
 BF6_API void bf6_ant_runtime_set_hand_ik(bf6_ant_runtime*, int on);
@@ -5420,6 +5430,9 @@ BF6_API float bf6_inspect_aim_step(const bf6_inspect_aim_params*, bf6_inspect_ai
  *                     or the weapon's base set is missing.
  *
  * Returns 1 when the specific weapon was read, 0 with a reason in `err`. */
+/* Each zoom level's WeaponZoomLevelData.SightType (level 0 the hip), as the engine
+ * writes it to fb.wep.sighttype.enumgs. Returns the level count. */
+BF6_API int bf6_inspect_zoom_sight_types(bf6_ctx*, const char* item, int32_t* out, int out_max, char* err, int err_len);
 BF6_API int bf6_inspect_ids(bf6_ctx*, const char* item, int32_t* specific_weapon,
                             int32_t* weapon_type, char* err, int err_len);
 
@@ -7009,6 +7022,12 @@ BF6_API int bf6_weapon_default_parts(bf6_ctx*, const char* md_partition,
  * own groups and requires an exact normalized substring; an unknown/fake
  * token therefore leaves the authored default unchanged instead of choosing
  * a plausible wrong part. */
+/* The game states the fitted weapon writes (each chosen DefinitionMesh's writer list):
+ * one line per state, "<state path> <kind> x y z w" with kind v (vector3), q
+ * (quaternion), b (bool), f (float) or i (int). Returns the length needed, -1 on failure. */
+BF6_API int bf6_weapon_md_states(bf6_ctx*, const char* md_partition,
+                                 const bf6_weapon_fit* fits, int fit_count, char* out, int out_len);
+
 BF6_API int bf6_weapon_configured_parts(bf6_ctx*, const char* md_partition,
                                         const bf6_weapon_fit* fits, int fit_count,
                                         bf6_weapon_part* out, int out_max);

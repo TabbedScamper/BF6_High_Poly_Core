@@ -20,6 +20,7 @@
  * multiplied by 60 at the edge. */
 
 #include "ant_graph.h"
+#include <functional>
 #include "arm_ik.h"
 #include "ex_vm.h"
 
@@ -119,6 +120,11 @@ struct Runtime {
      * (1p.postupdate.expsop writes 1p.weproot.zoompose.vec3) and by the caller, and
      * read by the controllers that take a state operand (JointCopy's 0x70b68613). */
     std::map<std::string, std::array<float, 4>> vec_states;
+    /* A CLIP'S OWN EXPRESSION (the clip controller asset's 0x20280736), run over the
+     * pose that clip just sampled: the 1P stand idles carry one that caches where the
+     * weapon sits (wep.cached.weproot.vec3, .mainsight, ...), which the post-update
+     * program reads. Installed by the scene ops (ant_ex_ext.inc); empty otherwise. */
+    std::function<void(const Obj* program, const Pose& pose)> clip_expression;
     explicit Runtime(bf6_ctx* cc) : c(cc), g(cc) {}
     ~Runtime() { for (auto& kv : cdbs) if (kv.second) bf6_free(c, kv.second); }
     void note(const std::string& s) {
@@ -186,6 +192,7 @@ struct ClipCtrl : Ctrl {
     int   anim_last = 0;       /* anim +0x38 (N) */
     bool  cyclic = false;      /* anim +0x6c */
     std::vector<const Obj*> btags;   /* BranchOutPointTags of the clip's tag set */
+    const Obj* expression = nullptr; /* 0x20280736: the clip's own EX program */
 
     void collect_branch_tags(Runtime& rt, const Obj* a) {
         std::vector<const Obj*> all;
@@ -217,6 +224,17 @@ struct ClipCtrl : Ctrl {
             rt.note("clip second animation (+0x48) merge omitted (operator OPEN): " + a->path);
         src = rt.clip(a->path);
         collect_branch_tags(rt, a);
+        /* THE CLIP'S EXPRESSION TAG (type a760676d in its tag set): its 0x20280736 names
+         * the EX program - p_1p_oma_m4a1_stand_idle_01 carries _af/98e1b36d/_def, which
+         * caches the weapon's rest positions. The clip asset's own field is the fallback. */
+        {
+            std::vector<const Obj*> tags;
+            tag_set_tags(rt, rt.g.resolve(a->f(0x70b22fd5u), a), tags);
+            for (const Obj* t : tags)
+                if (t->type == "a760676d-f69a-906d-de8f-9cb466236c9e")
+                    if (const Obj* pr = rt.g.resolve(t->f(0x20280736u), t)) { expression = pr; break; }
+            if (!expression) expression = rt.g.resolve(a->f(0x20280736u), a);
+        }
         /* ctor FUN_14081ef70: ceilf(len / rate) */
         duration = (anim_len > 0.f && rate != 0.f) ? std::ceil(anim_len / rate) : 1.f;
         length = duration;
@@ -233,6 +251,7 @@ struct ClipCtrl : Ctrl {
         float ft = anim_frames + anim_first;
         if (!cyclic) ft = std::fmin(std::fmax(ft, 0.f), (float)anim_last);
         src->sample(rt.c, ft, cyclic, out);
+        if (expression && rt.clip_expression) rt.clip_expression(expression, out);
     }
 
     void update(Runtime& rt, float dt, Pose& out) override {
@@ -3915,6 +3934,12 @@ int bf6_ant_runtime_update(bf6_ant_runtime* r, float seconds)
     /* sceneopmatrix1p order: 1p.preupdate.expsop, the controllers, 1p.postupdate.expsop,
      * then the rig ops (the hand IK stands in that last place here). */
     const float ticks = seconds * 60.f;
+    if (h->ex && !h->ex->zoom_sight.empty()) {
+        bool ok = false;
+        const bool ads = h->rt->st.as_bool(h->rt->g, h->rt->g.root("animations/glacier/global/gamestates/fb.ads.bool"), ok);
+        const size_t lvl = ads && h->ex->zoom_sight.size() > 1 ? 1 : 0;
+        h->rt->st.set_int("animations/glacier/global/gamestates/fb.wep.sighttype.enumgs", h->ex->zoom_sight[lvl]);
+    }
     if (h->ex && h->ex->pre.on) {
         std::string e;
         bf6__ex_fill(*h->ex, h->pose.q.empty() ? h->rt->bind : h->pose);
@@ -3956,7 +3981,7 @@ int bf6_ant_runtime_set_ex(bf6_ant_runtime* r, const char* pre, const char* post
 {
     auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
     if (!h) return -1;
-    auto fail = [&](const std::string& why) { if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str()); h->ex.reset(); return -1; };
+    auto fail = [&](const std::string& why) { if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str()); h->rt->clip_expression = nullptr; h->ex.reset(); return -1; };
     h->ex = std::make_unique<AntExOps>();
     AntExOps& ex = *h->ex;
     ex.host.rt = h->rt.get();
@@ -3964,6 +3989,11 @@ int bf6_ant_runtime_set_ex(bf6_ant_runtime* r, const char* pre, const char* post
     if (!bf6__ex_arena(*h->rt, ex, e)) return fail(e);
     if (!bf6__ex_stage(*h->rt, ex, ex.pre, pre, e)) return fail("pre-update: " + e);
     if (!bf6__ex_stage(*h->rt, ex, ex.post, post, e)) return fail("post-update: " + e);
+    AntExOps* exp = h->ex.get();
+    bf6ant::Runtime* rtp = h->rt.get();
+    h->rt->clip_expression = [exp, rtp](const bf6ant::Obj* program, const bf6ant::Pose& pose) {
+        bf6__ex_clip(*exp, *rtp, program, pose);
+    };
     return ex.seeds_bound;
 }
 
@@ -3971,7 +4001,44 @@ int bf6_ant_runtime_set_ex(bf6_ant_runtime* r, const char* pre, const char* post
 void bf6_ant_runtime_set_vec(bf6_ant_runtime* r, const char* state, const float v[4])
 {
     auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
-    if (h && h->ex && state && v) h->ex->host.set_vec(state, v);
+    if (h && state && v) h->rt->vec_states[state] = { v[0], v[1], v[2], v[3] };
+}
+
+/* Game states as text, one per line "<state path> <kind> x y z w" (kind v vector3,
+ * q quaternion, b bool, f float, i int) - the bf6_loadout_md_states form. Returns
+ * how many were set. */
+/* The weapon's zoom levels' sight types (bf6_inspect_zoom_sight_types), level 0 the
+ * hip; fb.wep.sighttype.enumgs follows the current level before each pre-update. */
+void bf6_ant_runtime_set_zoom_sight_types(bf6_ant_runtime* r, const int32_t* types, int n)
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h || !h->ex) return;
+    h->ex->zoom_sight.assign(types, types + (n > 0 ? n : 0));
+}
+
+int bf6_ant_runtime_set_states_text(bf6_ant_runtime* r, const char* text)
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h || !text) return 0;
+    int n = 0;
+    const char* p = text;
+    while (*p) {
+        const char* e = std::strchr(p, '\n');
+        const std::string line(p, e ? (size_t)(e - p) : std::strlen(p));
+        p = e ? e + 1 : p + line.size();
+        char path[512] = {0}, kind = 0;
+        float v[4] = { 0, 0, 0, 0 };
+        if (std::sscanf(line.c_str(), "%511s %c %f %f %f %f", path, &kind, &v[0], &v[1], &v[2], &v[3]) < 3) continue;
+        switch (kind) {
+        case 'v': case 'q': h->rt->vec_states[path] = { v[0], v[1], v[2], v[3] }; break;
+        case 'b': h->rt->st.set_bool(path, v[0] != 0.f); break;
+        case 'f': h->rt->st.set_float(path, v[0]); break;
+        case 'i': h->rt->st.set_int(path, (int32_t)v[0]); break;
+        default: continue;
+        }
+        ++n;
+    }
+    return n;
 }
 
 /* What the scene ops did: seeds bound, kernels missing, notes, run errors, and every

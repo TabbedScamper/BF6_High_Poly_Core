@@ -1992,3 +1992,8 @@ target_include_directories(ex_dump_probe PRIVATE src include)
 add_executable(ex_vm_probe test/ex_vm_probe.cpp)
 target_link_libraries(ex_vm_probe PRIVATE bf6_core_static)
 target_include_directories(ex_vm_probe PRIVATE src include)
+
+# md_states_probe: the game states a fitted weapon writes.
+add_executable(md_states_probe test/md_states_probe.cpp)
+target_link_libraries(md_states_probe PRIVATE bf6_core_static)
+target_include_directories(md_states_probe PRIVATE src include)

@@ -70,6 +70,14 @@ struct AntExOps {
     std::vector<char> dof_comp;      /* 'q', 't', 's', or 0 for a scalar / non-bone DOF */
     std::vector<std::string> dof_name;
     int seeds_total = 0, seeds_bound = 0;
+    /* THE WEAPON'S ZOOM LEVELS' SIGHT TYPES (bf6_inspect_zoom_sight_types), level 0 the hip.
+     * Before each pre-update the current level's value is written to
+     * fb.wep.sighttype.enumgs, as the engine does. WHICH level is current is ours: the
+     * engine switches levels as the zoom engages; here fb.ads.bool picks level 1. */
+    std::vector<int32_t> zoom_sight;
+    /* the clips' own programs, one instance each, loaded on first use */
+    struct ClipProgram { std::unique_ptr<Stage> st; bool failed = false; };
+    std::map<std::string, ClipProgram> clip_programs;
     uint32_t dofs_written = 0;
     std::vector<std::string> errors;
 };
@@ -159,6 +167,10 @@ static void bf6__ex_apply(AntExOps& ex, bf6ant::Pose& p)
     }
 }
 
+/* A clip's own expression over that clip's sampled pose (Runtime::clip_expression).
+ * Its seed rows copy the pose's DOFs in at binding (default slots), so the arena is
+ * filled first and the seeds re-bound; it writes states only. */
+static void bf6__ex_clip(AntExOps& ex, bf6ant::Runtime& rt, const bf6ant::Obj* program, const bf6ant::Pose& pose);
 static bool bf6__ex_stage(bf6ant::Runtime& rt, AntExOps& ex, AntExOps::Stage& st, const char* asset, std::string& err)
 {
     st.on = false;
@@ -168,4 +180,24 @@ static bool bf6__ex_stage(bf6ant::Runtime& rt, AntExOps& ex, AntExOps::Stage& st
     for (const auto& s : st.prog.seeds) { ++ex.seeds_total; if (ex.arena.by_hash.count(s.hash)) ++ex.seeds_bound; }
     st.on = true;
     return true;
+}
+
+static void bf6__ex_clip(AntExOps& ex, bf6ant::Runtime& rt, const bf6ant::Obj* program, const bf6ant::Pose& pose)
+{
+    AntExOps::ClipProgram& cp = ex.clip_programs[program->path];
+    if (cp.failed) return;
+    if (!cp.st) {
+        if (std::getenv("BF6_EX_CLIPS")) std::fprintf(stderr, "ex clip program %s\n", program->path.c_str());
+        cp.st = std::make_unique<AntExOps::Stage>();
+        std::string e;
+        if (!bf6__ex_stage(rt, ex, *cp.st, program->path.c_str(), e)) {
+            cp.failed = true;
+            ex.errors.push_back("clip expression " + program->path + ": " + e);
+            return;
+        }
+    }
+    bf6__ex_fill(ex, pose);
+    cp.st->inst.bind_seeds();          /* the default slots take this pose's values */
+    std::string e;
+    if (!cp.st->inst.run(0.f, e)) ex.errors.push_back("clip expression " + program->path + ": " + e);
 }

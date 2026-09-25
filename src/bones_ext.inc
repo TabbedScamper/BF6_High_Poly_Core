@@ -1129,6 +1129,106 @@ int bf6_weapon_parts(bf6_ctx* c, const char* md_partition,
     return bf6__part_bundles_to_meshes(c, bundles, out, out_max);
 }
 
+/* THE GAME STATES A FITTED WEAPON WRITES. Each DefinitionMesh record lists, in
+ * 0xEB9379B0, writer instances that set game states while that part is fitted -
+ * md.sight.main.vec3/quatgs, md.attachoffset.sight.vec3, md.weaponoffset.added.vec3,
+ * fb.gripposeenable.bool, wep.attachment.grip.enumgs ... - and the first-person
+ * scene ops read them (the post-update program turns md.sight.* into the sight pivot
+ * the ADS zoompose cancels). Two writer shapes carry values:
+ *   single state   0x3353FB16 {state}   0x8CF424E7 value (vec3 struct, bool, int, real)
+ *   transform      0xB7B33071 {vec3 state}  0x53B7932A {quat state}
+ *                  0x8CF424E7 LinearTransform (right, up, forward, trans rows)
+ * Parts are applied in selection order, a later part's write replacing an earlier. */
+struct BfMdWrite { std::string state; char kind = 0; float v[4] = {0, 0, 0, 0}; };
+
+static std::string bf6__md_state_path(bf6_ctx* c, const bf6::EbxValue* holder)
+{
+    const bf6::EbxValue* r = holder ? holder->field(0x23DE5099u) : nullptr;
+    if (!r || r->kind != bf6::EbxValue::Kind::ImportRef) return std::string();
+    std::string p = r->import_path;
+    /* The weapon partition is parsed against the ARMORY index, which does not carry
+     * the animation game-state partitions; resolve those through the full one. */
+    if ((p.empty() || p == "<not indexed>") && c && !r->s.empty()) {
+        const auto& idx = c->src.partition_index();
+        auto it = idx.find(r->s);
+        p = it != idx.end() ? it->second : std::string();
+    }
+    if (p.size() > 4 && p.compare(p.size() - 4, 4, ".ebx") == 0) p.resize(p.size() - 4);
+    return p;
+}
+
+static float bf6__md_num(const bf6::EbxValue* v)
+{
+    if (!v) return 0.f;
+    switch (v->kind) {
+    case bf6::EbxValue::Kind::Real: return (float)v->f;
+    case bf6::EbxValue::Kind::Int: return (float)v->i;
+    case bf6::EbxValue::Kind::Uint: return (float)v->u;
+    case bf6::EbxValue::Kind::Bool: return v->b ? 1.f : 0.f;
+    default: return 0.f;
+    }
+}
+
+static void bf6__md_writes(bf6_ctx* c, bf6::Ebx& e, const std::vector<BfPartChoice>& parts, std::vector<BfMdWrite>& out)
+{
+    auto put = [&](const BfMdWrite& w) {
+        for (BfMdWrite& o : out) if (o.state == w.state) { o = w; return; }
+        out.push_back(w);
+    };
+    auto vec3 = [&](const bf6::EbxValue* v, float* d) {
+        d[0] = bf6__md_num(v ? v->field(0x3901DB14u) : nullptr);
+        d[1] = bf6__md_num(v ? v->field(0x42FC0F5Eu) : nullptr);
+        d[2] = bf6__md_num(v ? v->field(0x32A99B9Cu) : nullptr);
+    };
+    static const bool trace = std::getenv("BF6_MD_TRACE") != nullptr;
+    for (const BfPartChoice& part : parts) {
+        const bf6::EbxValue* list = part.record.field(0xEB9379B0u);
+        if (trace) std::fprintf(stderr, "md part %-60s writers %zu\n", part.bundle.c_str(), list ? list->items.size() : (size_t)0);
+        if (!list) continue;
+        for (const bf6::EbxValue& ref : list->items) {
+            if (ref.kind != bf6::EbxValue::Kind::InstanceRef || ref.instance < 0 ||
+                ref.instance >= (int)e.instance_count()) continue;
+            const bf6::EbxValue w = e.read_instance((size_t)ref.instance);
+            const bf6::EbxValue* val = w.field(0x8CF424E7u);
+            if (!val) continue;
+            if (const bf6::EbxValue* single = w.field(0x3353FB16u)) {
+                BfMdWrite m; m.state = bf6__md_state_path(c, single);
+                if (m.state.empty()) continue;
+                switch (val->kind) {
+                case bf6::EbxValue::Kind::Struct: m.kind = 'v'; vec3(val, m.v); break;
+                case bf6::EbxValue::Kind::Bool: m.kind = 'b'; m.v[0] = val->b ? 1.f : 0.f; break;
+                case bf6::EbxValue::Kind::Real: m.kind = 'f'; m.v[0] = (float)val->f; break;
+                case bf6::EbxValue::Kind::Int: case bf6::EbxValue::Kind::Uint: m.kind = 'i'; m.v[0] = bf6__md_num(val); break;
+                default: continue;
+                }
+                put(m);
+                continue;
+            }
+            const std::string vs = bf6__md_state_path(c, w.field(0xB7B33071u));
+            const std::string qs = bf6__md_state_path(c, w.field(0x53B7932Au));
+            if (vs.empty() && qs.empty()) continue;
+            float R[3][3];
+            vec3(val->field(0xC478CC3Bu), R[0]);    /* right */
+            vec3(val->field(0xBF151EF9u), R[1]);    /* up */
+            vec3(val->field(0x695D12A4u), R[2]);    /* forward */
+            if (!vs.empty()) { BfMdWrite m; m.state = vs; m.kind = 'v'; vec3(val->field(0xBC4B07B4u), m.v); put(m); }
+            if (!qs.empty()) {
+                /* rows are the rotated axes (row vectors): the same quaternion the EX
+                 * kernels' Matrix44Compose would turn back into these rows */
+                const float m00 = R[0][0], m01 = R[0][1], m02 = R[0][2], m10 = R[1][0], m11 = R[1][1], m12 = R[1][2],
+                            m20 = R[2][0], m21 = R[2][1], m22 = R[2][2];
+                float q[4];
+                const float tr = m00 + m11 + m22;
+                if (tr > 0) { const float k = std::sqrt(tr + 1) * 2; q[3] = 0.25f * k; q[0] = (m12 - m21) / k; q[1] = (m20 - m02) / k; q[2] = (m01 - m10) / k; }
+                else if (m00 > m11 && m00 > m22) { const float k = std::sqrt(1 + m00 - m11 - m22) * 2; q[3] = (m12 - m21) / k; q[0] = 0.25f * k; q[1] = (m01 + m10) / k; q[2] = (m20 + m02) / k; }
+                else if (m11 > m22) { const float k = std::sqrt(1 + m11 - m00 - m22) * 2; q[3] = (m20 - m02) / k; q[0] = (m01 + m10) / k; q[1] = 0.25f * k; q[2] = (m12 + m21) / k; }
+                else { const float k = std::sqrt(1 + m22 - m00 - m11) * 2; q[3] = (m01 - m10) / k; q[0] = (m20 + m02) / k; q[1] = (m12 + m21) / k; q[2] = 0.25f * k; }
+                BfMdWrite m; m.state = qs; m.kind = 'q'; std::memcpy(m.v, q, sizeof q); put(m);
+            }
+        }
+    }
+}
+
 static int bf6__weapon_configured_parts(bf6_ctx* c, const char* md_partition,
                                         const bf6_weapon_fit* fits, int fit_count,
                                         bool suppress_optional_defaults,
@@ -1137,7 +1237,8 @@ static int bf6__weapon_configured_parts(bf6_ctx* c, const char* md_partition,
                                         bf6_weapon_part_pose* pose_out = nullptr,
                                         bf6_bone_xform* skin_out = nullptr,
                                         int skin_max = 0,
-                                        int* bone_count_out = nullptr)
+                                        int* bone_count_out = nullptr,
+                                        std::vector<BfMdWrite>* md_out = nullptr)
 {
     if (!c || !md_partition) return -1;
     std::string terr;
@@ -1404,6 +1505,7 @@ static int bf6__weapon_configured_parts(bf6_ctx* c, const char* md_partition,
         }
     }
 
+    if (md_out) bf6__md_writes(c, e, bundles, *md_out);
     c->part_meshes.clear();
     c->part_bundles.clear();
     c->part_attach_offsets.clear();
@@ -1517,6 +1619,24 @@ int bf6_weapon_factory_fits(bf6_ctx* c, const char* equipment_partition,
     if (out && out_max > 0)
         for (int i = 0; i < count && i < out_max; ++i) out[i] = c->factory_fit_rows[(size_t)i];
     return count;
+}
+
+int bf6_weapon_md_states(bf6_ctx* c, const char* md_partition,
+                         const bf6_weapon_fit* fits, int fit_count, char* out, int out_len)
+{
+    if (fit_count < 0 || (fit_count > 0 && !fits)) return -1;
+    std::vector<BfMdWrite> w;
+    static bf6_weapon_part scratch[256];
+    if (bf6__weapon_configured_parts(c, md_partition, fits, fit_count, true, nullptr, scratch, 256,
+                                     nullptr, nullptr, 0, nullptr, &w) < 0) return -1;
+    std::string s;
+    char b[512];
+    for (const BfMdWrite& m : w) {
+        std::snprintf(b, sizeof b, "%s %c %.9g %.9g %.9g %.9g\n", m.state.c_str(), m.kind, m.v[0], m.v[1], m.v[2], m.v[3]);
+        s += b;
+    }
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)s.size() + 1;
 }
 
 int bf6_weapon_configured_parts(bf6_ctx* c, const char* md_partition,

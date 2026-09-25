@@ -743,6 +743,49 @@ static bool mount_full(bf6_ctx* c, char* why, int why_len)
     return true;
 }
 
+/* THE CONFIGURED WEAPON'S MODEL DEFINITION AND FITS: the factory fits with the
+ * user's choices mixed in. Shared by the assembly (what is drawn) and the md
+ * states (what the fitted parts write), so both describe the same weapon. */
+bool configured_fits(bf6_ctx* c, const char* item_id, const char* fits_text, const char* portal_enums,
+                     std::string& md_out, std::vector<std::pair<std::string, std::string>>& fit_pairs,
+                     std::string& error)
+{
+    char why[512] = {0};
+    if (!mount_full(c, why, sizeof(why))) { error = why[0] ? why : "The reader cannot mount front-end equipment."; return false; }
+    const std::vector<std::string> ebx = names(c, "common/hardware/");
+    const std::vector<Item> items = read_items(c, ebx);
+    const Item* item = find_item(items, item_id);
+    if (!item) { error = "This item is absent from the installed equipment catalogue."; return false; }
+    md_out = model_definition(c, ebx, *item);
+    if (md_out.empty()) { error = "This item has no unambiguous model definition."; return false; }
+    const std::string equipment = exact_leaf(ebx, "equipment_" + leaf(item->id), item->asset);
+    bf6_weapon_fit fits[64]{};
+    int nfits = 0;
+    if (!equipment.empty()) nfits = bf6_weapon_factory_fits(c, equipment.c_str(), fits, 64);
+    if (nfits < 0 || nfits > 64) { error = "The item's factory configuration is unreadable."; return false; }
+    fit_pairs.clear();
+    for (int i = 0; i < nfits; ++i)
+        fit_pairs.emplace_back(fits[i].slot ? fits[i].slot : "", fits[i].attachment ? fits[i].attachment : "");
+    const std::vector<std::string> wanted = lines(fits_text);
+    std::vector<Choice> available;
+    if (!wanted.empty()) available = read_attachments(c, *item, ebx, lines(portal_enums));
+    for (const std::string& w : wanted) {
+        const size_t eq = w.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string slot = w.substr(0, eq), id = w.substr(eq + 1);
+        const Choice* ch = nullptr;
+        for (const Choice& a : available) if (a.slot == slot && a.id == id) { ch = &a; break; }
+        if (!ch) { error = "An attachment is unavailable for this weapon. Choose it again in Loadout."; return false; }
+        bool replaced = false;
+        for (auto& fp : fit_pairs) if (fp.first == slot) { fp.second = ch->bundle; replaced = true; break; }
+        if (!replaced) {
+            if (fit_pairs.size() == 64) { error = "Too many configured attachments."; return false; }
+            fit_pairs.emplace_back(slot, ch->bundle);
+        }
+    }
+    return true;
+}
+
 /* The configured weapon's sections and slot anchors: the factory fits with the
  * user's choices mixed in, the configured assembly, each part skinned by the
  * configured palette and placed by its attach transform. */
@@ -1737,6 +1780,25 @@ extern "C" int64_t bf6_loadout_weapon(bf6_ctx* c, const char* item_id, const cha
     json_str(j, error);
     j += ",\"sections\":[" + sections_json + "],\"anchors\":{" + anchors_json + "}}";
     return record(j, body, out);
+}
+
+/* The game states the configured weapon's fitted parts write (bf6_weapon_md_states
+ * over the same fits the drawn weapon uses). Returns the text length needed, -1 with
+ * `error_out` set on failure. */
+extern "C" int bf6_loadout_md_states(bf6_ctx* c, const char* item_id, const char* fits_text,
+                                     const char* portal_enums, char* out, int out_len,
+                                     char* error_out, int error_len)
+{
+    if (!c || !item_id) return -1;
+    std::string md, error;
+    std::vector<std::pair<std::string, std::string>> pairs;
+    if (!configured_fits(c, item_id, fits_text, portal_enums, md, pairs, error)) {
+        if (error_out && error_len > 0) std::snprintf(error_out, (size_t)error_len, "%s", error.c_str());
+        return -1;
+    }
+    std::vector<bf6_weapon_fit> fits(pairs.size());
+    for (size_t i = 0; i < pairs.size(); ++i) fits[i] = { pairs[i].first.c_str(), pairs[i].second.c_str() };
+    return bf6_weapon_md_states(c, md.c_str(), fits.data(), (int)fits.size(), out, out_len);
 }
 
 extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, const char* portal_enums, uint8_t** out)

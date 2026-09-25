@@ -91,16 +91,10 @@ int bf6_inspect_input_params_read(bf6_ctx* c, bf6_inspect_input_params* p, char*
 
 /* --------------------------------------- which weapon the graph sees --- */
 
-int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
-                    int32_t* weapon_type, char* err, int err_len)
+/* THE ITEM'S SoldierWeaponData, through its blueprint - shared by bf6_inspect_ids
+ * and bf6_inspect_zoom_sight_types. */
+static const bf6ant::Obj* bf6__weapon_data(bf6_ctx* c, const char* item, bf6ant::Graph& g, std::string& why)
 {
-    auto fail = [&](const std::string& why) {
-        if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str());
-        return 0;
-    };
-    if (specific_weapon) *specific_weapon = -1;
-    if (weapon_type) *weapon_type = -1;          /* not established; see the header */
-    if (!c || !item) return fail("missing argument");
     /* The item's leaf names the blueprint: <leaf>_wb, the same rule
      * bf6_base_weapon_stats uses. */
     std::string bare = item;
@@ -141,10 +135,9 @@ int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
             }
         }
     }
-    if (wb.empty()) return fail("no weapon blueprint named " + want);
-    bf6ant::Graph g(c);
+    if (wb.empty()) { why = "no weapon blueprint named " + want; return nullptr; }
     const bf6ant::Obj* root = g.root(wb);
-    if (!root) return fail("weapon blueprint unreadable: " + wb);
+    if (!root) { why = "weapon blueprint unreadable: " + wb; return nullptr; }
     /* SoldierWeaponBlueprint 0x9e113e77 -> SoldierWeaponData; if that link is
      * not there, the data instance is found by type rather than assumed. */
     static const char* kSoldierWeaponData = "4c01cee3-9af9-0b6e-04d7-e0c7c562a393";
@@ -158,7 +151,24 @@ int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
             if (o->type == kSoldierWeaponData) { data = o; break; }
         }
     }
-    if (!data) return fail("no SoldierWeaponData in " + wb);
+    if (!data) why = "no SoldierWeaponData in " + wb;
+    return data;
+}
+
+int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
+                    int32_t* weapon_type, char* err, int err_len)
+{
+    auto fail = [&](const std::string& why) {
+        if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str());
+        return 0;
+    };
+    if (specific_weapon) *specific_weapon = -1;
+    if (weapon_type) *weapon_type = -1;          /* not established; see the header */
+    if (!c || !item) return fail("missing argument");
+    bf6ant::Graph g(c);
+    std::string why;
+    const bf6ant::Obj* data = bf6__weapon_data(c, item, g, why);
+    if (!data) return fail(why);
     const bf6::EbxValue* v = data->f(0xe287c7f3u);
     if (!v) return fail("this weapon's data carries no specific-weapon value");
     if (specific_weapon) *specific_weapon = (int32_t)ii_iv(v);
@@ -202,6 +212,30 @@ int bf6_inspect_ids(bf6_ctx* c, const char* item, int32_t* specific_weapon,
         }
     }
     return 1;
+}
+
+/* EACH ZOOM LEVEL'S SIGHT TYPE, in the weapon's own order (SoldierWeaponData 0xD96E9943,
+ * WeaponZoomLevelData.SightType 0xE5B5C7DB): level 0 is the hip, level 1 the first aim.
+ * The engine writes the current level's value to fb.wep.sighttype.enumgs; the M4A1 is
+ * [0 None, 3 IronSights]. Left unset, that state holds its authored default 1, Canted,
+ * and the first-person scene ops roll the weapon for a canted sight. Returns the count. */
+int bf6_inspect_zoom_sight_types(bf6_ctx* c, const char* item, int32_t* out, int out_max, char* err, int err_len)
+{
+    if (!c || !item) return 0;
+    bf6ant::Graph g(c);
+    std::string why;
+    const bf6ant::Obj* data = bf6__weapon_data(c, item, g, why);
+    if (!data) { if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str()); return 0; }
+    const bf6::EbxValue* levels = data->f(0xd96e9943u);
+    if (!levels) { if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "no zoom levels"); return 0; }
+    int n = 0;
+    for (const auto& ref : levels->items) {
+        const bf6ant::Obj* z = g.resolve(&ref, data);
+        const int32_t t = z ? (int32_t)ii_iv(z->f(0xe5b5c7dbu)) : -1;
+        if (out && n < out_max) out[n] = t;
+        ++n;
+    }
+    return n;
 }
 
 /* ------------------------------------------------ the roll's phase ---- */

@@ -1981,3 +1981,8 @@ target_include_directories(hand_ik_probe PRIVATE src include)
 add_executable(driver_stretch_probe test/driver_stretch_probe.cpp)
 target_link_libraries(driver_stretch_probe PRIVATE bf6_core_static)
 target_include_directories(driver_stretch_probe PRIVATE src include)
+
+# ex_dump_probe: an EX expression program as rows (inputs, ops, constants).
+add_executable(ex_dump_probe test/ex_dump_probe.cpp)
+target_link_libraries(ex_dump_probe PRIVATE bf6_core_static)
+target_include_directories(ex_dump_probe PRIVATE src include)

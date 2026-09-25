@@ -49,7 +49,8 @@ int main(int argc, char** argv)
             std::memcpy(r, b.data() + rec0 + (size_t)i * 32, 32);
             const size_t no = blob + r[3];
             std::string name = no < b.size() ? std::string((const char*)b.data() + no, strnlen((const char*)b.data() + no, b.size() - no)) : "(past data)";
-            std::printf("  %2u tag %-10u pose %4u  %s\n", i, r[0], r[2], name.c_str());
+            std::printf("  %2u tag %-10u pose %4u  %s  rec %u %u %u %u %u %u %u %u\n", i, r[0], r[2], name.c_str(),
+                        r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
         }
     }
     bf6_close(c);

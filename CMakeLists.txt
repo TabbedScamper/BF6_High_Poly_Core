@@ -63,6 +63,7 @@ set(BF6_SOURCES
     src/vehicle_dynamics.cpp
     src/vehicle_wheel_ops.cpp
     src/expression_pure_ops.cpp
+    src/ex_vm.cpp
     src/cache/cache_store.cpp
     src/cache/pack.cpp
     src/cache/progress.cpp
@@ -1986,3 +1987,8 @@ target_include_directories(driver_stretch_probe PRIVATE src include)
 add_executable(ex_dump_probe test/ex_dump_probe.cpp)
 target_link_libraries(ex_dump_probe PRIVATE bf6_core_static)
 target_include_directories(ex_dump_probe PRIVATE src include)
+
+# ex_vm_probe: run an EX program standalone through bf6ex and report what it does.
+add_executable(ex_vm_probe test/ex_vm_probe.cpp)
+target_link_libraries(ex_vm_probe PRIVATE bf6_core_static)
+target_include_directories(ex_vm_probe PRIVATE src include)

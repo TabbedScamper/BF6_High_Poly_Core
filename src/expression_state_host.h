@@ -320,6 +320,7 @@ public:
         bool active = true;           /* the flag the search requires (+0x28 bit 3) */
         int32_t health_state = 1;     /* MM.HealthState: 1 Alive, 2 ManDown, 5 Dead ... */
         int32_t open_door = 0;        /* Vehicle.OpenDoor.Enum: the door it entered by (2 LeftDoor1) */
+        std::map<uint32_t, int32_t> ints;   /* other int channels by hash (TeamId) */
     };
     void set_characters(const std::vector<Character>& c) { characters_ = c; }
     /* THE SEATS: seat index -> the id of the entity sitting there (0 = empty). A door

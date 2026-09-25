@@ -60,6 +60,8 @@ struct bf6_vehicle {
     bf6_ctx* ctx = nullptr;
     float rws_yaw[4] = {}, rws_pitch[4] = {}; /* bf6_vehicle_set_rws_aim */
     bool seat_occupied[8] = {true, false, false, false, false, false, false, false};
+    int32_t team = 1;          /* bf6_vehicle_set_team */
+    bool autohover = false;    /* bf6_vehicle_set_autohover */
     /* THE WEAPONS (see the loader in open) */
     struct Weapon {
         std::string name;
@@ -964,6 +966,9 @@ int32_t bf6_vehicle_weapon_state(bf6_vehicle* v, const char* category, int32_t o
     return 1;
 }
 
+void bf6_vehicle_set_team(bf6_vehicle* v, int32_t team) { if (v) v->team = team; }
+void bf6_vehicle_set_autohover(bf6_vehicle* v, int32_t on) { if (v) v->autohover = on != 0; }
+
 void bf6_vehicle_set_seat(bf6_vehicle* v, int32_t seat, int32_t occupied) {
     if (!v || seat < 0 || seat > 7) return;
     v->seat_occupied[seat] = occupied != 0;
@@ -1030,6 +1035,12 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
          * seat 0's occupant against (the flyer60's per-door constant for seat 0); the
          * seat's own entry data is not read */
         driver.open_door = 2;
+        /* its team: the rhib's HMG graph reads the vehicle's TeamId and keeps the
+         * characters of that team */
+        {
+            uint32_t th = 0;
+            if (s.channel_hash("TeamId", th)) driver.ints[th] = v->team;
+        }
         /* BF6_NO_DRIVER: an empty vehicle, to check the queries find the driver */
         const bool seated = v->seat_occupied[0] && !std::getenv("BF6_NO_DRIVER");
         s.state_mut().set_characters(seated ? std::vector<bf6::expression::StateHost::Character>{driver}
@@ -1159,7 +1170,15 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * value here is not in doubt: a vehicle placed on a map at full health, driven by
      * the local player, not in a level-insertion sequence, not a free-to-play call-in,
      * not on a scripted exotic spline, awake. Channels whose meaning is not yet proven
-     * (Vehicle Damage State's enum, Airborne State, TeamId) are left unsupplied. */
+     * (Airborne State) are left unsupplied.
+     * VEHICLE DAMAGE STATE is Vehicle.DamageState.Enum (animations/kingston/global/
+     * gamestates): Healthy 0, Critical 1, Wreck 2 - the tank's simex tests it against 2
+     * beside its wreck handling. Full health is Healthy.
+     * TEAMID is the driver's team and AUTOHOVER the player's setting, both host
+     * supplied (bf6_vehicle_set_team, bf6_vehicle_set_autohover). */
+    s.set_int("Vehicle Damage State", 0);
+    s.set_int("TeamId", v->team);
+    s.set_bool("Autohover", v->autohover);
     s.set_float("Vehicle Health Normalized", 1.0f);
     s.set_bool("Vehicle Is Wreck", false);
     s.set_bool("EntryActive_Driver Local", true);

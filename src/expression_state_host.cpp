@@ -1012,7 +1012,17 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         uint32_t channel = args[1].as_u32();
         const auto cc = condition_channel_.find(channel);   /* a config pointer: its channel */
         if (cc != condition_channel_.end()) channel = cc->second;
-        if (channel != kHealthState && channel != kOpenDoor) return false;
+        auto value_of = [&](const Character& c, int32_t& out_v) {
+            if (channel == kHealthState) { out_v = c.health_state; return true; }
+            if (channel == kOpenDoor) { out_v = c.open_door; return true; }
+            const auto it = c.ints.find(channel);
+            if (it == c.ints.end()) return false;
+            out_v = it->second;
+            return true;
+        };
+        bool any = channel == kHealthState || channel == kOpenDoor;
+        for (const Character& c : characters_) { int32_t x; any = any || value_of(c, x); }
+        if (!any) return false;
         const int32_t want = (int32_t)args[2].as_u32();
         served_[key] += 1;
         uint32_t in[65];
@@ -1020,9 +1030,10 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         std::vector<uint32_t> set(65, 0u);
         uint32_t n = 0;
         for (uint32_t i = 0; i < std::min<uint32_t>(in[0], 64u); ++i)
-            for (const Character& c : characters_)
-                if (c.id == in[1 + i] && n < 64 &&
-                    (channel == kHealthState ? c.health_state : c.open_door) == want) set[1 + n++] = c.id;
+            for (const Character& c : characters_) {
+                int32_t x = 0;
+                if (c.id == in[1 + i] && n < 64 && value_of(c, x) && x == want) set[1 + n++] = c.id;
+            }
         set[0] = n;
         out.bytes.assign(260, 0);
         std::memcpy(out.bytes.data(), set.data(), 260);

@@ -76,6 +76,7 @@ public:
     bool set_float(const std::string& channel, float v, uint32_t mode = 0);
     bool set_bool(const std::string& channel, bool v);
     bool set_int(const std::string& channel, int32_t v);
+    bool channel_hash(const std::string& name, uint32_t& h) const { return hash_of(name, h); }
     /* The vehicle's placement (RootTransform), 16 floats = 4 rows of stride 16. */
     void set_root(const float rows[16]);
     /* A Vec3 channel (16 bytes, lane 3 zero) in a given mode. */

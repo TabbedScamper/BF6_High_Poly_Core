@@ -3265,6 +3265,10 @@ BF6_API void bf6_vehicle_set_rws_aim(bf6_vehicle*, int32_t index, float yaw, flo
  * clearing a seat and filling it again is getting out and in, which is what a door
  * graph animates a door on. Seats 0..7. */
 BF6_API void bf6_vehicle_set_seat(bf6_vehicle*, int32_t seat, int32_t occupied);
+/* THE DRIVER'S TEAM (TeamId; the vehicle takes its driver's). Default 1. */
+BF6_API void bf6_vehicle_set_team(bf6_vehicle*, int32_t team);
+/* A HELICOPTER'S AUTO-HOVER, a player setting. Default off. */
+BF6_API void bf6_vehicle_set_autohover(bf6_vehicle*, int32_t on);
 /* THE VEHICLE'S WEAPONS, from its blueprint: each weapon component by its display name
  * ("Light Rockets"), with its magazine, rate of fire and reload read from its
  * FiringFunctionData. Which weapon fills an ability category ("Vehicle Secondary

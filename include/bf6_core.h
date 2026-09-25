@@ -2270,6 +2270,11 @@ BF6_API void bf6_walk_step_tuned(bf6_walk_state*, const bf6_walk_input*,
                                  const bf6_walk_tuning*, bf6_walk_ray_fn ray, void* user);
 BF6_API void bf6_walk_step_scene_tuned(bf6_walk_state*, const bf6_walk_input*,
                                        const bf6_walk_tuning*, bf6_ray_scene*);
+/* The same, where eye_final says st->eye is already the height to stand at, crouch
+ * included (a view following an animated camera joint): the walker's own crouch scale is
+ * then not applied on top. Crouch still sets the speed and the probes. */
+BF6_API void bf6_walk_step_scene_tuned_eye(bf6_walk_state*, const bf6_walk_input*,
+                                           const bf6_walk_tuning*, bf6_ray_scene*, int eye_final);
 
 /* ---------------------------------------------------------- water, part 2
  *

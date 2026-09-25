@@ -361,8 +361,14 @@ int32_t bf6_ray_scene_trace(bf6_ray_scene* s, const double* from, const double* 
 // The SPEEDS are still the engine's, because BF6 does not author an absolute
 // walk or sprint speed anywhere; see bf6_walk_tuning.
 
-void bf6_walk_step_tuned(bf6_walk_state* st, const bf6_walk_input* in,
-                         const bf6_walk_tuning* tuning, bf6_walk_ray_fn ray, void* user)
+/* eye_final: the caller's st->eye is ALREADY the height to stand at, crouch included -
+ * a first-person view that follows the game's own animated camera joint, which eases
+ * through a stance change over 18-60 frames. The walker's own crouch scale (0.58 of the
+ * standing eye) is then not applied on top: applied, it dropped the view on the frame
+ * crouch was pressed and then held it 40 % below the game's crouch camera. */
+static void walk_step_impl(bf6_walk_state* st, const bf6_walk_input* in,
+                           const bf6_walk_tuning* tuning, bf6_walk_ray_fn ray, void* user,
+                           bool eye_final)
 {
     if (!st || !in || !ray) return;
     bf6_walk_tuning fallback;
@@ -459,7 +465,7 @@ void bf6_walk_step_tuned(bf6_walk_state* st, const bf6_walk_input* in,
         }
     }
 
-    const double eye = in->crouch ? st->eye * 0.58 : st->eye;
+    const double eye = in->crouch && !eye_final ? st->eye * 0.58 : st->eye;
     // from the feet as they are now, so standing up searches from above the floor
     const double probe[3] = {pos.x, pos.y - std::min(eye, stood) + step_up, pos.z};
     st->eye_last = eye;
@@ -502,6 +508,12 @@ void bf6_walk_step_tuned(bf6_walk_state* st, const bf6_walk_input* in,
     st->vel[1] = penalty;
 }
 
+void bf6_walk_step_tuned(bf6_walk_state* st, const bf6_walk_input* in,
+                         const bf6_walk_tuning* tuning, bf6_walk_ray_fn ray, void* user)
+{
+    walk_step_impl(st, in, tuning, ray, user, false);
+}
+
 void bf6_walk_step(bf6_walk_state* st, const bf6_walk_input* in, bf6_walk_ray_fn ray, void* user)
 {
     bf6_walk_step_tuned(st, in, nullptr, ray, user);
@@ -519,6 +531,12 @@ static int scene_ray(void* user, const double* from, const double* to, double* h
 void bf6_walk_step_scene(bf6_walk_state* st, const bf6_walk_input* in, bf6_ray_scene* s)
 {
     if (s) bf6_walk_step(st, in, scene_ray, s);
+}
+
+void bf6_walk_step_scene_tuned_eye(bf6_walk_state* st, const bf6_walk_input* in,
+                                   const bf6_walk_tuning* tuning, bf6_ray_scene* s, int eye_final)
+{
+    if (s) walk_step_impl(st, in, tuning, scene_ray, s, eye_final != 0);
 }
 
 void bf6_walk_step_scene_tuned(bf6_walk_state* st, const bf6_walk_input* in,

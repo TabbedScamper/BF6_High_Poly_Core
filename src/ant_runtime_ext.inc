@@ -1449,6 +1449,10 @@ struct TagSet {
         tag_set_tags(rt, set, all);
         for (const Obj* a : all) {
             if (a->type == kT_BranchOutPointTag) continue;          /* windows, read by the transition test */
+            /* BF6_ANT_TAGS_LEGACY=1: bool and float tags only, as before the integer and
+             * quantized kinds were applied - to attribute a pose change to them. */
+            static const bool legacy = std::getenv("BF6_ANT_TAGS_LEGACY") != nullptr;
+            if (legacy && (a->type == kT_IntGSTag || a->type == kT_FloatQGSTag)) continue;
             if (a->type != kT_BoolGSTag && a->type != kT_FloatGSTag && a->type != kT_IntGSTag &&
                 a->type != kT_FloatQGSTag) {
                 rt.note("tag kind not implemented: " + a->type + " (" + a->path + ")");

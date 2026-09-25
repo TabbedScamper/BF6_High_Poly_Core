@@ -1977,3 +1977,7 @@ target_include_directories(soldier_sim_probe PRIVATE src include)
 add_executable(hand_ik_probe test/hand_ik_probe.cpp)
 target_link_libraries(hand_ik_probe PRIVATE bf6_core_static)
 target_include_directories(hand_ik_probe PRIVATE src include)
+
+add_executable(driver_stretch_probe test/driver_stretch_probe.cpp)
+target_link_libraries(driver_stretch_probe PRIVATE bf6_core_static)
+target_include_directories(driver_stretch_probe PRIVATE src include)

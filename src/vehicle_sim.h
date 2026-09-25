@@ -47,6 +47,10 @@ public:
     bool open(bf6_ctx* ctx, const std::string& exe, const std::vector<std::string>& graphs,
               const std::string& skeleton, expression::bf6_ray_trace_fn tracer, void* tracer_user,
               std::string& err);
+    /* A SUB-SKELETON (tracks, a launcher, a mount): its bones are appended after the
+     * rig's, its channels mapped where the base rig does not already take them. Its root
+     * stays a root; what the graphs write there are local poses. Returns bones added. */
+    int add_skeleton(bf6_ctx* ctx, const std::string& skeleton);
 
     /* Inputs by public-channel NAME (any channel any loaded graph binds). */
     bool set_float(const std::string& channel, float v, uint32_t mode = 0);

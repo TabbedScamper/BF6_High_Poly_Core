@@ -306,6 +306,37 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
     return true;
 }
 
+int VehicleSim::add_skeleton(bf6_ctx* ctx, const std::string& skeleton) {
+    bf6_skeleton* sk = bf6_skeleton_read(ctx, skeleton.c_str());
+    if (!sk) return 0;
+    std::vector<uint32_t> hs(1024);
+    std::vector<int32_t> bs(1024);
+    const int nc = bf6_skeleton_channel_bones(ctx, skeleton.c_str(), hs.data(), bs.data(), 1024);
+    const int32_t offset = (int32_t)rig_names_.size();
+    for (int32_t index = 0; index < sk->bone_count; ++index) {
+        const int32_t parent = sk->bones[index].parent >= 0 ? sk->bones[index].parent + offset : -1;
+        rig_names_.push_back(sk->bones[index].name ? sk->bones[index].name : "");
+        rig_parents_.push_back(parent);
+        const float* m = sk->bones[index].model;
+        const float* l = sk->bones[index].local;
+        const float mr[16] = {m[0], m[1], m[2], 0, m[3], m[4], m[5], 0,
+                              m[6], m[7], m[8], 0, m[9], m[10], m[11], 0};
+        const float lr[16] = {l[0], l[1], l[2], 0, l[3], l[4], l[5], 0,
+                              l[6], l[7], l[8], 0, l[9], l[10], l[11], 0};
+        state_.set_skeleton_bone(offset + index, parent, lr, mr);
+    }
+    for (int i = 0; i < nc && i < 1024; ++i) {
+        const int32_t index = bs[(size_t)i];
+        if (index < 0 || index >= sk->bone_count || bone_identity_.count(hs[(size_t)i])) continue;
+        state_.map_skeleton_bone(hs[(size_t)i], offset + index);
+        bone_identity_[hs[(size_t)i]] = BoneIdentity{offset + index,
+            sk->bones[index].name ? sk->bones[index].name : ""};
+    }
+    const int added = sk->bone_count;
+    bf6_free(ctx, sk);
+    return added;
+}
+
 bool VehicleSim::hash_of(const std::string& name, uint32_t& h) const {
     const auto it = channel_hash_.find(name);
     if (it == channel_hash_.end()) return false;

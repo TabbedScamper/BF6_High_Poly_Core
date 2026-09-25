@@ -437,6 +437,25 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         bf6_ray_scene_free(v->scene);
         return fail(e);
     }
+    /* THE SUB-SKELETONS: a tank's tracks, the Bradley's TOW launcher, a boat's mounts.
+     * Their channels (Track_Joint_*, TOW_Mount) are bound by the graphs and had nowhere
+     * to land. Cinematic and first-person rigs are not the vehicle's. */
+    if (!std::getenv("BF6_NO_SUBSKELETONS")) {
+        const std::string pre = dir + "/art/ske_veh_" + cls + "_" + veh + "_";
+        const int n = bf6_list_ebx(c, pre.c_str(), nullptr, 0);
+        std::vector<bf6_asset> rows((size_t)std::max(n, 0));
+        const int got = n > 0 ? std::clamp(bf6_list_ebx(c, pre.c_str(), rows.data(), n), 0, n) : 0;
+        std::vector<std::string> subs;
+        for (int i = 0; i < got; ++i) {
+            const std::string name = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+            if (name.compare(0, pre.size(), pre) != 0 || name == ske) continue;
+            if (name.find('/', pre.size()) != std::string::npos) continue;
+            if (name.find("_cin") != std::string::npos || name.find("_1p") != std::string::npos) continue;
+            if (std::find(subs.begin(), subs.end(), name) == subs.end()) subs.push_back(name);
+        }
+        std::sort(subs.begin(), subs.end());
+        for (const std::string& sub : subs) v->sim.add_skeleton(c, sub);
+    }
     /* WHAT THE ENGINE BINDS AT LOAD. A graph's curves are in its EBX, not in its
      * expression blob, and the graph's own typed slot groups say which slot takes
      * which; patched into the pool the copies read from. See vehicle_typed_seed.inc. */

@@ -1539,6 +1539,27 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                         std::fill(a.known_bytes.begin(), a.known_bytes.end(), (uint8_t)1);
                         a.known = true;
                     }
+                    /* THE SAME FOR A LINEARTRANSFORM: four Vec3 rows, each with a padding
+                     * lane (bytes 12, 28, 44, 60). A tank's road wheels were refused over
+                     * the translation row's padding alone. Operators whose reflected
+                     * arguments are LinearTransforms and use the rows' xyz only. */
+                    static const uint32_t kTransformOps[] = {
+                        0xE1E2CFCEu,   /* MultiplyLinearTransformLinearTransformLinearTransform */
+                        0x4899CB44u,   /* SetPartTransform(mode, bone, LinearTransform) */
+                    };
+                    bool lt_op = false;
+                    for (uint32_t k : kTransformOps) lt_op = lt_op || record.operator_key == k;
+                    for (Value& a : args) {
+                        if (!lt_op || a.known || a.bytes.size() != 64 || a.known_bytes.size() != 64) continue;
+                        bool rows = true;
+                        for (size_t b = 0; b < 64; ++b)
+                            if ((b % 16) < 12) rows = rows && a.known_bytes[b];
+                        if (!rows) continue;
+                        for (size_t r = 0; r < 4; ++r)
+                            std::fill(a.bytes.begin() + r * 16 + 12, a.bytes.begin() + r * 16 + 16, (uint8_t)0);
+                        std::fill(a.known_bytes.begin(), a.known_bytes.end(), (uint8_t)1);
+                        a.known = true;
+                    }
                 }
                 /* BF6_OP_INPUTS=<hex key>: every call of that operator, with each
                  * input's region, slot, first float, and - the point of it - whether

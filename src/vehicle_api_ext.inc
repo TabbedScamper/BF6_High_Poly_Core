@@ -60,6 +60,19 @@ struct bf6_vehicle {
     bf6_ctx* ctx = nullptr;
     float rws_yaw[4] = {}, rws_pitch[4] = {}; /* bf6_vehicle_set_rws_aim */
     bool seat_occupied[8] = {true, false, false, false, false, false, false, false};
+    /* THE WEAPONS (see the loader in open) */
+    struct Weapon {
+        std::string name;
+        int32_t capacity = 0, magazines = 0;   /* AmmoConfig +0x00 / +0x04 */
+        float interval = 0.0f;                 /* 60 / rate of fire (FireLogic +0xB0) */
+        float reload = 0.0f, extra = 0.0f;     /* reload time and the empty-magazine delay */
+        int32_t loaded = 0, reserve = 0;
+        bool reloading = false, trigger = false;
+        float remaining = 0.0f, denom = 0.0f, cooldown = 0.0f;
+    };
+    std::vector<Weapon> weapons;
+    std::map<std::string, uint32_t> categories;   /* ability category name -> id */
+    std::map<uint32_t, int32_t> equipped;         /* category id -> weapon index */
     bool boost = false;
     double time = 0.0;
     std::string name;
@@ -661,6 +674,99 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
                     std::fprintf(stderr, "  hinge0 +0x%X = %g\n", kv.first, kv.second);
         }
     }
+    /* THE WEAPONS. The blueprint (vb_veh_<class>_<vehicle>) lists weapon components,
+     * each with a display name (0xC0D8F798) and its FiringFunctionData (0x2B04CD3B,
+     * an import). Read from that data, by the offsets the natives read:
+     *   AmmoConfig (+0x320, 0x4CC9E2ED): +0x00 rounds per magazine, +0x04 magazines
+     *   FireLogic (+0x1F0, 0xF8822EFA): +0xB0 rate of fire (rounds per minute; the
+     *     native stores 60/rate), +0x100 the reload entries (0xD15A0C1C, 56 bytes):
+     *     +0x10 reload speed, +0x14 the delay added when the magazine is empty, +0x1C
+     *     the reload time, +0x28 a list of reload times whose last entry wins.
+     * The first reload entry is used (the native indexes by a state field), the
+     * reload-time scale is taken as 100%, and tweakable overrides are not applied
+     * (stated). The ability categories come from playerabilitycategoriesasset (name
+     * 0x18D8777E, id 0xDE6F63B3). */
+    {
+        std::string err;
+        std::vector<uint8_t> raw = c->src.get_ebx("common/gameplay/shared/playerabilitygroups/playerabilitycategoriesasset", err);
+        bf6::Ebx e(*c->types);
+        if (!raw.empty() && e.parse(std::move(raw), err))
+            for (size_t i = 0; i < e.instance_count(); ++i) {
+                const bf6::EbxValue iv = e.read_instance(i);
+                const bf6::EbxValue* nm = iv.field(0x18D8777Eu);
+                const bf6::EbxValue* id = iv.field(0xDE6F63B3u);
+                if (nm && id && nm->kind == bf6::EbxValue::Kind::Str && !nm->s.empty())
+                    v->categories[nm->s] = id->kind == bf6::EbxValue::Kind::Int ? (uint32_t)id->i : (uint32_t)id->u;
+            }
+        raw = c->src.get_ebx(dir + "/vb_veh_" + cls + "_" + veh, err);
+        bf6::Ebx vb(*c->types);
+        vb.set_guid_index(&c->src.partition_index());
+        auto num = [](const bf6::EbxValue* x) -> double {
+            if (!x) return 0.0;
+            if (x->kind == bf6::EbxValue::Kind::Real) return x->f;
+            if (x->kind == bf6::EbxValue::Kind::Int) return (double)x->i;
+            if (x->kind == bf6::EbxValue::Kind::Uint) return (double)x->u;
+            return 0.0;
+        };
+        if (!raw.empty() && vb.parse(std::move(raw), err))
+            for (size_t i = 0; i < vb.instance_count(); ++i) {
+                const bf6::EbxValue wc = vb.read_instance(i);
+                const bf6::EbxValue* nm = wc.field(0xC0D8F798u);
+                const bf6::EbxValue* ff = wc.field(0x2B04CD3Bu);
+                if (!nm || nm->kind != bf6::EbxValue::Kind::Str || !ff ||
+                    ff->kind != bf6::EbxValue::Kind::ImportRef || ff->import_path.empty()) continue;
+                std::string path = ff->import_path;
+                if (path.size() > 4 && path.compare(path.size() - 4, 4, ".ebx") == 0) path.resize(path.size() - 4);
+                std::vector<uint8_t> wraw = c->src.get_ebx(path, err);
+                bf6::Ebx we(*c->types);
+                if (wraw.empty() || !we.parse(std::move(wraw), err)) continue;
+                for (size_t k = 0; k < we.instance_count(); ++k) {
+                    if (we.instance_guid(k) != ff->import_instance) continue;
+                    /* the import names the WeaponFiringData; its primary fire is the
+                     * FiringFunctionData it references (the first instance it refers to
+                     * that carries an AmmoConfig) */
+                    bf6::EbxValue fd = we.read_instance(k);
+                    if (!fd.field(0x4CC9E2EDu))
+                        for (const auto& kv : fd.fields)
+                            if (kv.second.kind == bf6::EbxValue::Kind::InstanceRef && kv.second.instance >= 0) {
+                                bf6::EbxValue sub = we.read_instance((size_t)kv.second.instance);
+                                if (sub.field(0x4CC9E2EDu)) { fd = std::move(sub); break; }
+                            }
+                    const bf6::EbxValue* ammo = fd.field(0x4CC9E2EDu);
+                    const bf6::EbxValue* logic = fd.field(0xF8822EFAu);
+                    if (!ammo || !logic) break;
+                    bf6_vehicle::Weapon w;
+                    w.name = nm->s;
+                    w.capacity = (int32_t)num(ammo->field(0x7F22BFB4u));
+                    w.magazines = (int32_t)num(ammo->field(0x4614ADFEu));
+                    const double rpm = num(logic->field(0x14C4A054u));
+                    w.interval = rpm > 0.0 ? (float)(60.0 / rpm) : 0.0f;
+                    const bf6::EbxValue* rl = logic->field(0xD15A0C1Cu);
+                    if (rl && !rl->items.empty()) {
+                        const bf6::EbxValue& r = rl->items.front();
+                        double speed = num(r.field(0x1C533B56u));
+                        if (speed <= 0.0) speed = 1.0;
+                        double t = num(r.field(0x85FF24A0u));
+                        const bf6::EbxValue* times = r.field(0xDC244B57u);
+                        if (times && !times->items.empty()) t = num(&times->items.back());
+                        w.reload = (float)(t / speed);
+                        w.extra = (float)(num(r.field(0xC0C7C72Fu)) / speed);
+                    }
+                    /* full: a magazine loaded, the rest in reserve, which the native
+                     * caps at magazines x capacity less what is loaded */
+                    /* a capacity below one is unlimited (the native reports -1): it
+                     * never empties and never reloads */
+                    w.loaded = w.capacity;
+                    w.reserve = w.capacity > 0 ? std::max(w.capacity * w.magazines - w.loaded, 0) : -1;
+                    v->weapons.push_back(std::move(w));
+                    break;
+                }
+            }
+        if (std::getenv("BF6_WEAPON_DEBUG"))
+            for (const auto& w : v->weapons)
+                std::fprintf(stderr, "weapon \"%s\": %d x %d rounds, %.3f s between shots, reload %.2f s (+%.2f s empty)\n",
+                             w.name.c_str(), w.capacity, w.magazines, w.interval, w.reload, w.extra);
+    }
     if (!std::getenv("BF6_NO_CLIP_LAYERS") && cls == "airplane") {
         const char* rig = "animations/kingston/global/rigging/vehicle_airplane_common_01.rig";
         const std::string key = "." + veh + ".mmlayer";
@@ -816,6 +922,48 @@ void bf6_vehicle_set_rws_aim(bf6_vehicle* v, int32_t index, float yaw, float pit
     v->rws_pitch[index] = pitch;
 }
 
+int32_t bf6_vehicle_weapon_names(bf6_vehicle* v, char* out, int32_t cap) {
+    if (!v) return 0;
+    int32_t at = 0;
+    for (const auto& w : v->weapons) {
+        const int32_t n = (int32_t)w.name.size() + 1;
+        if (out && at + n <= cap) std::memcpy(out + at, w.name.c_str(), (size_t)n);
+        at += n;
+    }
+    return (int32_t)v->weapons.size();
+}
+
+static const bf6_vehicle::Weapon* bf6__equipped(bf6_vehicle* v, const char* category, uint32_t* id_out) {
+    if (!v || !category) return nullptr;
+    const auto c = v->categories.find(category);
+    if (c == v->categories.end()) return nullptr;
+    if (id_out) *id_out = c->second;
+    const auto e = v->equipped.find(c->second);
+    if (e == v->equipped.end() || e->second < 0 || (size_t)e->second >= v->weapons.size()) return nullptr;
+    return &v->weapons[(size_t)e->second];
+}
+
+int32_t bf6_vehicle_equip_weapon(bf6_vehicle* v, const char* category, const char* name) {
+    if (!v || !category || !name) return 0;
+    const auto c = v->categories.find(category);
+    if (c == v->categories.end()) return 0;
+    for (size_t i = 0; i < v->weapons.size(); ++i)
+        if (v->weapons[i].name == name) { v->equipped[c->second] = (int32_t)i; return 1; }
+    return 0;
+}
+
+void bf6_vehicle_set_trigger(bf6_vehicle* v, const char* category, int32_t held) {
+    const bf6_vehicle::Weapon* w = bf6__equipped(v, category, nullptr);
+    if (w) const_cast<bf6_vehicle::Weapon*>(w)->trigger = held != 0;
+}
+
+int32_t bf6_vehicle_weapon_state(bf6_vehicle* v, const char* category, int32_t out[3]) {
+    const bf6_vehicle::Weapon* w = bf6__equipped(v, category, nullptr);
+    if (!w || !out) return 0;
+    out[0] = w->loaded; out[1] = w->reserve; out[2] = w->reloading ? 1 : 0;
+    return 1;
+}
+
 void bf6_vehicle_set_seat(bf6_vehicle* v, int32_t seat, int32_t occupied) {
     if (!v || seat < 0 || seat > 7) return;
     v->seat_occupied[seat] = occupied != 0;
@@ -891,6 +1039,49 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         std::vector<uint32_t> seats(8, 0u);
         if (seated) seats[0] = driver.id;
         s.state_mut().set_seats(seats);
+    }
+    /* THE WEAPONS, one tick: the shot clock, the trigger, the reload. A shot takes a
+     * round and restarts the clock at 60 / rate of fire. An empty magazine with rounds
+     * in reserve reloads (reloading by itself when empty is our reading of the vehicle
+     * weapons, stated): the duration is the reload time, plus the empty-magazine delay
+     * since the magazine is empty, and progress is 1 - remaining / duration in the
+     * native's 0.01 steps. */
+    if (!v->equipped.empty()) {
+        std::map<uint32_t, bf6::expression::StateHost::WeaponView> views;
+        for (const auto& eq : v->equipped) {
+            if (eq.second < 0 || (size_t)eq.second >= v->weapons.size()) continue;
+            bf6_vehicle::Weapon& w = v->weapons[(size_t)eq.second];
+            w.cooldown = std::max(w.cooldown - dt, 0.0f);
+            if (w.reloading) {
+                w.remaining = std::max(w.remaining - dt, 0.0f);
+                if (w.remaining <= 0.0f) {
+                    const int32_t take = std::min(w.capacity - w.loaded, w.reserve);
+                    w.loaded += take;
+                    w.reserve -= take;
+                    w.reloading = false;
+                }
+            } else if (w.trigger && w.cooldown <= 0.0f && (w.capacity < 1 || w.loaded > 0)) {
+                if (w.capacity > 0) --w.loaded;
+                w.cooldown = w.interval;
+            }
+            if (w.capacity > 0 && !w.reloading && w.loaded == 0 && w.reserve > 0) {
+                w.reloading = true;
+                w.denom = w.remaining = w.reload + w.extra;
+            }
+            bf6::expression::StateHost::WeaponView view;
+            view.loaded = w.loaded;
+            view.reserve = w.reserve;
+            view.capacity = w.capacity;
+            view.magazines = w.magazines;
+            view.reloading = w.reloading;
+            if (w.reloading) {
+                const float frac = w.denom > 0.0f ? w.remaining / w.denom : 0.0f;
+                view.progress = (float)(uint32_t)(int64_t)((1.0f - frac) * 100.0f) * 0.01f;
+            }
+            view.duration = w.reload;
+            views[eq.first] = view;
+        }
+        s.set_weapons(views);
     }
     /* BF6_HAS_PILOT=1: a helicopter's state list declares HasPilot beside Autopilot,
      * AutohoverEnabled and a Roll PID with its own errorSum and lastError, and nothing

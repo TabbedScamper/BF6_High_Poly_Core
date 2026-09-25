@@ -3265,6 +3265,19 @@ BF6_API void bf6_vehicle_set_rws_aim(bf6_vehicle*, int32_t index, float yaw, flo
  * clearing a seat and filling it again is getting out and in, which is what a door
  * graph animates a door on. Seats 0..7. */
 BF6_API void bf6_vehicle_set_seat(bf6_vehicle*, int32_t seat, int32_t occupied);
+/* THE VEHICLE'S WEAPONS, from its blueprint: each weapon component by its display name
+ * ("Light Rockets"), with its magazine, rate of fire and reload read from its
+ * FiringFunctionData. Which weapon fills an ability category ("Vehicle Secondary
+ * Weapon") is the player's loadout, so the host equips it; the vehicle's graphs then
+ * see its ammunition and reload state. Names are written NUL-separated into out;
+ * returns the count. */
+BF6_API int32_t bf6_vehicle_weapon_names(bf6_vehicle*, char* out, int32_t cap);
+/* equip weapon `name` in the ability category `category` (its display name); 1 on success */
+BF6_API int32_t bf6_vehicle_equip_weapon(bf6_vehicle*, const char* category, const char* name);
+/* hold (1) or release (0) the trigger of the weapon equipped in `category` */
+BF6_API void bf6_vehicle_set_trigger(bf6_vehicle*, const char* category, int32_t held);
+/* loaded, reserve, reloading (0/1) of the weapon in `category`; 0 if none equipped */
+BF6_API int32_t bf6_vehicle_weapon_state(bf6_vehicle*, const char* category, int32_t out[3]);
 /* Presentation-graph bone writes from the most recent step. Each transform is
  * the absolute local Frostbite LinearTransform: right/up/forward/translation
  * rows at float offsets 0/4/8/12. The name is the authored skeleton bone name. */

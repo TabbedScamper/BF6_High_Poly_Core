@@ -30,6 +30,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
     primary_written_ready_ = false;
     frame_ids_.clear();
     frame_ids_taken_.clear();
+    frame_ids_presentation_.clear();
     bone_binds_.clear();
     rig_names_.clear();
     rig_parents_.clear();
@@ -182,7 +183,16 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                 if (base.size() >= 4) {
                     const auto& v = copies[base];
                     const size_t rank = (size_t)(std::find(v.begin(), v.end(), rl.target) - v.begin());
-                    const std::string path = base + "#" + std::to_string(rank);
+                    /* TWO PRESENTATION GRAPHS ARE TWO INSTANCES. The CV90's primary and
+                     * rocket moving-parts graphs each embed a struct of the same path, and
+                     * sharing its identity let one graph reset the other's arm position
+                     * every tick. A presentation graph reuses an identity only when the
+                     * drivetrain or a derived graph made it. */
+                    const bool presentation = name.find("/presex_") != std::string::npos;
+                    std::string path = base + "#" + std::to_string(rank);
+                    if (presentation && frame_ids_presentation_.count(path) &&
+                        !std::getenv("BF6_PRESEX_SHARE_FRAMES"))
+                        path += "@" + name;
                     const auto known = frame_ids_.find(path);
                     if (known != frame_ids_.end()) {
                         id = known->second;
@@ -196,6 +206,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                         }
                         frame_ids_[path] = id;
                         frame_ids_taken_.insert(id);
+                        if (presentation) frame_ids_presentation_.insert(path);
                     }
                 }
             }

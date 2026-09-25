@@ -70,6 +70,7 @@ public:
     }
     void publish_bones();
     void set_seats(const std::vector<uint32_t>& s) { state_.set_seats(s); }
+    void set_weapons(const std::map<uint32_t, bf6::expression::StateHost::WeaponView>& w) { state_.set_weapons(w); }
 
     /* Inputs by public-channel NAME (any channel any loaded graph binds). */
     bool set_float(const std::string& channel, float v, uint32_t mode = 0);
@@ -173,6 +174,7 @@ private:
     /* feature path -> the state frame id every graph of this vehicle uses for it */
     std::map<std::string, uint32_t> frame_ids_;
     std::set<uint32_t> frame_ids_taken_;
+    std::set<std::string> frame_ids_presentation_;   /* paths first met in a presex graph */
     expression::StateHost state_;
     expression::PhysicsQueryHost physics_;
     expression::RecoveredOps recovered_;

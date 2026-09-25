@@ -214,6 +214,11 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
      * (set_characters). Without the driver there the boat sleeps, as it would empty. */
     /* THE SEAT / DOOR OPERATORS (see invoke) */
     if (key == 0x91C21F3Cu) { out.input_widths = {260, 4}; out.output_width = 260; return true; }
+    /* THE VEHICLE WEAPON NODES (see invoke). The primary output is the node's LAST
+     * output; the ones before it are extras, in order. */
+    if (key == 0xB6EADEAEu) { out.input_widths = {4}; out.extra_output_widths = {4, 4, 4}; out.output_width = 4; return true; }
+    if (key == 0xE973A99Cu) { out.input_widths = {4}; out.extra_output_widths = {1, 4}; out.output_width = 4; return true; }
+    if (key == 0xC22CF89Cu) { out.input_widths = {4, 4}; out.extra_output_widths = {4}; out.output_width = 4; return true; }
     if (key == 0x0221B337u) { out.input_widths = {260, 260, 4}; out.output_width = 1; return true; }
     if (key == 0xBC689BF3u) { out.input_widths = {16}; out.output_width = 260; return true; }
     if (key == 0x2B3256FDu) { out.input_widths = {16, 260}; out.output_width = 0; return true; }
@@ -860,6 +865,53 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         for (int i = 1; i <= 64; ++i) std::memcpy(b.data() + 4 * i, &none, 4);
         return b;
     };
+    /* THE VEHICLE WEAPON NODES, from the natives (Codex study, corpus 6a1c1b). The
+     * input is an ability CATEGORY id (the CV90 rocket pod asks for "Vehicle Secondary
+     * Weapon", 0xBCAB1D17): the node finds the ability of that category on the vehicle
+     * and reads its weapon's firing state. Server path; nothing equipped answers the
+     * defaults (all zero).
+     *   0xB6EADEAE  FUN_1417312F0: loaded rounds, reserve rounds, rounds per magazine,
+     *               magazines
+     *   0xE973A99C  FUN_14172F4C0: reloading (firing states 11..13), progress in 0.01
+     *               steps, the reload duration
+     *   0xC22CF89C  FUN_14174E130: the ability's PlayerAbilityState and a second value
+     *               only a BasicPlayerAbility gives. No ability system runs offline, so
+     *               this answers the native's own "absent" sentinel, 7, and 0 (stated). */
+    if (key == 0xB6EADEAEu || key == 0xE973A99Cu) {
+        if (args.empty() || !args[0].known) return false;
+        served_[key] += 1;
+        const auto it = weapons_.find(args[0].as_u32());
+        const WeaponView w = it != weapons_.end() ? it->second : WeaponView{};
+        out = Value{};
+        out.known = true;
+        auto put = [&](const void* p, size_t n) {
+            const uint8_t* b = (const uint8_t*)p;
+            out.bytes.insert(out.bytes.end(), b, b + n);
+        };
+        if (key == 0xB6EADEAEu) {
+            put(&w.magazines, 4);               /* output 3 (primary) */
+            put(&w.loaded, 4);                  /* outputs 0..2 */
+            put(&w.reserve, 4);
+            put(&w.capacity, 4);
+        } else {
+            const uint8_t r = w.reloading ? 1 : 0;
+            put(&w.duration, 4);                /* output 2 (primary) */
+            put(&r, 1);                         /* output 0 */
+            put(&w.progress, 4);                /* output 1 */
+        }
+        return true;
+    }
+    if (key == 0xC22CF89Cu) {
+        if (args.size() < 2 || !args[0].known || !args[1].known) return false;
+        served_[key] += 1;
+        const int32_t absent = 7, second = 0;
+        out = Value{};
+        out.known = true;
+        out.bytes.resize(8);
+        std::memcpy(out.bytes.data(), &second, 4);       /* output 1 (primary) */
+        std::memcpy(out.bytes.data() + 4, &absent, 4);   /* output 0 */
+        return true;
+    }
     if (key == 0x91C21F3Cu) {
         if (args.size() != 2 || !args[0].known || !args[1].known || args[0].bytes.size() < 8) return false;
         served_[key] += 1;
@@ -1175,7 +1227,8 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
             uint32_t d[4];
             std::memcpy(d, args[0].bytes.data(), 16);
             float fv; std::memcpy(&fv, &raw, 4);
-            std::fprintf(stderr, "u32 read desc %08X %08X %08X %08X -> %08X (%g)\n", d[0], d[1], d[2], d[3], raw, fv);
+            std::fprintf(stderr, "u32 read rec 0x%X desc %08X %08X %08X %08X key 0x%016llX -> %08X (%g)\n", cur_record_,
+                         d[0], d[1], d[2], d[3], (unsigned long long)cell_key(args[0].as_u32()), raw, fv);
         }
         out = known_u32(raw);
         return true;

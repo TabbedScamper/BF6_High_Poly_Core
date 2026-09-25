@@ -116,6 +116,29 @@ int main(int argc, char** argv) {
         static float exit_a = -1.0f, exit_b = -1.0f;
         static const bool exit_parsed = std::getenv("BF6_EXIT") &&
             std::sscanf(std::getenv("BF6_EXIT"), "%f,%f", &exit_a, &exit_b) == 2;
+        /* BF6_LOADOUT=<category>=<weapon>: equip that weapon (a player's loadout
+         * choice), and BF6_FIRE=a,b holds its trigger from second a to second b. */
+        static std::string loadout_cat;
+        if (f == 0)
+            if (const char* lo = std::getenv("BF6_LOADOUT")) {
+                const std::string spec = lo;
+                const size_t eq = spec.find('=');
+                if (eq != std::string::npos) {
+                    loadout_cat = spec.substr(0, eq);
+                    std::fprintf(stderr, "equip %s -> %s: %d\n", spec.substr(eq + 1).c_str(), loadout_cat.c_str(),
+                                 bf6_vehicle_equip_weapon(v, loadout_cat.c_str(), spec.substr(eq + 1).c_str()));
+                }
+            }
+        static float fire_a = -1.0f, fire_b = -1.0f;
+        static const bool fire_parsed = std::getenv("BF6_FIRE") &&
+            std::sscanf(std::getenv("BF6_FIRE"), "%f,%f", &fire_a, &fire_b) == 2;
+        if (fire_parsed && !loadout_cat.empty()) {
+            const float ts = (float)f / 60.0f;
+            bf6_vehicle_set_trigger(v, loadout_cat.c_str(), ts >= fire_a && ts < fire_b);
+            int32_t ws[3] = {0, 0, 0};
+            if (f % 15 == 0 && bf6_vehicle_weapon_state(v, loadout_cat.c_str(), ws))
+                std::fprintf(stderr, "weapon t %.2f loaded %d reserve %d reloading %d\n", ts, ws[0], ws[1], ws[2]);
+        }
         if (exit_parsed) {
             const float ts = (float)f / 60.0f;
             bf6_vehicle_set_seat(v, 0, (ts >= exit_a && ts < exit_b) ? 0 : 1);

@@ -325,6 +325,16 @@ public:
     /* THE SEATS: seat index -> the id of the entity sitting there (0 = empty). A door
      * graph animates a door when its seat's occupant changes (0x91C21F3C / 0x0221B337). */
     void set_seats(const std::vector<uint32_t>& s) { seats_ = s; }
+    /* THE VEHICLE'S EQUIPPED WEAPONS by ability category id (the id the weapon nodes
+     * take): what 0xB6EADEAE and 0xE973A99C report. A category with nothing equipped
+     * is absent, and the nodes answer their defaults. */
+    struct WeaponView {
+        int32_t loaded = 0, reserve = 0, capacity = 0, magazines = 0;
+        bool reloading = false;
+        float progress = 0.0f;   /* 0.01-quantised, as the native reports it */
+        float duration = 0.0f;
+    };
+    void set_weapons(const std::map<uint32_t, WeaponView>& w) { weapons_ = w; }
     /* the channel an entity-query config (a relocated pool pointer) tests */
     void map_condition_channel(uint32_t config, uint32_t channel) { condition_channel_[config] = channel; }
     void set_heap_sink(HeapSink* sink) override { heap_ = sink; }
@@ -347,6 +357,7 @@ private:
     std::vector<Frame> frames_;
     std::vector<Character> characters_;
     std::vector<uint32_t> seats_;
+    std::map<uint32_t, WeaponView> weapons_;
     /* 260-byte state values (an id collection kept between ticks) by cell key */
     std::map<uint64_t, std::vector<uint8_t>> wide_cells_;
     std::map<uint32_t, uint32_t> condition_channel_;

@@ -42,6 +42,16 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (boat) bf6_vehicle_set_water(v, 0.0f, 1);
+    /* A LOADOUT, the player's choice and so the test's: the rocket pod as the secondary
+     * weapon where the vehicle has one (BF6_PROBE_LOADOUT=<category>=<weapon> for
+     * another), fired from 3 s to 3.5 s so its reload runs inside the sweep. */
+    std::string category = "Vehicle Secondary Weapon", weapon = "Light Rockets";
+    if (const char* lo = std::getenv("BF6_PROBE_LOADOUT")) {
+        const std::string spec = lo;
+        const size_t eq = spec.find('=');
+        if (eq != std::string::npos) { category = spec.substr(0, eq); weapon = spec.substr(eq + 1); }
+    }
+    const bool armed = bf6_vehicle_equip_weapon(v, category.c_str(), weapon.c_str()) != 0;
     float out[40] = {};
     /* AIRCRAFT GET A TAKE-OFF after the common sweep, so the parts that only move in
      * flight (landing gear, gear doors) are exercised: throttle from 11 s, nose up
@@ -76,6 +86,7 @@ int main(int argc, char** argv) {
             bf6_vehicle_set_rws_aim(v, i, std::sin(t * 0.7f + (float)i), 0.2f * std::sin(t * 1.1f));
         bf6_vehicle_set_cyclic(v, pitch, roll);
         bf6_vehicle_set_boost(v, boost);
+        if (armed) bf6_vehicle_set_trigger(v, category.c_str(), step >= 180 && step < 210);
         bf6_vehicle_step(v, in, out);
     }
     const int32_t n = bf6_vehicle_motion_report(v, nullptr, 0);

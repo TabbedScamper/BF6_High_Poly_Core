@@ -355,6 +355,12 @@ int VehicleSim::add_skeleton(bf6_ctx* ctx, const std::string& skeleton) {
     return added;
 }
 
+void VehicleSim::isolate_graphs(const std::vector<std::string>& names) {
+    uint32_t next = 0xE000u;
+    for (auto& g : graphs_)
+        if (std::find(names.begin(), names.end(), g->name) != names.end()) g->owner = next++;
+}
+
 bool VehicleSim::hash_of(const std::string& name, uint32_t& h) const {
     const auto it = channel_hash_.find(name);
     if (it == channel_hash_.end()) return false;
@@ -741,6 +747,7 @@ void VehicleSim::tick() {
         if (std::getenv("BF6_FRAME_LEAK") && state_.frame_depth())
             std::fprintf(stderr, "frame stack depth %d leaked into %s\n", state_.frame_depth(), g->name.c_str());
         if (!std::getenv("BF6_KEEP_FRAMES")) state_.reset_frames();
+        state_.set_owner(g->owner);
         expression::ChainHost chain;
         chain.add(&g->builtins);
         chain.add(&g->pure);

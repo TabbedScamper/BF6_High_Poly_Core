@@ -289,10 +289,19 @@ private:
                ((uint64_t)(field & 0xFFu) << 32) | (uint64_t)path;
     }
     uint64_t cell_key(uint32_t path) const {
-        const uint32_t frame = (path >= 0xFFFF0000u && !frames_.empty()) ? frames_.back().bound[3] : 0u;
+        uint32_t frame = (path >= 0xFFFF0000u && !frames_.empty()) ? frames_.back().bound[3] : 0u;
+        /* A GRAPH'S OWN ROOT STATE. A frame-relative path with no frame pushed is the
+         * running graph's own local state; graphs from the vehicle's feature tree each
+         * get their own owner so their locals do not land on the drivetrain's (the
+         * F-16's pilot-camera graph was rewriting the simex's root cells). */
+        if (frame == 0 && path >= 0xFFFF0000u) frame = owner_;
         return make_key(frame, path, cur_kind_, cur_field_);
     }
     uint32_t cur_kind_ = 0, cur_field_ = 0, cur_record_ = 0;
+    uint32_t owner_ = 0;
+public:
+    void set_owner(uint32_t o) { owner_ = o; }
+private:
 public:
     void set_current_record(uint32_t r) override { cur_record_ = r; }
 private:

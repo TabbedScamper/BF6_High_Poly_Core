@@ -580,6 +580,56 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         std::sort(extra.begin(), extra.end());
         graphs.insert(graphs.end(), extra.begin(), extra.end());
     }
+    /* THE VEHICLE'S FEATURE GRAPHS. The vehicle's feature tree (featureex_veh_<class>_
+     * <vehicle>, its features and feature lists, followed through imports) names every
+     * expression graph the game runs for it, and most live outside its folder: the
+     * shared simex_vehicle_common, damage, lights, cockpit warnings, the MH-47 ramp,
+     * the F/A-18 wingtips. Graphs are leaves (a graph's own imports are sub-structs
+     * compiled into it). Feature simex graphs run after the drivetrain, feature derived
+     * graphs with the derived ones, the rest with the presentation. Audio graphs are
+     * left out, as for the controllers. BF6_NO_FEATURE_GRAPHS leaves all of them out. */
+    std::vector<std::string> feature_graphs;
+    if (!std::getenv("BF6_NO_FEATURE_GRAPHS")) {
+        std::string terr;
+        if (ensure_types(c, terr) && c->types) {
+            std::vector<std::string> found;
+            std::set<std::string> seen;
+            std::vector<std::string> todo = {gdir + "/featureex_veh_" + gcls + "_" + gveh};
+            while (!todo.empty()) {
+                const std::string a = todo.back();
+                todo.pop_back();
+                if (!seen.insert(a).second) continue;
+                const std::string leaf = a.substr(a.rfind('/') + 1);
+                const bool graph = leaf.rfind("simex_", 0) == 0 || leaf.rfind("presex_", 0) == 0 ||
+                                   leaf.rfind("derivedex_", 0) == 0;
+                if (graph) {
+                    if (leaf.find("audio") == std::string::npos && have(a)) found.push_back(a);
+                    continue;
+                }
+                if (seen.size() > 1 && leaf.find("feature") == std::string::npos) continue;
+                const std::vector<std::string> kids = bf6__ebx_import_paths(c, a);
+                for (auto it = kids.rbegin(); it != kids.rend(); ++it) todo.push_back(*it);
+            }
+            size_t sim_end = 0;   /* after the simex graphs already in the list */
+            while (sim_end < graphs.size() &&
+                   graphs[sim_end].substr(graphs[sim_end].rfind('/') + 1).rfind("simex_", 0) == 0) ++sim_end;
+            size_t der_end = sim_end;
+            while (der_end < graphs.size() &&
+                   graphs[der_end].substr(graphs[der_end].rfind('/') + 1).rfind("derivedex_", 0) == 0) ++der_end;
+            std::vector<std::string> fs, fd, fp;
+            for (const std::string& gname : found) {
+                if (std::find(graphs.begin(), graphs.end(), gname) != graphs.end()) continue;
+                const std::string leaf = gname.substr(gname.rfind('/') + 1);
+                (leaf.rfind("simex_", 0) == 0 ? fs : leaf.rfind("derivedex_", 0) == 0 ? fd : fp).push_back(gname);
+            }
+            for (const auto* l : {&fs, &fd, &fp})
+                for (const std::string& gname : *l)
+                    if (gname.compare(0, gdir.size() + 1, gdir + "/") != 0) feature_graphs.push_back(gname);
+            graphs.insert(graphs.begin() + (std::ptrdiff_t)der_end, fd.begin(), fd.end());
+            graphs.insert(graphs.begin() + (std::ptrdiff_t)sim_end, fs.begin(), fs.end());
+            graphs.insert(graphs.end(), fp.begin(), fp.end());
+        }
+    }
     /* BF6_SKIP_GRAPHS=<substr>[,<substr>...]: leave matching graphs out, to test what one
      * graph contributes (a diagnostic, never a default). */
     if (const char* sk = std::getenv("BF6_SKIP_GRAPHS")) {
@@ -603,6 +653,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         bf6_ray_scene_free(v->scene);
         return fail(e);
     }
+    v->sim.isolate_graphs(feature_graphs);
     /* THE SUB-SKELETONS: a tank's tracks, the Bradley's TOW launcher, a boat's mounts.
      * Their channels (Track_Joint_*, TOW_Mount) are bound by the graphs and had nowhere
      * to land. Cinematic and first-person rigs are not the vehicle's. */

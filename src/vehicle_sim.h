@@ -70,6 +70,9 @@ public:
     }
     void publish_bones();
     void set_seats(const std::vector<uint32_t>& s) { state_.set_seats(s); }
+    /* graphs whose root-level local state is their own (the feature graphs from outside
+     * the vehicle's folder); the rest share owner 0 */
+    void isolate_graphs(const std::vector<std::string>& names);
     void set_weapons(const std::map<uint32_t, bf6::expression::StateHost::WeaponView>& w) { state_.set_weapons(w); }
 
     /* Inputs by public-channel NAME (any channel any loaded graph binds). */
@@ -168,6 +171,7 @@ private:
         expression::NamedBuiltins builtins;
         expression::PureOps pure;
         std::map<uint32_t, std::string> names;
+        uint32_t owner = 0;   /* root-level state owner, see isolate_graphs */
     };
     bool hash_of(const std::string& name, uint32_t& h) const;
     std::vector<std::unique_ptr<G>> graphs_;

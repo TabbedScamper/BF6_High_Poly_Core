@@ -45,6 +45,16 @@ struct bf6_vehicle {
         std::vector<Dof> dofs;
     };
     std::vector<ClipLayer> clip_layers;
+    /* FAKEHINGE SECONDARY MOTION (see bf6__fakehinge_step): one per bound bone. */
+    struct FakeHinge {
+        int32_t bone = -1;
+        std::map<uint32_t, float> d;       /* FakeHingeData by runtime byte offset */
+        float theta = 0.0f, w = 0.0f;       /* +0x108 angle, +0x104 angular velocity */
+        float prev_t[3] = {0, 0, 0}, prev_v[3] = {0, 0, 0};
+        bool history = false;
+        float f(uint32_t off) const { auto it = d.find(off); return it == d.end() ? 0.0f : it->second; }
+    };
+    std::vector<FakeHinge> hinges;
     bf6_ctx* ctx = nullptr;
     float rws_yaw[4] = {}, rws_pitch[4] = {}; /* bf6_vehicle_set_rws_aim */
     bool boost = false;
@@ -116,6 +126,57 @@ const std::map<std::string, uint32_t>& bf6__public_channel_ids(bf6_ctx* c) {
     }
     return ids;
 }
+
+/* ---- FAKEHINGE, transcribed from the natives (Codex study, corpus 6a1c1b):
+ *   FUN_142b69620  per-frame motion history: the driven bone's origin velocity and its
+ *                  change since the last frame (dv), then the integrator (virtual +0x70)
+ *   FUN_142b67fa0  the integrator (same math as FUN_144ed12e0): gravity along the swing
+ *                  tangent, the inertial response to -dv/dt, a progressive restoring
+ *                  spring, fractional velocity loss, a dead zone, a speed cap on the angle
+ *                  step, min/max angles with impact damping
+ *   FUN_142b67c30  the pose: rotation about RotationAxis at Pivot
+ *   FUN_140e122b0  the bone: local = hinge output then the rest pose
+ * Data offsets (FakeHingeData, runtime layout): +0x20 max speed, +0x24 upper impact
+ * damping, +0x28 mass, +0x2c gravity multiplier, +0x30 dead zone, +0x38 lower impact
+ * damping, +0x40 pivot, +0x50 rotation axis, +0x60 extension axis, +0x70 restoring
+ * coefficient, +0x74 min angle (deg), +0x78 response divisor, +0x7c progressive
+ * exponent base, +0x80 velocity loss, +0x84 max angle (deg).
+ * NOT MODELLED, stated: the history step's optional speed cap (its source is unknown)
+ * and the delta-reuse countdown after an irregular frame; no force at a point. */
+namespace fh {
+struct V { float x, y, z; };
+static V sub(V a, V b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+static V mul(V a, float s) { return {a.x * s, a.y * s, a.z * s}; }
+static float dot(V a, V b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static V cross(V a, V b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+static V norm(V a) { const float l = std::sqrt(dot(a, a)); return l > 1e-12f ? mul(a, 1.0f / l) : a; }
+/* a direction through a row-major LinearTransform (rows = images of the basis) */
+static V dir(const float* m, V v) {
+    return {v.x * m[0] + v.y * m[4] + v.z * m[8], v.x * m[1] + v.y * m[5] + v.z * m[9], v.x * m[2] + v.y * m[6] + v.z * m[10]};
+}
+/* rotation by theta about axis through pivot, as LinearTransform rows (FUN_142b67c30) */
+static void axis_pivot(V a, V p, float th, float out[16]) {
+    const float c = std::cos(th), s = std::sin(th), k = 1.0f - c;
+    const float R[3][3] = {{c + a.x * a.x * k, a.x * a.y * k - a.z * s, a.x * a.z * k + a.y * s},
+                           {a.y * a.x * k + a.z * s, c + a.y * a.y * k, a.y * a.z * k - a.x * s},
+                           {a.z * a.x * k - a.y * s, a.z * a.y * k + a.x * s, c + a.z * a.z * k}};
+    std::memset(out, 0, 64);
+    for (int r = 0; r < 3; ++r)                  /* row r = column r of R */
+        for (int col = 0; col < 3; ++col) out[r * 4 + col] = R[col][r];
+    const V rp = {R[0][0] * p.x + R[0][1] * p.y + R[0][2] * p.z, R[1][0] * p.x + R[1][1] * p.y + R[1][2] * p.z,
+                  R[2][0] * p.x + R[2][1] * p.y + R[2][2] * p.z};
+    out[12] = p.x - rp.x; out[13] = p.y - rp.y; out[14] = p.z - rp.z;
+}
+/* row-vector composition: p * a * b */
+static void lt(const float* a, const float* b, float* o) {
+    std::memset(o, 0, 64);
+    for (int r = 0; r < 4; ++r)
+        for (int col = 0; col < 3; ++col) {
+            o[r * 4 + col] = a[r * 4] * b[col] + a[r * 4 + 1] * b[4 + col] + a[r * 4 + 2] * b[8 + col];
+            if (r == 3) o[r * 4 + col] += b[12 + col];
+        }
+}
+} // namespace fh
 
 int bf6__vehicle_trace(void* user, const double* from, const double* to, double* hit, double* normal) {
     const bf6_vehicle* vv = (const bf6_vehicle*)user;
@@ -556,6 +617,47 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * (veh_<vehicle>_) is taken; and the rig is the shared airplane rig
      * (vehicle_airplane_common_01), the one whose DOF sets these clips bind through. */
     v->ctx = c;
+    /* THE FAKEHINGES: the base rig's binding list (field 0x4CE93112: bone, hinge data,
+     * weight). Per bone the engine sorts its entries by weight and takes the first at or
+     * above a requested weight (FUN_140e10510); the requested weight is not read here, so
+     * the lowest entry is taken. The data is laid out by the type's reflected layout. */
+    if (!std::getenv("BF6_NO_FAKEHINGE")) {
+        std::string err;
+        std::vector<uint8_t> raw = c->src.get_ebx(ske, err);
+        bf6::Ebx e(*c->types);
+        if (!raw.empty() && e.parse(std::move(raw), err) && e.instance_count() > 0) {
+            const bf6::EbxValue root_v = e.read_instance(0);
+            const bf6::EbxValue* list = root_v.field(0x4CE93112u);
+            std::map<int32_t, std::pair<float, int32_t>> pick;   /* bone -> (weight, instance) */
+            if (list)
+                for (const auto& item : list->items) {
+                    const bf6::EbxValue* bone = item.field(0xB1C23DA7u);
+                    const bf6::EbxValue* data = item.field(0x8176EE9Au);
+                    const bf6::EbxValue* wt = item.field(0x9BBA073Cu);
+                    if (!bone || !data || data->kind != bf6::EbxValue::Kind::InstanceRef || data->instance < 0) continue;
+                    const int32_t b = bone->kind == bf6::EbxValue::Kind::Uint ? (int32_t)bone->u : (int32_t)bone->i;
+                    const float w = wt ? (float)wt->f : 0.0f;
+                    auto it = pick.find(b);
+                    if (it == pick.end() || w < it->second.first) pick[b] = {w, data->instance};
+                }
+            for (const auto& kv : pick) {
+                const bf6::EbxValue hv = e.read_instance((size_t)kv.second.second);
+                const bf6::TypeLayout& lay = c->types->layout_full(hv.guid);
+                if (!lay.valid) continue;
+                std::map<uint32_t, uint32_t> bits;
+                bf6__seed_value(*c->types, lay, hv, 0, bits, 0);
+                bf6_vehicle::FakeHinge h;
+                h.bone = kv.first;
+                for (const auto& b : bits) { float f; std::memcpy(&f, &b.second, 4); h.d[b.first] = f; }
+                v->hinges.push_back(std::move(h));
+            }
+            if (std::getenv("BF6_VEHICLE_GRAPHS"))
+                std::fprintf(stderr, "fakehinges: %zu bones\n", v->hinges.size());
+            if (std::getenv("BF6_HINGE_DEBUG") && !v->hinges.empty())
+                for (const auto& kv : v->hinges.front().d)
+                    std::fprintf(stderr, "  hinge0 +0x%X = %g\n", kv.first, kv.second);
+        }
+    }
     if (!std::getenv("BF6_NO_CLIP_LAYERS") && cls == "airplane") {
         const char* rig = "animations/kingston/global/rigging/vehicle_airplane_common_01.rig";
         const std::string key = "." + veh + ".mmlayer";
@@ -947,6 +1049,66 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     /* THE CLIP LAYERS, after the graphs have written this tick's phases: each clip at
      * phase x its last frame, each DOF over its bone's rest pose (rotation and/or
      * translation), then the bones are published again with these poses in them. */
+    /* THE FAKEHINGES, after the graphs and clips have posed their parents. */
+    if (!v->hinges.empty() && dt > 1e-6f) {
+        float root[16];
+        d.root_rows(root);
+        for (auto& h : v->hinges) {
+            float rest[16], parent_model[16], model[16], B[16];
+            if (!s.rig_rest_local(h.bone, rest)) continue;
+            const int32_t par = s.rig_parent(h.bone);
+            if (par >= 0 && s.rig_model(par, parent_model)) fh::lt(rest, parent_model, model);
+            else std::memcpy(model, rest, 64);
+            fh::lt(model, root, B);                               /* the driving world transform */
+            /* FUN_142b69620: velocity of the driving origin and its change */
+            const fh::V t = {B[12], B[13], B[14]};
+            fh::V vel = {0, 0, 0}, dv = {0, 0, 0};
+            if (h.history) {
+                vel = fh::mul(fh::sub(t, {h.prev_t[0], h.prev_t[1], h.prev_t[2]}), 1.0f / dt);
+                dv = fh::sub(vel, {h.prev_v[0], h.prev_v[1], h.prev_v[2]});
+                if (fh::dot(dv, dv) < 0.01f && fh::dot(vel, vel) < 0.01f) vel = dv = {0, 0, 0};
+            }
+            h.prev_t[0] = t.x; h.prev_t[1] = t.y; h.prev_t[2] = t.z;
+            h.prev_v[0] = vel.x; h.prev_v[1] = vel.y; h.prev_v[2] = vel.z;
+            const bool had = h.history;
+            h.history = true;
+            if (!had) continue;
+            /* FUN_142b67fa0 */
+            const fh::V axis = fh::norm({h.f(0x50), h.f(0x54), h.f(0x58)});
+            const fh::V ext = fh::norm({h.f(0x60), h.f(0x64), h.f(0x68)});
+            const fh::V pivot = {h.f(0x40), h.f(0x44), h.f(0x48)};
+            const float theta = h.theta, oldw = h.w;
+            float A[16];
+            fh::axis_pivot(axis, pivot, theta, A);
+            const fh::V tangent = fh::dir(B, fh::dir(A, fh::cross(axis, ext)));
+            const float inertial = fh::dot(fh::mul(dv, -1.0f / dt), tangent);
+            const float g_along = fh::dot({0.0f, -9.82f, 0.0f}, tangent);
+            float progressive = 1.0f;
+            if (h.f(0x7c) != 0.0f) {
+                const float limit = theta <= 0.0f ? h.f(0x74) : h.f(0x84);
+                const float denom = std::max(std::fabs(limit * 0.017453292f), 1.0f);
+                progressive = std::exp((std::fabs(theta) / denom) * std::log(h.f(0x7c)));
+            }
+            const float div = h.f(0x78) != 0.0f ? h.f(0x78) : 1.0f;
+            const float dw = ((h.f(0x2c) * g_along + inertial) / div - theta * h.f(0x70) * progressive) * dt;
+            float w = (1.0f - h.f(0x80)) * (oldw + dw);
+            if (std::fabs(w) < h.f(0x30) + 0.01f) w = 0.0f;
+            float next = theta + (oldw + w) * 0.5f * dt + dw * dt * 0.5f;
+            const float max_speed = std::max(h.f(0x20), 0.0f);
+            if (max_speed > 0.0f && std::fabs(next - theta) > max_speed * dt)
+                next = theta + (next > theta ? 1.0f : -1.0f) * max_speed * dt;
+            if (next > h.f(0x84) * 0.017453292f) { next = h.f(0x84) * 0.017453292f; w *= h.f(0x24) - 1.0f; }
+            else if (next < h.f(0x74) * 0.017453292f) { next = h.f(0x74) * 0.017453292f; w *= h.f(0x38) - 1.0f; }
+            if (!std::isfinite(next) || !std::isfinite(w)) { next = 0.0f; w = 0.0f; }
+            h.w = w;
+            h.theta = next;
+            float H[16], local[16];
+            fh::axis_pivot(axis, pivot, next, H);
+            fh::lt(H, rest, local);                               /* hinge, then the rest pose */
+            s.write_rig_local(h.bone, local);
+        }
+        if (v->clip_layers.empty()) s.publish_bones();
+    }
     if (!v->clip_layers.empty()) {
         std::map<uint32_t, std::pair<const float*, const float*>> pose;   /* quat, translation */
         std::vector<std::vector<float>> samples;

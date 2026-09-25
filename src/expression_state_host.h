@@ -216,6 +216,15 @@ public:
         w.resize(64);
         std::memcpy(w.data(), local, 64);
     }
+    bool current_model(int32_t index, float out[16]) const {
+        if (index < 0 || (size_t)index >= skeleton_poses_.size()) return false;
+        std::memcpy(out, skeleton_poses_[(size_t)index].model.data(), 64);
+        return true;
+    }
+    int32_t bone_parent(int32_t index) const {
+        if (index < 0 || (size_t)index >= skeleton_poses_.size()) return -1;
+        return skeleton_poses_[(size_t)index].parent;
+    }
     bool rest_local(int32_t index, float out[16]) const {
         if (index < 0 || (size_t)index >= skeleton_poses_.size()) return false;
         std::memcpy(out, skeleton_poses_[(size_t)index].rest_local.data(), 64);

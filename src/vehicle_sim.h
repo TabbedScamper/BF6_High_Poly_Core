@@ -56,6 +56,12 @@ public:
     bool write_bone_local(uint32_t channel_hash, const float local[16]);
     bool bone_rest_local(uint32_t channel_hash, float out[16]) const;
     bool maps_bone(uint32_t channel_hash) const;
+    /* by rig index: rest local, current model, parent, and a local write (recorded
+     * under the bone's channel when it has one, else under a synthetic key) */
+    bool rig_rest_local(int32_t index, float out[16]) const { return state_.rest_local(index, out); }
+    bool rig_model(int32_t index, float out[16]) const { return state_.current_model(index, out); }
+    int32_t rig_parent(int32_t index) const { return state_.bone_parent(index); }
+    void write_rig_local(int32_t index, const float local[16]);
     /* the bone channel a graph binds under this name (kind-1 binding), for clip DOFs */
     bool bone_channel_named(const std::string& name, uint32_t& hash) const {
         for (const auto& kv : bone_binds_) if (kv.second == name) { hash = kv.first; return true; }

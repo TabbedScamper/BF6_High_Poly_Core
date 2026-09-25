@@ -1054,6 +1054,22 @@ bool VehicleSim::write_bone_local(uint32_t channel_hash, const float local[16]) 
     return true;
 }
 
+void VehicleSim::write_rig_local(int32_t index, const float local[16]) {
+    state_.commit_local(index, local);
+    uint32_t key = 0;
+    for (const auto& kv : bone_identity_) if (kv.second.index == index) { key = kv.first; break; }
+    if (!key) {
+        /* a bone no graph binds (a FakeHinge door, an antenna): a synthetic key in the
+         * top range, registered so it is presented and tracked like any other */
+        key = 0xFE000000u | (uint32_t)index;
+        if (!bone_identity_.count(key) && (size_t)index < rig_names_.size())
+            bone_identity_[key] = BoneIdentity{index, rig_names_[(size_t)index]};
+        if (!bone_binds_.count(key) && (size_t)index < rig_names_.size())
+            bone_binds_[key] = rig_names_[(size_t)index];
+    }
+    state_.record_bone_write(key, local);
+}
+
 bool VehicleSim::bone_rest_local(uint32_t channel_hash, float out[16]) const {
     const auto identity = bone_identity_.find(channel_hash);
     if (identity == bone_identity_.end()) return false;

@@ -522,6 +522,15 @@ void k_DofReader(Call& c)
         && h.offset + n <= pc->pose->bytes.size())
         src = pc->pose->bytes.data() + h.offset;
     std::memmove(c.out[0], src, n);
+    /* BF6_EX_DOFREAD=N: the first N reads - handle, validity, bytes, value */
+    static long left = std::getenv("BF6_EX_DOFREAD") ? std::atol(std::getenv("BF6_EX_DOFREAD")) : 0;
+    if (left > 0) {
+        --left;
+        const float* v = (const float*)c.out[0];
+        std::fprintf(stderr, "ex dofread idx %d off %u n %u valid %d -> (%g %g %g %g)\n", h.index, h.offset, (unsigned)n,
+                     (pc && pc->pose && h.index != kUnbound && (size_t)h.index < pc->pose->valid.size()) ? (int)pc->pose->valid[(size_t)h.index] : -1,
+                     v[0], n > 4 ? v[1] : 0.f, n > 8 ? v[2] : 0.f, n > 12 ? v[3] : 0.f);
+    }
 }
 /* ---- the joint readers (EX_KERNELS_SPEC.md: AntJointReader 0x1408ecf00,
  *      RootJointReader 0x1408f6090) ---- */

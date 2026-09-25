@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
 #include "bf6_core.h"
 
 /* Compose two 3x4 row-major affine transforms: apply a, then b. */
@@ -70,6 +71,16 @@ int main(int argc, char** argv) {
         }
         const bool pass = (topo == n && roots == 1 && comp == n && inv == n);
         std::printf("%-52s bones %4d\n", argv[a], n);
+        /* BF6_SKEL_DUMP=<substring>: those bones with parent, bind local and model
+         * translation, to see what a posed local is relative to. */
+        if (const char* want = std::getenv("BF6_SKEL_DUMP"))
+            for (int i = 0; i < n; i++) {
+                const bf6_bone& b = sk->bones[i];
+                if (!b.name || !std::strstr(b.name, want)) continue;
+                std::printf("    %3d %-28s parent %-28s local t (%.4f %.4f %.4f)  model t (%.4f %.4f %.4f)\n",
+                            i, b.name, b.parent >= 0 && sk->bones[b.parent].name ? sk->bones[b.parent].name : "-",
+                            b.local[9], b.local[10], b.local[11], b.model[9], b.model[10], b.model[11]);
+            }
         std::printf("    topological (parent < child)      %4d/%d\n", topo, n);
         std::printf("    exactly one root                  %4d\n", roots);
         std::printf("    model == local o model[parent]     %4d/%d\n", comp, n);

@@ -1782,6 +1782,27 @@ extern "C" int64_t bf6_loadout_weapon(bf6_ctx* c, const char* item_id, const cha
     return record(j, body, out);
 }
 
+/* The configured weapon's fitted part bundles, one per line (dpf_<part>_<hash>_bundle_1p). */
+extern "C" int bf6_loadout_fitted_bundles(bf6_ctx* c, const char* item_id, const char* fits_text,
+                                          const char* portal_enums, char* out, int out_len)
+{
+    if (!c || !item_id) return -1;
+    std::string md, error;
+    std::vector<std::pair<std::string, std::string>> pairs;
+    if (!configured_fits(c, item_id, fits_text, portal_enums, md, pairs, error)) return -1;
+    std::vector<bf6_weapon_fit> fits(pairs.size());
+    for (size_t i = 0; i < pairs.size(); ++i) fits[i] = { pairs[i].first.c_str(), pairs[i].second.c_str() };
+    std::vector<bf6_weapon_part> parts(256);
+    const int n = bf6_weapon_configured_parts(c, md.c_str(), fits.data(), (int)fits.size(), parts.data(), 256);
+    if (n < 0) return -1;
+    std::string s;
+    std::set<std::string> seen;
+    for (int i = 0; i < n && i < 256; ++i)
+        if (parts[(size_t)i].bundle && seen.insert(parts[(size_t)i].bundle).second) { s += parts[(size_t)i].bundle; s += '\n'; }
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)s.size() + 1;
+}
+
 /* The game states the configured weapon's fitted parts write (bf6_weapon_md_states
  * over the same fits the drawn weapon uses). Returns the text length needed, -1 with
  * `error_out` set on failure. */

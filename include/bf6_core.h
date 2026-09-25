@@ -1872,6 +1872,9 @@ BF6_API int64_t bf6_loadout_catalogue(bf6_ctx*, uint8_t** out);
 BF6_API int64_t bf6_loadout_attachments(bf6_ctx*, const char* item_id, const char* portal_enums, uint8_t** out);
 /* The game states the configured weapon's fitted parts write - the same fits
  * bf6_loadout_weapon draws - as bf6_weapon_md_states lines. */
+/* The configured weapon's fitted part bundles, one per line. */
+BF6_API int bf6_loadout_fitted_bundles(bf6_ctx*, const char* item_id, const char* fits,
+                                       const char* portal_enums, char* out, int out_len);
 BF6_API int bf6_loadout_md_states(bf6_ctx*, const char* item_id, const char* fits,
                                   const char* portal_enums, char* out, int out_len,
                                   char* error_out, int error_len);
@@ -5332,6 +5335,10 @@ BF6_API void bf6_ant_runtime_set_zoom_sight_types(bf6_ant_runtime*, const int32_
 /* One zoom level's procedural weapon states (bf6_inspect_zoom_level_states lines),
  * applied when that level becomes current. */
 BF6_API void bf6_ant_runtime_set_zoom_level_states(bf6_ant_runtime*, int level, const char* text);
+/* The caller's composite skeleton before this step (7 floats a bone: quaternion x y z w,
+ * translation), for the scene ops' pose arena only: the joints the graph did not drive -
+ * the weapon's attach points - come from it. */
+BF6_API void bf6_ant_runtime_set_underneath(bf6_ant_runtime*, const float* qt, int bones);
 /* What the scene ops did (seeds, missing kernels, notes, states written). */
 BF6_API int  bf6_ant_runtime_ex_report(const bf6_ant_runtime*, char* out, int out_len);
 BF6_API void bf6_ant_runtime_set_hand_ik(bf6_ant_runtime*, int on);
@@ -5370,6 +5377,9 @@ BF6_API int  bf6_ant_runtime_node(const bf6_ant_runtime*, char* out, int out_len
 /* 1 when the root state machine has reached a transparent (exit) node and its
  * blend into it has ended - the graph has handed control back to its parent. */
 BF6_API int  bf6_ant_runtime_finished(const bf6_ant_runtime*);
+/* 1 when a state-flow node whose asset path contains `part` is active anywhere in the
+ * graph (nested machines included), 0 when none is, -1 without a runtime. */
+BF6_API int  bf6_ant_runtime_node_active(const bf6_ant_runtime*, const char* part);
 
 /* The weapon-inspect drag: camera-yaw input -> fb.camerainput.yaw.float, as
  * the soldier logic computes it. Parameters are READ from the installed
@@ -5439,6 +5449,9 @@ BF6_API float bf6_inspect_aim_step(const bf6_inspect_aim_params*, bf6_inspect_ai
  * field hash to glacier_soldier's AntBinding), as "<state> <kind> x y z w" lines.
  * Returns the length needed, -1 on failure. */
 BF6_API int bf6_inspect_zoom_level_states(bf6_ctx*, const char* item, int level, char* out, int out_len);
+/* The fitted optic's SightType (its module's WeaponOpticModifier), from
+ * bf6_loadout_fitted_bundles text; -1 when no fitted part carries one. */
+BF6_API int bf6_inspect_optic_sight_type(bf6_ctx*, const char* bundles);
 BF6_API int bf6_inspect_zoom_sight_types(bf6_ctx*, const char* item, int32_t* out, int out_max, char* err, int err_len);
 BF6_API int bf6_inspect_ids(bf6_ctx*, const char* item, int32_t* specific_weapon,
                             int32_t* weapon_type, char* err, int err_len);

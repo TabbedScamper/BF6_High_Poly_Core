@@ -475,7 +475,14 @@ static void walk_step_impl(bf6_walk_state* st, const bf6_walk_input* in,
         const bool walkable = nrm[1] >= 0.71;   // about 45 degrees
         // Snap down only when already on the floor and the ground dropped by less
         // than a step - stairs and ramps. Applied while airborne it cut jumps short.
-        const bool snap = was_on_floor && st->vel_up <= 0.0 && (pos.y - stand) <= step_up;
+        /* A LOWER EYE ON THE FLOOR IS THE BODY CROUCHING, NOT A FALL. With eye_final the
+         * caller's eye rides the graph's CameraJoint, already on its authored curve; left
+         * to this test the 0.58 m stand-to-crouch drop exceeded a step, the walker went
+         * airborne and fell to the new height over 8 frames under gravity while the arms,
+         * anchored on the joint, were already there - the rifle leapt 580 mm up the
+         * screen on the first crouch frame (native/render_walk.gd crouch). */
+        const bool crouched_down = eye_final && was_on_floor && eye < stood - 1e-6;
+        const bool snap = was_on_floor && st->vel_up <= 0.0 && ((pos.y - stand) <= step_up || crouched_down);
         if (walkable && (pos.y <= stand || snap)) {
             pos.y = stand;
             /* TOUCHDOWN. A hard landing costs speed, scaled by how fast the

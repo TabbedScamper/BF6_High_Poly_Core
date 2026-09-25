@@ -48,6 +48,17 @@ struct AntExOps {
         }
         void write_state(uint64_t h, const void* in, Kind k) override {
             if (h >= obj.size()) return;
+            /* BF6_EX_BLOCK=a,b: drop program writes to states whose path contains any of
+             * these substrings - a bisection switch, diagnostic only */
+            static const std::vector<std::string> block = [] {
+                std::vector<std::string> v;
+                if (const char* e = std::getenv("BF6_EX_BLOCK")) {
+                    std::string s(e); size_t p = 0;
+                    while (p <= s.size()) { const size_t q = s.find(',', p); v.push_back(s.substr(p, q == std::string::npos ? std::string::npos : q - p)); if (q == std::string::npos) break; p = q + 1; }
+                }
+                return v;
+            }();
+            for (const std::string& b : block) if (!b.empty() && path[h].find(b) != std::string::npos) return;
             ++writes[h];
             owned.insert(path[h]);
             switch (k) {
@@ -130,6 +141,13 @@ struct AntExOps {
      * Before each pre-update the current level's value is written to
      * fb.wep.sighttype.enumgs, as the engine does. WHICH level is current is ours: the
      * engine switches levels as the zoom engages; here fb.ads.bool picks level 1. */
+    /* THE COMPOSITE POSE UNDERNEATH (bf6_ant_runtime_set_underneath): the caller's skeleton
+     * as it stood before this step. The graph drives only its own joints; the rest of the
+     * pose the game's programs read - the weapon's attach points, Wep_Scope_ATT among them -
+     * comes from the stance clip underneath, which this runtime never sees. Without it the
+     * post-update program read Wep_Scope_ATT.t as zero and aligned an eye point 9 cm low. */
+    bf6ant::Pose underneath;
+    bool have_underneath = false;
     std::vector<int32_t> zoom_sight;
     /* each zoom level's procedural weapon states (bf6_inspect_zoom_level_states), applied
      * when the current level changes */
@@ -189,9 +207,21 @@ static bool bf6__ex_arena(bf6ant::Runtime& rt, AntExOps& ex, std::string& err)
 }
 
 /* pose -> arena: every bone DOF live (validity 1, so a DofWriter's 0xff is visible) */
-static void bf6__ex_fill(AntExOps& ex, const bf6ant::Pose& p)
+static void bf6__ex_fill(AntExOps& ex, const bf6ant::Pose& p_in)
 {
     bf6ex::PoseArena& a = ex.arena;
+    /* the graph's joints where it drove them, the caller's composite elsewhere */
+    bf6ant::Pose merged;
+    const bf6ant::Pose* src = &p_in;
+    if (ex.have_underneath && ex.underneath.q.size() == p_in.q.size()) {
+        merged = ex.underneath;
+        for (size_t b = 0; b < p_in.q.size(); ++b) {
+            if (b < p_in.vq.size() && p_in.vq[b]) merged.q[b] = p_in.q[b];
+            if (b < p_in.vt.size() && p_in.vt[b]) merged.t[b] = p_in.t[b];
+        }
+        src = &merged;
+    }
+    const bf6ant::Pose& p = *src;
     for (size_t i = 0; i < ex.dof_bone.size(); ++i) {
         const int b = ex.dof_bone[i];
         float* d = (float*)(a.bytes.data() + a.offset[i]);

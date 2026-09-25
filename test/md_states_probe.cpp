@@ -25,6 +25,17 @@ int main(int argc, char** argv)
         slots.emplace_back(argv[a], (size_t)(eq - argv[a]));
         tokens.emplace_back(eq + 1);
     }
+    /* "item:<id>" as the partition argument: the configured weapon (factory fits),
+     * through bf6_loadout_md_states - what fps_open's md_item uses */
+    if (std::strncmp(argv[2], "item:", 5) == 0) {
+        char merr[512] = {0};
+        const int m = bf6_loadout_md_states(c, argv[2] + 5, "", "", nullptr, 0, merr, (int)sizeof(merr));
+        if (m < 0) { std::printf("loadout md states: %s\n", merr); return 1; }
+        std::vector<char> t((size_t)m + 1, 0);
+        bf6_loadout_md_states(c, argv[2] + 5, "", "", t.data(), (int)t.size(), merr, (int)sizeof(merr));
+        std::printf("%s", t.data());
+        return 0;
+    }
     std::vector<bf6_weapon_fit> fits(slots.size());
     for (size_t i = 0; i < slots.size(); ++i) fits[i] = { slots[i].c_str(), tokens[i].c_str() };
     const int n = bf6_weapon_md_states(c, argv[2], fits.data(), (int)fits.size(), nullptr, 0);

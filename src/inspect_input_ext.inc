@@ -247,6 +247,10 @@ int bf6_inspect_zoom_sight_types(bf6_ctx* c, const char* item, int32_t* out, int
  * post-update program divides by them: its weapon-kick chain went NaN and took the
  * weapon's aim correction (Wep_Align) with it.
  * Lines as bf6_weapon_md_states: "<state> <kind> x y z w". Returns the length needed. */
+/* level >= 0: that zoom level's procedural struct. level == -1: the weapon data's own
+ * animation record (SoldierWeaponData 0x5C64DFB2[0]), whose fields the same binding group
+ * reads - fb.wep.zoominspeed (0x983BC2E4) among them, the ramp the post-update program's
+ * IncDecNormal divides by. */
 int bf6_inspect_zoom_level_states(bf6_ctx* c, const char* item, int level, char* out, int out_len)
 {
     if (!c || !item) return -1;
@@ -254,10 +258,16 @@ int bf6_inspect_zoom_level_states(bf6_ctx* c, const char* item, int level, char*
     std::string why;
     const bf6ant::Obj* data = bf6__weapon_data(c, item, g, why);
     if (!data) return -1;
-    const bf6::EbxValue* levels = data->f(0xd96e9943u);
-    if (!levels || level < 0 || (size_t)level >= levels->items.size()) return -1;
-    const bf6ant::Obj* z = g.resolve(&levels->items[(size_t)level], data);
-    const bf6::EbxValue* st = z ? z->f(0xf2d603deu) : nullptr;
+    const bf6::EbxValue* st = nullptr;
+    if (level == -1) {
+        const bf6::EbxValue* recs = data->f(0x5c64dfb2u);
+        st = recs && !recs->items.empty() ? &recs->items[0] : nullptr;
+    } else {
+        const bf6::EbxValue* levels = data->f(0xd96e9943u);
+        if (!levels || level < 0 || (size_t)level >= levels->items.size()) return -1;
+        const bf6ant::Obj* z = g.resolve(&levels->items[(size_t)level], data);
+        st = z ? z->f(0xf2d603deu) : nullptr;
+    }
     if (!st) return -1;
     /* field hash -> bound state, over every instance of the soldier asset */
     std::map<uint32_t, std::string> bound;
@@ -309,6 +319,59 @@ int bf6_inspect_zoom_level_states(bf6_ctx* c, const char* item, int level, char*
     }
     if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
     return (int)s.size() + 1;
+}
+
+/* THE FITTED OPTIC'S SIGHT TYPE. A sight attachment replaces the aimed zoom level: its
+ * weapon-property module carries a WeaponOpticModifier (type d26efbcf) whose SightType
+ * (0xE5B5C7DB) - EOTech XPS3: 4 ShortRange, RenderFov 32 - is what the engine writes to
+ * fb.wep.sighttype.enumgs while aiming. The post-update program branches on it: iron
+ * sights take md.sight.main alone, anything else adds the optic's mount point
+ * (Wep_Scope_ATT.t). With the base weapon's IronSights left in place on an EOTech M4A1
+ * the mount's 88 mm dropped out and the optic sat above the eye.
+ * THE JOIN IS BY NAME: part bundle dpf_<name>_<hash>_bundle_1p -> module wpm_<slot>_<name>
+ * (the research attachment table confirms u_prg_m4a1_scp_xps3 -> wpm_scp_eotechxps3);
+ * the unlock's own module reference is not followed here.
+ * `bundles` is bf6_loadout_fitted_bundles' text. Returns the SightType, or -1. */
+int bf6_inspect_optic_sight_type(bf6_ctx* c, const char* bundles)
+{
+    if (!c || !bundles) return -1;
+    bf6ant::Graph g(c);
+    std::string text(bundles);
+    size_t p = 0;
+    while (p < text.size()) {
+        const size_t e = text.find('\n', p);
+        std::string b = text.substr(p, e == std::string::npos ? std::string::npos : e - p);
+        p = e == std::string::npos ? text.size() : e + 1;
+        if (b.rfind("dpf_", 0) != 0) continue;
+        const size_t tail = b.rfind("_bundle_1p");
+        if (tail == std::string::npos) continue;
+        b = b.substr(4, tail - 4);                       /* <name>_<hash> */
+        const size_t us = b.rfind('_');
+        if (us == std::string::npos) continue;
+        const std::string name = b.substr(0, us);
+        for (const char* slot : { "wpm_scp_", "wpm_sca_" }) {
+            const std::string want = std::string(slot) + name;
+            const int n = bf6_list_ebx(c, want.c_str(), nullptr, 0);
+            if (n <= 0) continue;
+            std::vector<bf6_asset> rows((size_t)n);
+            const int got = bf6_list_ebx(c, want.c_str(), rows.data(), n);
+            for (int i = 0; i < got; ++i) {
+                const std::string path = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+                const size_t s = path.find_last_of('/');
+                if ((s == std::string::npos ? path : path.substr(s + 1)) != want) continue;
+                const bf6ant::Obj* root = g.root(path);
+                if (!root) continue;
+                for (int k = 0; k < 256; ++k) {
+                    bf6::EbxValue ref; ref.kind = bf6::EbxValue::Kind::InstanceRef; ref.instance = k;
+                    const bf6ant::Obj* o = g.resolve(&ref, root);
+                    if (!o) break;
+                    if (o->type == "d26efbcf-aadd-7798-c455-a99811304738")
+                        if (const bf6::EbxValue* st = o->f(0xe5b5c7dbu)) return (int)ii_iv(st);
+                }
+            }
+        }
+    }
+    return -1;
 }
 
 /* ------------------------------------------------ the roll's phase ---- */

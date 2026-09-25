@@ -115,6 +115,11 @@ struct Runtime {
      * Empty means nothing has written it yet, and a reader then contributes nothing,
      * which is the same as the layer being absent. */
     std::map<std::string, Pose> pose_states;
+    /* EVERY STATE-FLOW NODE ACTIVE RIGHT NOW, nested ones included, keyed by the node
+     * object (a node can be destroyed mid-life by a collapsing transition, which erases
+     * it too). Read by bf6_ant_runtime_node_active: the caller's own action has to end
+     * when the graph's does, and the top node alone cannot say that. */
+    std::map<const void*, std::string> active_nodes;
     /* VECTOR3 AND QUATERNION GAME STATES (x, y, z, w), keyed by state asset path.
      * States holds only bool/float/int; these are written by the EX scene ops
      * (1p.postupdate.expsop writes 1p.weproot.zoompose.vec3) and by the caller, and
@@ -248,6 +253,20 @@ struct ClipCtrl : Ctrl {
     void sample_at(Runtime& rt, float anim_frames, Pose& out) {
         out = rt.bind;
         if (!src) return;
+        /* BF6_ANT_MUTE=<substring>: a matching clip samples nothing valid (diagnostic;
+         * an additive then adds nothing, a pose leaves its layer to what is under it). */
+        static const bool first_log = std::getenv("BF6_ANT_FIRSTCLIP") != nullptr;
+        if (first_log && asset) {
+            static std::set<std::string> seen;
+            if (seen.insert(asset->path).second)
+                std::fprintf(stderr, "first sample %s\n", asset->path.c_str());
+        }
+        static const char* mute = std::getenv("BF6_ANT_MUTE");
+        if (mute && *mute && asset && asset->path.find(mute) != std::string::npos) {
+            std::fill(out.vq.begin(), out.vq.end(), 0);
+            std::fill(out.vt.begin(), out.vt.end(), 0);
+            return;
+        }
         float ft = anim_frames + anim_first;
         if (!cyclic) ft = std::fmin(std::fmax(ft, 0.f), (float)anim_last);
         src->sample(rt.c, ft, cyclic, out);
@@ -908,6 +927,13 @@ std::string cdb_lookup(Runtime& rt, const Obj* cdb_asset)
         std::string hx; for (uint8_t b : v) { char t[4]; std::snprintf(t, sizeof t, "%02x", b); hx += t; }
         std::fprintf(stderr, "ant lookup %s -> %d %s  values %s\n", cdb_asset->path.c_str(), pick,
                      e ? e : "(none)", hx.c_str());
+        /* BF6_ANT_TRACE_KEYS=1: the states the key is built from, with their byte offsets */
+        static const bool keys = std::getenv("BF6_ANT_TRACE_KEYS") != nullptr;
+        if (keys)
+            for (const auto& row : x->asset_rows)
+                if (row.descriptor >= 0 && row.descriptor < (int)x->keys.size())
+                    std::fprintf(stderr, "    key @%d class %d: %s\n", (int)x->keys[(size_t)row.descriptor].value_offset,
+                                 (int)x->keys[(size_t)row.descriptor].key_class, row.state.c_str());
     }
     return e ? std::string(e) : std::string();
 }
@@ -1182,6 +1208,8 @@ struct SuperLayersCtrl : Ctrl {
         bool mask_lost = false;
         /* The PoseAssetGS this layer publishes its composed pose into, if any. */
         std::string publish;
+        /* ...and the one it publishes what it adds into (see init) */
+        std::string publish_add;
     };
     std::unique_ptr<Ctrl> base;
     const Obj* cur_base = nullptr;
@@ -1232,11 +1260,19 @@ struct SuperLayersCtrl : Ctrl {
         for (auto& L : layers) if (L.e) {
             if ((int)numv(L.e->f(0x787a258eu)) >= 2 && (int)numv(L.e->f(0x787a258eu)) <= 3)
                 rt.note("ModelSpace layer blend (never ships) not implemented: " + a->path);
-            /* WHERE THIS LAYER'S POSE IS PUBLISHED, if it publishes one. The target is
-             * a PoseAssetGS, a pose held in a game state, so another layer can name it
-             * as its controller and use this layer's result. */
-            if (const Obj* ps = rt.g.resolve(L.e->f(0x899b420cu), L.e))
-                L.publish = ps->path;
+            /* WHERE THIS LAYER'S POSE IS PUBLISHED. The targets are PoseAssetGS slots, a
+             * pose held in a game state, so another layer can name one as its controller.
+             * A layer entry has TWO: 0xB33E6CAF takes the pose as the layer produced it,
+             * and 0x899B420C takes what the layer ADDS to the pose beneath it. Every
+             * 0x899B420C slot in the 1p graph is read by an ADDITIVE layer and every
+             * 0xB33E6CAF slot by a blend layer (1p.transition.additive / .blend,
+             * wep.poselayer.targetpose.additive / plain, adtv.lao / normal.lao), and the
+             * publishing layers run at weight 0.01, so they capture without posing.
+             * Writing the whole pose into the additive slot added the stance pose onto
+             * itself for the length of every stance transition: the rifle swung 200 mm
+             * forward and 110 mm down, the support hand off the grip (render_walk crouch). */
+            if (const Obj* ps = rt.g.resolve(L.e->f(0x899b420cu), L.e)) L.publish_add = ps->path;
+            if (const Obj* ps = rt.g.resolve(L.e->f(0xb33e6cafu), L.e)) L.publish = ps->path;
         }
     }
     void refresh_base(Runtime& rt) {
@@ -1244,6 +1280,14 @@ struct SuperLayersCtrl : Ctrl {
         if (!b || b == cur_base) return;
         auto nc = rt.make(b);
         if (!nc) return;
+        static const char* why_base = std::getenv("BF6_ANT_WHY_BASE");
+        if (why_base && *why_base && asset->path.find(why_base) != std::string::npos) {
+            std::fprintf(stderr, "base %s <- %s additive %d\n", asset->path.c_str(), b->path.c_str(), nc->is_additive() ? 1 : 0);
+            for (size_t li = 0; li < layers.size(); ++li) if (layers[li].e) {
+                const Obj* lc = rt.g.resolve(layers[li].e->f(0x81309ef7u), layers[li].e);
+                std::fprintf(stderr, "  layer %zu mode %d: %s\n", li, (int)numv(layers[li].e->f(0x787a258eu)), lc ? lc->path.c_str() : "empty");
+            }
+        }
         if (!base) base = std::move(nc);
         else {
             rt.note("super-layers base crossfade curve not read (linear over +0x78 ticks)");
@@ -1383,10 +1427,48 @@ struct SuperLayersCtrl : Ctrl {
                 ++k;
             }
             /* PUBLISH BEFORE MASKING AND WEIGHTING. What a reader wants is this
-             * layer's own result, not the composite it happens to contribute to, so the
-             * pose stored is `lp` as the layer produced it. A layer that produced
-             * nothing this frame leaves whatever was there. */
-            if (!L.publish.empty() && have) rt.pose_states[L.publish] = lp;
+             * layer's own result, not the composite it happens to contribute to. The pose
+             * slot gets it as a pose and the additive slot as a delta over `out`, the
+             * composite beneath this layer - in pose_add's convention, q = under * d and
+             * t = under + d, so d = inverse(under) * q and d = t - under. A slot `out` has
+             * not posed stays invalid in the delta: there is nothing it is relative to.
+             * A layer that produced nothing this frame leaves whatever was there. */
+            if (have && (!L.publish.empty() || !L.publish_add.empty())) {
+                const bool lp_delta = L.inst.front().ctrl && L.inst.front().ctrl->is_additive();
+                if (!L.publish.empty()) {
+                    if (!lp_delta) rt.pose_states[L.publish] = lp;
+                    else { Pose full = out; pose_add(full, lp, 1.f, nullptr); rt.pose_states[L.publish] = full; }
+                }
+                if (!L.publish_add.empty()) {
+                    Pose d = lp;
+                    if (!lp_delta) {
+                        for (size_t i = 0; i < d.q.size(); ++i) {
+                            const bool uq = i < out.vq.size() && out.vq[i], ut = i < out.vt.size() && out.vt[i];
+                            if (d.vq[i] && uq) {
+                                const float inv[4] = { -out.q[i][0], -out.q[i][1], -out.q[i][2], out.q[i][3] };
+                                float r[4];
+                                qmul(inv, lp.q[i].data(), r);
+                                qnorm(r);
+                                for (int c = 0; c < 4; ++c) d.q[i][(size_t)c] = r[c];
+                            } else d.vq[i] = 0;
+                            if (d.vt[i] && ut) for (int c = 0; c < 3; ++c) d.t[i][(size_t)c] = lp.t[i][(size_t)c] - out.t[i][(size_t)c];
+                            else d.vt[i] = 0;
+                        }
+                    }
+                    rt.pose_states[L.publish_add] = d;
+                    /* BF6_ANT_WHY_PUB=<slot part>: the delta's largest rotation and translation */
+                    static const char* why_pub = std::getenv("BF6_ANT_WHY_PUB");
+                    if (why_pub && *why_pub && L.publish_add.find(why_pub) != std::string::npos) {
+                        float amax = 0.f, tmax = 0.f; int nq = 0, nt = 0;
+                        for (size_t i = 0; i < d.q.size(); ++i) {
+                            if (d.vq[i]) { ++nq; amax = std::fmax(amax, 2.f * std::acos(std::fmin(1.f, std::fabs(d.q[i][3])))); }
+                            if (d.vt[i]) { ++nt; tmax = std::fmax(tmax, std::sqrt(d.t[i][0]*d.t[i][0] + d.t[i][1]*d.t[i][1] + d.t[i][2]*d.t[i][2])); }
+                        }
+                        std::fprintf(stderr, "pub %s W %.2f: %d rot max %.1f deg, %d tr max %.3f m\n",
+                                     L.publish_add.c_str(), L.W, nq, amax * 57.29578f, nt, tmax);
+                    }
+                }
+            }
             if (!have || std::fabs(L.W) <= kLayerEps) continue;
             /* A NAMED MASK THAT COULD NOT BE BUILT MEANS SILENCE, not the whole body.
              * Applying it unmasked replaces every bone the base posed, and measured
@@ -1452,6 +1534,13 @@ constexpr const char* kT_FloatGSTag  = "5c1a1e07-cace-7afd-6783-3c465c98eece";
  * reset on leave) - and a quantized float tag (FloatGameStateQuantizedTagAsset). Only
  * the integer tag's Set mode is applied; any other mode is reported, not invented. */
 constexpr const char* kT_IntGSTag    = "62522924-6863-02e4-6083-44886580a324";
+/* BoolChannelTagAsset (AnimationMotionMachine 0x6F91C773, named in the research type
+ * corpus): the bool tag's exact field layout - state 0x6B01E323, value 0x8CF424E7,
+ * ResetOnLeave 0xFEAC4B79, mode 0xC755B26C - writing a channel rather than a game state,
+ * which this store keeps by path the same way. 1p.ubo.reload.node carries one holding
+ * wep.isreloading.bool true while the graph reloads; unapplied, nothing could tell
+ * when the graph's reload was over. */
+constexpr const char* kT_BoolChTag   = "23087ea0-cc72-82f7-68ff-69c6761b49a7";
 constexpr const char* kT_FloatQGSTag = "1ff34e08-82a0-8b6e-8853-1e3f04b8cea1";
 constexpr float kHuge = 3.4028235e38f;   /* DAT_149319c64, the "never ends" tag window end */
 
@@ -1478,8 +1567,8 @@ struct TagSet {
              * quantized kinds were applied - to attribute a pose change to them. */
             static const bool legacy = std::getenv("BF6_ANT_TAGS_LEGACY") != nullptr;
             if (legacy && (a->type == kT_IntGSTag || a->type == kT_FloatQGSTag)) continue;
-            if (a->type != kT_BoolGSTag && a->type != kT_FloatGSTag && a->type != kT_IntGSTag &&
-                a->type != kT_FloatQGSTag) {
+            if (a->type != kT_BoolGSTag && a->type != kT_BoolChTag && a->type != kT_FloatGSTag &&
+                a->type != kT_IntGSTag && a->type != kT_FloatQGSTag) {
                 rt.note("tag kind not implemented: " + a->type + " (" + a->path + ")");
                 continue;
             }
@@ -1656,6 +1745,8 @@ struct NodeCtrl : Ctrl {
     float node_time = 0.f;                /* +0xa8 */
     bool first_pending = true;            /* +0xb2 */
     bool active = false;                  /* +0xb3 / +0xb4 */
+    Runtime* registry = nullptr;          /* where enter() listed this node as active */
+    ~NodeCtrl() override { if (registry) registry->active_nodes.erase(this); }
     std::vector<Entry> entries;           /* 0xfa9c5e77 */
     std::vector<const Obj*> watched;      /* 0x438ebff1 */
     std::vector<const Obj*> branches;     /* 0x8e477845 */
@@ -1822,6 +1913,8 @@ void NodeCtrl::init(Runtime& rt, StateFlowCtrl* owner, const Obj* a)
 void NodeCtrl::enter(Runtime& rt)
 {
     active = true;
+    registry = &rt;
+    rt.active_nodes[this] = asset ? asset->path : std::string();
     const bf6::EbxValue* set = asset->f(0xb80c39a4u);
     const bf6::EbxValue* cnt = asset->f(0x4a482187u);
     const size_t n = cnt ? cnt->items.size() : 0;
@@ -1836,6 +1929,7 @@ void NodeCtrl::exit(Runtime& rt)
 {
     if (!active) return;
     active = false;
+    rt.active_nodes.erase(this);
     const bf6::EbxValue* set = asset->f(0xb80c39a4u);
     const bf6::EbxValue* cnt = asset->f(0x4a482187u);
     const size_t n = cnt ? cnt->items.size() : 0;
@@ -2003,6 +2097,12 @@ float NodeCtrl::time_to_transition(Runtime& rt, float dt)
              * with it the 68 machines that wait on a transition. */
             if (e.gate != 0xff) rt.note("gated transition (gate manager) not implemented: " + asset->path);
             else { timing(rt, i, leaf, tNow, rem, len, dt, window, slots); r = i; }
+            /* BF6_ANT_WHY_TIMING=<node path part>: why a passing entry does or does not fire */
+            static const char* why_t = std::getenv("BF6_ANT_WHY_TIMING");
+            if (why_t && *why_t && asset->path.find(why_t) != std::string::npos && e.gate == 0xff)
+                std::fprintf(stderr, "timing %s entry %d mode %d window %g rem %g node_rem %g t %g len %g leaf %s\n",
+                             asset->path.c_str(), i, e.timing, window[(size_t)i], rem, remaining, tNow, len,
+                             leaf && leaf->asset ? leaf->asset->path.c_str() : "(none)");
         }
         if (r != 0xff && window[(size_t)i] < best) {
             best = window[(size_t)i]; result = r;
@@ -3883,6 +3983,23 @@ void bf6_ant_runtime_set_int(bf6_ant_runtime* r, const char* s, int32_t v)
  * translation. A quaternion rather than the 3x4 rows the pose OUTPUT uses, so a
  * caller on the other side of the boundary has no matrix convention to get wrong.
  * Null or a bone count of 0 clears it. */
+/* The caller's composite skeleton before this step, 7 floats a bone (quaternion,
+ * translation), for the scene ops' pose arena only - the graph never reads it. */
+void bf6_ant_runtime_set_underneath(bf6_ant_runtime* r, const float* qt, int bones)
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h || !h->ex) return;
+    if (!qt || bones <= 0) { h->ex->have_underneath = false; return; }
+    h->ex->underneath = h->rt->bind;
+    const int n = (int)h->rt->bind.q.size();
+    for (int i = 0; i < n && i < bones; ++i) {
+        const float* v = qt + (size_t)i * 7;
+        h->ex->underneath.q[(size_t)i] = { v[0], v[1], v[2], v[3] };
+        h->ex->underneath.t[(size_t)i] = { v[4], v[5], v[6] };
+    }
+    h->ex->have_underneath = true;
+}
+
 void bf6_ant_runtime_set_parent_pose(bf6_ant_runtime* r, const float* qt, int bones)
 {
     auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
@@ -4012,6 +4129,13 @@ int bf6_ant_runtime_set_ex(bf6_ant_runtime* r, const char* pre, const char* post
      *                            is not yet read from the executable. */
     h->rt->st.set_float("animations/glacier/global/gamestates/fb.fovscalefactor.float", 1.f);
     ex.errors.push_back("stand-in: fb.fovscalefactor.float = 1 (engine formula not yet read)");
+    /*   fb.wep.zoomoutspeed.float  engine channel 0xC47E6772, named and valued nowhere in the
+     *                              data; its zoom-in twin is ZoomScaleFactor (0x983BC2E4), 1.0
+     *                              from the weapon's record. At 0 the post-update program's
+     *                              IncDecNormal divides by it and leaving ADS snapped in one
+     *                              frame. The same 1.0 scale - ours. */
+    h->rt->st.set_float("animations/common/fb.wep.zoomoutspeed.float", 1.f);
+    ex.errors.push_back("stand-in: fb.wep.zoomoutspeed.float = 1 (engine channel 0xC47E6772 unvalued in data)");
     AntExOps* exp = h->ex.get();
     bf6ant::Runtime* rtp = h->rt.get();
     h->rt->clip_expression = [exp, rtp](const bf6ant::Obj* program, const bf6ant::Pose& pose) {
@@ -4181,6 +4305,17 @@ int bf6_ant_runtime_node(const bf6_ant_runtime* r, char* out, int out_len)
         if (sf->node && sf->node->asset) s = sf->node->asset->path;
     if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
     return (int)s.size() + 1;
+}
+
+/* 1 when a state-flow node whose path contains `part` is active anywhere in the graph,
+ * nested machines included; 0 when none is; -1 without a runtime. */
+int bf6_ant_runtime_node_active(const bf6_ant_runtime* r, const char* part)
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    if (!h || !h->rt || !part || !*part) return -1;
+    for (const auto& kv : h->rt->active_nodes)
+        if (kv.second.find(part) != std::string::npos) return 1;
+    return 0;
 }
 
 int bf6_ant_runtime_finished(const bf6_ant_runtime* r)

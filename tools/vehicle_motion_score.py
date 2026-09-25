@@ -80,12 +80,29 @@ def score(veh, data):
         (bones_ok if (b["rot_deg"] > 0.05 or b["move_m"] > 1e-4) else bones_still).append(b["bone"])
     orphans = sorted(n for n in rep["rig"]
                      if MOVING.search(n) and not STATIC.search(n) and n not in bound_rig)
-    solved = len(inputs_ok) + len(bones_ok)
+    # CARRIED: an orphan rigidly attached under a bone that moved (a rotor blade under
+    # its hub, a gear link under its leg) moves exactly as its parent does, so it is
+    # solved - but counted in its own column, never folded into the bone count.
+    parents = rep.get("rig_parent", [])
+    index = {n: i for i, n in enumerate(rep["rig"])}
+    moved = {index[n] for n in bones_ok if n in index}
+    def carried_by_ancestor(n):
+        i = index.get(n, -1)
+        seen = 0
+        while 0 <= i < len(parents) and seen < 512:
+            i = parents[i]
+            seen += 1
+            if i in moved:
+                return True
+        return False
+    carried = [n for n in orphans if carried_by_ancestor(n)]
+    orphans = [n for n in orphans if n not in set(carried)]
+    solved = len(inputs_ok) + len(bones_ok) + len(carried)
     total = solved + len(inputs_missing) + len(bones_still) + len(bones_unmapped) + len(orphans)
     return {"veh": veh, "graphs": [g.rsplit("/", 1)[-1] for g in rep["graphs"]],
             "inputs_ok": inputs_ok, "inputs_missing": inputs_missing,
             "bones_ok": sorted(bones_ok), "bones_still": sorted(bones_still),
-            "bones_unmapped": sorted(bones_unmapped), "orphans": orphans,
+            "bones_unmapped": sorted(bones_unmapped), "orphans": orphans, "carried": sorted(carried),
             "parts_unsupplied": rep["parts_unsupplied"], "solved": solved, "total": total}
 
 
@@ -106,15 +123,16 @@ def main():
              "**%d / %d motion pieces solved** across %d vehicles "
              "(inputs supplied + bones that move, over inputs + bound bones + orphan parts)." %
              (solved, total, len(rows)), "",
-             "| Vehicle | Solved | Inputs ok/missing | Bones moved/still/unmapped | Orphan parts |",
-             "|---|---|---|---|---|"]
+             "| Vehicle | Solved | Inputs ok/missing | Bones moved/still/unmapped | Carried | Orphan parts |",
+             "|---|---|---|---|---|---|"]
     for r in rows:
         if "error" in r:
             lines.append("| %s | refused | %s | | |" % (r["veh"], r["error"][:80].replace("|", "/")))
             continue
-        lines.append("| %s | %d/%d | %d/%d | %d/%d/%d | %d |" % (
+        lines.append("| %s | %d/%d | %d/%d | %d/%d/%d | %d | %d |" % (
             r["veh"], r["solved"], r["total"], len(r["inputs_ok"]), len(r["inputs_missing"]),
-            len(r["bones_ok"]), len(r["bones_still"]), len(r["bones_unmapped"]), len(r["orphans"])))
+            len(r["bones_ok"]), len(r["bones_still"]), len(r["bones_unmapped"]), len(r["carried"]),
+            len(r["orphans"])))
     lines += ["", "## Unsolved, per vehicle", ""]
     for r in rows:
         if "error" in r:
@@ -129,7 +147,8 @@ def main():
         f.write("\n".join(lines))
     with open(os.path.join(a.out, "scoreboard.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=1)
-    print("MOTION SCORE %d / %d" % (solved, total))
+    print("MOTION SCORE %d / %d  (of which carried %d)" % (solved, total,
+          sum(len(r.get("carried", [])) for r in rows)))
     for r in rows:
         print("  %-24s %s" % (r["veh"], "refused: " + r["error"][:90] if "error" in r
                                         else "%d/%d" % (r["solved"], r["total"])))

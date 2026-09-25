@@ -9,6 +9,7 @@
  * cyclic pitch, roll, then both reversed, 1 s each. */
 #include "bf6_core.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -68,6 +69,9 @@ int main(int argc, char** argv) {
             case 10: pitch = -0.5f; roll = -0.5f; break;
             default: break;
         }
+        /* the driver's aim sweeps the turret: +-1 rad of yaw, +-0.15 rad of pitch */
+        const float t = (float)step / 60.0f;
+        bf6_vehicle_set_aim(v, std::sin(t * 0.8f), 0.15f * std::sin(t * 1.3f));
         bf6_vehicle_set_cyclic(v, pitch, roll);
         bf6_vehicle_set_boost(v, boost);
         bf6_vehicle_step(v, in, out);

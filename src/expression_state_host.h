@@ -279,6 +279,10 @@ public:
     struct FrameRead { uint64_t key; uint32_t frame, path, kind, field; };
     const std::vector<FrameRead>& unseeded_frame_reads() const { return unseeded_frame_reads_; }
     void clear_unseeded_frame_reads() { unseeded_frame_reads_.clear(); }
+    /* Every graph starts at the entity's root: an empty frame stack. Pushes a graph did
+     * not pop must not leak into the next graph, where they re-key its root-level state
+     * (a derived graph's reads landed on the simex's last pushed frame). */
+    void reset_frames() { frames_.clear(); }
     void set_cell_raw(uint64_t key, uint32_t value) { cells_[key] = value; }
 
 private:

@@ -3253,6 +3253,11 @@ BF6_API void bf6_vehicle_set_cyclic(bf6_vehicle*, float pitch, float roll);
 /* Vehicle boost: the Boolean InputSprint channel (true when boost > 0.5). The Godot binding
  * takes it as an optional ninth step float and sends false for older callers. */
 BF6_API void bf6_vehicle_set_boost(bf6_vehicle*, float boost);
+/* THE DRIVER'S AIM, radians relative to the hull: the Aim_Driver_Yaw / Aim_Driver_Pitch
+ * channels a vehicle's derived graph turns into turret yaw and gun pitch (the CV90's
+ * derivedex_tank_cv90 rotates "Turret Yaw" by -yaw about Y and "Turret Pitch" by pitch
+ * about X). Zero, the default, is the turret straight ahead. */
+BF6_API void bf6_vehicle_set_aim(bf6_vehicle*, float yaw, float pitch);
 /* Presentation-graph bone writes from the most recent step. Each transform is
  * the absolute local Frostbite LinearTransform: right/up/forward/translation
  * rows at float offsets 0/4/8/12. The name is the authored skeleton bone name. */

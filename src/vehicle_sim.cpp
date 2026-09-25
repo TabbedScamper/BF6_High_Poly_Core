@@ -25,8 +25,14 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
     bone_identity_.clear();
     presented_bones_.clear();
     host_set_.clear();
+    host_values_.clear();
+    primary_written_.clear();
+    primary_written_ready_ = false;
+    frame_ids_.clear();
+    frame_ids_taken_.clear();
     bone_binds_.clear();
     rig_names_.clear();
+    rig_parents_.clear();
     motion_.clear();
     state_.set_allow_writes(true);
     physics_.set_tracer(tracer, tracer_user);
@@ -135,9 +141,66 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             }
         }
         /* Relocated pointers (e.g. a PUSH's feature-path pointer) get their pool
-         * target, so each pushed feature has its own state identity. */
-        for (const auto& rl : g->graph.relocations)
-            g->inst.pool_patches[rl.pointer_field] = rl.target;
+         * target, so each pushed feature has its own state identity.
+         *
+         * ONE IDENTITY PER FEATURE ACROSS THE VEHICLE'S GRAPHS. The engine keeps
+         * state per entity and feature; a derived graph (derivedex_*) reads the
+         * drivetrain's replicated state and republishes it as channels. Keyed by
+         * each graph's own pool offset, the F-16's derived graph pushed its control
+         * surface feature under a different frame from the simex that wrote it, read
+         * nothing, and wrote zeros over the elevators and rudder. A feature path now
+         * keeps the id the first graph (the simex) gave it; a path new to a later
+         * graph keeps its own offset unless another path already owns that id. */
+        /* AN INSTANCE IS A PATH AND ITS OCCURRENCE. One graph holds a path once per
+         * instance - simex_sub_carwheel four times, one per wheel, each its own state -
+         * so the shared key is (path, the rank of this copy's pool offset among that
+         * path's copies in this graph). The k-th wheel of the derived graph meets the
+         * k-th wheel of the simex; the four wheels stay four. */
+        std::map<std::string, std::vector<uint32_t>> copies;
+        auto path_at = [&](uint32_t target) {
+            const auto& pool = g->graph.constant_pool;
+            std::string path;
+            if (target < pool.size()) {
+                size_t end = target;
+                while (end < pool.size() && pool[end] >= 32 && pool[end] < 127) ++end;
+                path.assign((const char*)pool.data() + target, end - target);
+                for (char& ch : path) ch = (char)std::tolower((unsigned char)ch);
+            }
+            return path;
+        };
+        for (const auto& rl : g->graph.relocations) {
+            const std::string p = path_at(rl.target);
+            if (p.size() < 4) continue;
+            auto& v = copies[p];
+            if (std::find(v.begin(), v.end(), rl.target) == v.end()) v.push_back(rl.target);
+        }
+        for (auto& kv : copies) std::sort(kv.second.begin(), kv.second.end());
+        for (const auto& rl : g->graph.relocations) {
+            uint32_t id = rl.target;
+            {
+                const std::string base = path_at(rl.target);
+                if (base.size() >= 4) {
+                    const auto& v = copies[base];
+                    const size_t rank = (size_t)(std::find(v.begin(), v.end(), rl.target) - v.begin());
+                    const std::string path = base + "#" + std::to_string(rank);
+                    const auto known = frame_ids_.find(path);
+                    if (known != frame_ids_.end()) {
+                        id = known->second;
+                        if (std::getenv("BF6_FRAME_IDS"))
+                            std::fprintf(stderr, "frame %04X shared by %s: %s (own offset %X)\n", id,
+                                         name.substr(name.rfind('/') + 1).c_str(), path.c_str(), rl.target);
+                    } else {
+                        if (frame_ids_taken_.count(id)) {
+                            id = 0xF000u;
+                            while (frame_ids_taken_.count(id)) ++id;
+                        }
+                        frame_ids_[path] = id;
+                        frame_ids_taken_.insert(id);
+                    }
+                }
+            }
+            g->inst.pool_patches[rl.pointer_field] = id;
+        }
         /* Typed-copy sizes from the executable's reflection. */
         for (const auto& grp : g->graph.slot_values) {
             auto it = type_size_cache.find(grp.data_type_id);
@@ -217,7 +280,10 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
         for (int i = 0; i < nc && i < 1024; ++i) bone_of[hs[(size_t)i]] = bs[(size_t)i];
         if (sk) {
             for (int32_t index = 0; index < sk->bone_count; ++index)
+            {
                 rig_names_.push_back(sk->bones[index].name ? sk->bones[index].name : "");
+                rig_parents_.push_back(sk->bones[index].parent);
+            }
             for (int32_t index = 0; index < sk->bone_count; ++index) {
                 const float* m = sk->bones[index].model;
                 const float* l = sk->bones[index].local;
@@ -254,6 +320,7 @@ bool VehicleSim::set_float(const std::string& channel, float v, uint32_t mode) {
     std::vector<uint8_t> b(4);
     std::memcpy(b.data(), &v, 4);
     state_.set_channel(h, b, mode);
+    host_values_[{h, mode}] = b;
     return true;
 }
 
@@ -262,6 +329,7 @@ bool VehicleSim::set_bool(const std::string& channel, bool v) {
     if (!hash_of(channel, h)) return false;
     host_set_.insert(channel);
     state_.set_channel(h, std::vector<uint8_t>(1, (uint8_t)(v ? 1 : 0)));
+    host_values_[{h, 0u}] = std::vector<uint8_t>(1, (uint8_t)(v ? 1 : 0));
     return true;
 }
 
@@ -272,6 +340,7 @@ bool VehicleSim::set_int(const std::string& channel, int32_t v) {
     std::vector<uint8_t> b(4);
     std::memcpy(b.data(), &v, 4);
     state_.set_channel(h, b);
+    host_values_[{h, 0u}] = b;
     return true;
 }
 
@@ -282,6 +351,7 @@ bool VehicleSim::set_vec3(const std::string& channel, const float v[3], uint32_t
     std::vector<uint8_t> b(16, 0);
     std::memcpy(b.data(), v, 12);
     state_.set_channel(h, b, mode);
+    host_values_[{h, mode}] = b;
     return true;
 }
 
@@ -619,6 +689,9 @@ void VehicleSim::tick() {
     state_.begin_bone_tick();
     for (auto& g : graphs_) {
         g->inst.trace.clear();
+        if (std::getenv("BF6_FRAME_LEAK") && state_.frame_depth())
+            std::fprintf(stderr, "frame stack depth %d leaked into %s\n", state_.frame_depth(), g->name.c_str());
+        if (!std::getenv("BF6_KEEP_FRAMES")) state_.reset_frames();
         expression::ChainHost chain;
         chain.add(&g->builtins);
         chain.add(&g->pure);
@@ -628,6 +701,34 @@ void VehicleSim::tick() {
         chain.add(&physics_);
         chain.add(&state_);
         const auto r = expression::evaluate(g->graph, &g->inst, {}, &chain);
+        /* THE HOST PLAYS THE NATIVE SIDE. A derived graph republishes native part state
+         * (an aircraft's control-surface part becomes Flap_Elevator, its gear wheels the
+         * wheel speeds); where this host supplies such a channel itself, the channel is
+         * what the part holds, so the derived graph's copy - read from part cells the
+         * host does not keep - must not replace it. */
+        if (g->name.find("/derivedex_") != std::string::npos) {
+            if (!primary_written_ready_) {
+                /* channels a non-derived graph writes: graph outputs, never restored */
+                static const uint32_t kSetOps[] = {0x6D86C436u, 0xC491CD96u, 0xCC162A96u, 0x95954635u};
+                for (const auto& og : graphs_) {
+                    if (og->name.find("/derivedex_") != std::string::npos) continue;
+                    std::map<uint32_t, uint32_t> hash_at;
+                    for (const auto& b : og->binds)
+                        if (b.region == 0 && b.kind != 2) hash_at[b.pool_offset] = b.channel_hash;
+                    for (const auto& rec : og->graph.records) {
+                        bool is_set = false;
+                        for (uint32_t k : kSetOps) is_set = is_set || (rec.has_operator && rec.operator_key == k);
+                        if (!is_set || rec.operands.empty() || rec.operands[0].region != 0) continue;
+                        const auto it = hash_at.find(rec.operands[0].offset);
+                        if (it != hash_at.end()) primary_written_.insert(it->second);
+                    }
+                }
+                primary_written_ready_ = true;
+            }
+            for (const auto& hv : host_values_)
+                if (!primary_written_.count(hv.first.first))
+                    state_.set_channel(hv.first.first, hv.second, hv.first.second);
+        }
         /* BF6_SLOT_WATCH=hex,hex: every write this run to those slots of the
          * drivetrain graph, with the value and the writing record. */
         if (const char* at = std::getenv("BF6_RAN_AT"))
@@ -1005,6 +1106,8 @@ std::string VehicleSim::motion_json() const {
     o += "],\"parts_unsupplied\":" + std::to_string(state_.unsupplied_parts().size());
     o += ",\"rig\":[";
     for (size_t i = 0; i < rig_names_.size(); ++i) o += (i ? "," : "") + esc(rig_names_[i]);
+    o += "],\"rig_parent\":[";
+    for (size_t i = 0; i < rig_parents_.size(); ++i) o += (i ? "," : "") + std::to_string(rig_parents_[i]);
     o += "],\"bones\":[";
     first = true;
     for (const auto& kv : bone_binds_) {

@@ -147,6 +147,9 @@ private:
     bool hash_of(const std::string& name, uint32_t& h) const;
     std::vector<std::unique_ptr<G>> graphs_;
     std::map<std::string, uint32_t> channel_hash_;
+    /* feature path -> the state frame id every graph of this vehicle uses for it */
+    std::map<std::string, uint32_t> frame_ids_;
+    std::set<uint32_t> frame_ids_taken_;
     expression::StateHost state_;
     expression::PhysicsQueryHost physics_;
     expression::RecoveredOps recovered_;
@@ -157,8 +160,12 @@ private:
     std::vector<PresentedBone> presented_bones_;
     /* motion scoreboard (motion_json) */
     std::set<std::string> host_set_;
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<uint8_t>> host_values_;   /* (hash, mode) */
+    std::set<uint32_t> primary_written_;   /* channels a non-derived graph writes */
+    bool primary_written_ready_ = false;
     std::map<uint32_t, std::string> bone_binds_;
     std::vector<std::string> rig_names_;
+    std::vector<int32_t> rig_parents_;
     struct MotionTrack { std::array<float, 16> first{}; float rot_deg = 0, move_m = 0; uint32_t writes = 0; };
     std::map<uint32_t, MotionTrack> motion_;
     std::string wheel_err_;

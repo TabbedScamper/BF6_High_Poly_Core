@@ -247,7 +247,10 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
                             end - rel.target);
             for (char& ch : ref) ch = (char)std::tolower((unsigned char)ch);
             if (ref.find("/simex_sub_boost]]") != std::string::npos) {
-                boost_frame = rel.target;
+                /* the frame id the loader gave this path (shared across graphs) */
+                uint32_t patched = rel.target;
+                sim.pool_patch(name, rel.pointer_field, patched);
+                boost_frame = patched;
                 break;
             }
         }

@@ -33,6 +33,7 @@ struct bf6_vehicle {
      * control input to compare it against. Out of band rather than a seventh element of
      * `in`, because the Godot binding only guarantees six and would read past its buffer. */
     float cyclic_pitch = 0.0f, cyclic_roll = 0.0f;
+    float aim_yaw = 0.0f, aim_pitch = 0.0f;   /* bf6_vehicle_set_aim */
     bool boost = false;
     double time = 0.0;
     std::string name;
@@ -348,6 +349,25 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * F-16/JAS-39 control surfaces or gear entirely. */
     std::vector<std::string> graphs;
     if (!presentation_only) graphs.push_back(simex);
+    /* THE DERIVED GRAPHS. Every vehicle folder ships derivedex_<class>_<vehicle> and
+     * some ship more (derivedex_ptv_pedals, the Gepard's radar, the MH-47 ramp, turret
+     * motion): graphs that derive channels from the drivetrain's for the presentation to
+     * read, so they run after the simex and before the presex. BF6_NO_DERIVED leaves
+     * them out, to compare. */
+    if (!std::getenv("BF6_NO_DERIVED")) {
+        const std::string pre = gdir + "/derivedex_";
+        const int n = bf6_list_res(c, pre.c_str(), nullptr, 0);
+        std::vector<bf6_asset> rows((size_t)std::max(n, 0));
+        const int got = n > 0 ? std::clamp(bf6_list_res(c, pre.c_str(), rows.data(), n), 0, n) : 0;
+        std::vector<std::string> derived;
+        for (int i = 0; i < got; ++i) {
+            const std::string name = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+            if (name.compare(0, pre.size(), pre) != 0 || name.find('/', pre.size()) != std::string::npos) continue;
+            if (std::find(derived.begin(), derived.end(), name) == derived.end()) derived.push_back(name);
+        }
+        std::sort(derived.begin(), derived.end());
+        graphs.insert(graphs.end(), derived.begin(), derived.end());
+    }
     if (gcls == "airplane") {
         const std::string aircraft[] = {
             gdir + "/presex_" + gveh + "_controlsurfaces",
@@ -483,6 +503,12 @@ void bf6_vehicle_set_cyclic(bf6_vehicle* v, float pitch, float roll) {
     v->cyclic_roll = roll;
 }
 
+void bf6_vehicle_set_aim(bf6_vehicle* v, float yaw, float pitch) {
+    if (!v) return;
+    v->aim_yaw = yaw;
+    v->aim_pitch = pitch;
+}
+
 void bf6_vehicle_set_boost(bf6_vehicle* v, float boost) {
     if (!v) return;
     v->boost = boost > 0.5f;
@@ -560,6 +586,8 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     s.set_float("Flap_Rudder", steer);
     s.set_bool("InputSprint", v->boost);
     s.set_float("InputPitch", v->cyclic_pitch);
+    s.set_float("Aim_Driver_Yaw", v->aim_yaw);
+    s.set_float("Aim_Driver_Pitch", v->aim_pitch);
     s.set_float("InputRoll", v->cyclic_roll);
     s.set_bool("Handbrake", handbrake);
     s.set_time(v->time);

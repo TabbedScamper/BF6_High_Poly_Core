@@ -238,6 +238,38 @@ int bf6_inspect_zoom_sight_types(bf6_ctx* c, const char* item, int32_t* out, int
     return n;
 }
 
+/* HOW LONG AIMING IN AND OUT TAKES. The weapon data names a zoom-transition table
+ * (0x6216FC77, common/hardware/common/arrays/zoomtransitions/azt_main_weapons: eight
+ * tiers aztt_main_weapons_t0..t7) and which tier it uses (0xAE4ADC54, index 0x2B6F2936,
+ * with a game-remixer tweakable beside it that is not applied here). A tier holds the
+ * aim-in time 0xA89997AD and the aim-out time 0x8939D1DD, 0.467/0.4 s at t0 down to
+ * 0.1/0.1 at t7; the M4A1 is t4, 0.217/0.2. */
+int bf6_inspect_zoom_transition(bf6_ctx* c, const char* item, float* in_s, float* out_s)
+{
+    if (!c || !item) return -1;
+    bf6ant::Graph g(c);
+    std::string why;
+    const bf6ant::Obj* data = bf6__weapon_data(c, item, g, why);
+    if (!data) return -1;
+    const bf6ant::Obj* table = g.resolve(data->f(0x6216fc77u), data);
+    const bf6::EbxValue* sel = data->f(0xae4adc54u);
+    if (!table || !sel) return -1;
+    const bf6::EbxValue* idx = sel->field(0x2b6f2936u);
+    const bf6::EbxValue* tiers = table->f(0xfc70457du);
+    if (!idx || !tiers) return -1;
+    const long i = idx->kind == bf6::EbxValue::Kind::Int ? (long)idx->i
+                 : idx->kind == bf6::EbxValue::Kind::Uint ? (long)idx->u : (long)idx->f;
+    if (i < 0 || (size_t)i >= tiers->items.size()) return -1;
+    const bf6ant::Obj* tier = g.resolve(&tiers->items[(size_t)i], table);
+    if (!tier) return -1;
+    auto real = [](const bf6::EbxValue* v) { return v && v->kind == bf6::EbxValue::Kind::Real ? (float)v->f : 0.f; };
+    const float a = real(tier->f(0xa89997adu)), b = real(tier->f(0x8939d1ddu));
+    if (a <= 0.f || b <= 0.f) return -1;
+    if (in_s) *in_s = a;
+    if (out_s) *out_s = b;
+    return (int)i;
+}
+
 /* THE ZOOM LEVEL'S WEAPON STATES, as the engine writes them. Each WeaponZoomLevelData
  * carries a struct (0xF2D603DE) of procedural-motion settings - pitch kick time 0.2 at
  * the hip and 0.01 aimed on the M4A1, push-back exponent, sway ... - and the soldier's

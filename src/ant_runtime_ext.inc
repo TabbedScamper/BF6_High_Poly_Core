@@ -1216,6 +1216,10 @@ struct SuperLayersCtrl : Ctrl {
     std::vector<Layer> layers;
     int sync = -1;
     bool first = true;
+    /* this frame's base pose, before any layer: what a capture of this controller's
+     * contribution is taken relative to (see the publish in update) */
+    Pose base_pose;
+    bool have_base_pose = false;
 
     static float curve(float r) {
         const float t = (1.f - r) * 20.f;
@@ -1329,6 +1333,8 @@ struct SuperLayersCtrl : Ctrl {
             collapse_finished(base);
         }
         else out = rt.bind;
+        base_pose = out;
+        have_base_pose = true;
         for (auto& L : layers) {
             if (!L.e) continue;
             const Obj* e = L.e;
@@ -1441,17 +1447,25 @@ struct SuperLayersCtrl : Ctrl {
                 }
                 if (!L.publish_add.empty()) {
                     Pose d = lp;
+                    /* BF6_ANT_CAPTURE_OWN=1 (experiment): take the delta relative to the
+                     * captured controller's OWN base when it is a super-layers, not `out`. */
+                    static const bool own = std::getenv("BF6_ANT_CAPTURE_OWN") != nullptr;
+                    const Pose* ref = &out;
+                    if (own)
+                        if (auto* sl = dynamic_cast<SuperLayersCtrl*>(L.inst.front().ctrl.get()))
+                            if (sl->have_base_pose && sl->base_pose.q.size() == out.q.size()) ref = &sl->base_pose;
+                    const Pose& under = *ref;
                     if (!lp_delta) {
                         for (size_t i = 0; i < d.q.size(); ++i) {
-                            const bool uq = i < out.vq.size() && out.vq[i], ut = i < out.vt.size() && out.vt[i];
+                            const bool uq = i < under.vq.size() && under.vq[i], ut = i < under.vt.size() && under.vt[i];
                             if (d.vq[i] && uq) {
-                                const float inv[4] = { -out.q[i][0], -out.q[i][1], -out.q[i][2], out.q[i][3] };
+                                const float inv[4] = { -under.q[i][0], -under.q[i][1], -under.q[i][2], under.q[i][3] };
                                 float r[4];
                                 qmul(inv, lp.q[i].data(), r);
                                 qnorm(r);
                                 for (int c = 0; c < 4; ++c) d.q[i][(size_t)c] = r[c];
                             } else d.vq[i] = 0;
-                            if (d.vt[i] && ut) for (int c = 0; c < 3; ++c) d.t[i][(size_t)c] = lp.t[i][(size_t)c] - out.t[i][(size_t)c];
+                            if (d.vt[i] && ut) for (int c = 0; c < 3; ++c) d.t[i][(size_t)c] = lp.t[i][(size_t)c] - under.t[i][(size_t)c];
                             else d.vt[i] = 0;
                         }
                     }
@@ -1572,6 +1586,13 @@ struct TagSet {
                 rt.note("tag kind not implemented: " + a->type + " (" + a->path + ")");
                 continue;
             }
+            /* BF6_ANT_WHO_WRITES=<state part>: every tag that writes a matching state */
+            static const char* who = std::getenv("BF6_ANT_WHO_WRITES");
+            if (who && *who)
+                if (const Obj* ws = rt.g.resolve(a->f(0x6b01e323u), a))
+                    if (ws->path.find(who) != std::string::npos)
+                        std::fprintf(stderr, "tag writes %s: %s (set %s)\n", ws->path.c_str(), a->path.c_str(),
+                                     set ? set->path.c_str() : "?");
             T t; t.a = a;
             t.is_float = a->type == kT_FloatGSTag || a->type == kT_FloatQGSTag;
             t.is_int = a->type == kT_IntGSTag;
@@ -3858,6 +3879,9 @@ struct AntRuntimeHandle {
     /* THE HANDS ON THE WEAPON (bf6_ant_runtime_set_hand_ik). Off by default, so every
      * existing caller gets the pose it always got. */
     bool hand_ik = false;
+    /* States the fitted weapon parts write (bf6_ant_runtime_own_states_text): the
+     * caller's per-frame setters leave them alone, as they do the scene ops' own. */
+    std::set<std::string> loadout_owned;
     float hand_ik_miss[2] = {0, 0};   /* each hand's distance to its marker before the solve */
     float hand_ik_after[2] = {0, 0};  /* and after it: 0 unless the marker was out of reach */
     /* THE SCENE OPS (bf6_ant_runtime_set_ex): null unless asked for. */
@@ -3970,6 +3994,7 @@ bf6_ant_runtime* bf6_ant_runtime_create(bf6_ctx* c, const char* root_asset, cons
  * overwrite the program's answer every frame; such writes are dropped. */
 static bool bf6__ex_owned(const AntRuntimeHandle* h, const char* s)
 {
+    if (h->loadout_owned.count(s)) return true;
     return h->ex && h->ex->host.owned.count(s) != 0;
 }
 void bf6_ant_runtime_set_bool(bf6_ant_runtime* r, const char* s, int v)
@@ -4135,7 +4160,7 @@ int bf6_ant_runtime_set_ex(bf6_ant_runtime* r, const char* pre, const char* post
      *                              IncDecNormal divides by it and leaving ADS snapped in one
      *                              frame. The same 1.0 scale - ours. */
     h->rt->st.set_float("animations/common/fb.wep.zoomoutspeed.float", 1.f);
-    ex.errors.push_back("stand-in: fb.wep.zoomoutspeed.float = 1 (engine channel 0xC47E6772 unvalued in data)");
+    ex.errors.push_back("stand-in: fb.wep.zoomoutspeed.float = 1 until the weapon's zoom-transition tier replaces it (fps_open)");
     AntExOps* exp = h->ex.get();
     bf6ant::Runtime* rtp = h->rt.get();
     h->rt->clip_expression = [exp, rtp](const bf6ant::Obj* program, const bf6ant::Pose& pose) {
@@ -4171,6 +4196,24 @@ void bf6_ant_runtime_set_zoom_sight_types(bf6_ant_runtime* r, const int32_t* typ
     auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
     if (!h || !h->ex) return;
     h->ex->zoom_sight.assign(types, types + (n > 0 ? n : 0));
+}
+
+/* Mark every state named in `text` (bf6_ant_runtime_set_states_text lines) as the
+ * loadout's: the bool/float/int setters then drop the caller's writes to it. */
+int bf6_ant_runtime_own_states_text(bf6_ant_runtime* r, const char* text)
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h || !text) return 0;
+    int n = 0;
+    const char* p = text;
+    while (*p) {
+        const char* e = std::strchr(p, '\n');
+        const std::string line(p, e ? (size_t)(e - p) : std::strlen(p));
+        p = e ? e + 1 : p + line.size();
+        char path[512] = {0};
+        if (std::sscanf(line.c_str(), "%511s", path) == 1 && path[0]) { h->loadout_owned.insert(path); ++n; }
+    }
+    return n;
 }
 
 int bf6_ant_runtime_set_states_text(bf6_ant_runtime* r, const char* text)

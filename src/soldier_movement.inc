@@ -60,6 +60,9 @@ extern "C" void bf6_walk_tuning_defaults(bf6_walk_tuning* t)
     /* THE ENGINE'S OWN CHARACTER DEFAULTS, and they are the honest fallback
      * rather than a guess at BF6's: the game does not author these. */
     t->crouch_speed = 1.4f;
+    /* OURS, only without an install (the host engine has no prone): half the crouch
+     * default. bf6_walk_tuning_read replaces it with the measured crawl. */
+    t->prone_speed  = 0.7f;
     t->walk_speed   = 2.6f;
     t->run_speed    = 6.0f;
     t->jump_speed   = 4.2f;
@@ -148,6 +151,8 @@ const char* const kGaitWalk =
     "animations/glacier/assets/3p/common/rifle/loco/c_3p_rifle_stand_run_fwd_lowlodcopy_01";
 const char* const kGaitRun =
     "animations/glacier/assets/3p/common/rifle/loco/c_3p_rifle_stand_sprint_fwd_01";
+const char* const kGaitProne =
+    "animations/glacier/assets/3p/common/rifle/loco/c_3p_rifle_prone_crawl_fwd_01";
 
 extern "C" int bf6_walk_tuning_read(bf6_ctx* c, bf6_walk_tuning* t)
 {
@@ -210,6 +215,8 @@ extern "C" int bf6_walk_tuning_read(bf6_ctx* c, bf6_walk_tuning* t)
     if (crouch > 0.1f && crouch < 20.f) { t->crouch_speed = crouch; ++found; }
     if (walk > 0.1f && walk < 20.f) { t->walk_speed = walk; ++found; }
     if (run > 0.1f && run < 20.f) { t->run_speed = run; ++found; }
+    const float prone = measure_gait_speed(c, kGaitProne);
+    if (prone > 0.05f && prone < 20.f) { t->prone_speed = prone; ++found; }
 
     /* Field of view is a player OPTION, not a soldier tweakable: a default with
      * a range the player moves inside. Vertical degrees. */

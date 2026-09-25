@@ -2210,7 +2210,7 @@ typedef struct {
 typedef struct {
     double wish[3];      /* wanted horizontal direction, length 0..1 (y ignored) */
     int32_t run;
-    int32_t crouch;
+    int32_t crouch;      /* 1 crouched, 2 prone (crawl speed, no jump) */
     int32_t jump;        /* pressed this step */
     double dt;           /* seconds; clamped to 0.001..0.1 */
 } bf6_walk_input;
@@ -2262,6 +2262,10 @@ typedef struct {
      * VERTICAL degrees, which is what a Godot Camera3D and an Unreal camera
      * with a vertical-fit aspect both take. */
     float fov_vertical, fov_vertical_min, fov_vertical_max;
+    /* MEASURED like the gaits above, from c_3p_rifle_prone_crawl_fwd_01: the speed
+     * while bf6_walk_input.crouch is 2 (prone). Appended so the fields above keep
+     * their offsets. */
+    float prone_speed;
 } bf6_walk_tuning;
 
 /* The fallbacks, with no install involved: engine defaults for what BF6 does
@@ -5380,6 +5384,9 @@ BF6_API int  bf6_ant_runtime_finished(const bf6_ant_runtime*);
 /* 1 when a state-flow node whose asset path contains `part` is active anywhere in the
  * graph (nested machines included), 0 when none is, -1 without a runtime. */
 BF6_API int  bf6_ant_runtime_node_active(const bf6_ant_runtime*, const char* part);
+/* Mark the states named in `text` (bf6_ant_runtime_set_states_text lines) as written by
+ * the fitted weapon parts: the caller's bool/float/int setters no longer override them. */
+BF6_API int  bf6_ant_runtime_own_states_text(bf6_ant_runtime*, const char* text);
 
 /* The weapon-inspect drag: camera-yaw input -> fb.camerainput.yaw.float, as
  * the soldier logic computes it. Parameters are READ from the installed
@@ -5449,6 +5456,10 @@ BF6_API float bf6_inspect_aim_step(const bf6_inspect_aim_params*, bf6_inspect_ai
  * field hash to glacier_soldier's AntBinding), as "<state> <kind> x y z w" lines.
  * Returns the length needed, -1 on failure. */
 BF6_API int bf6_inspect_zoom_level_states(bf6_ctx*, const char* item, int level, char* out, int out_len);
+/* The weapon's aim-in and aim-out times in seconds: its zoom-transition tier
+ * (0x6216FC77 -> AZT table, entry index 0xAE4ADC54.0x2B6F2936; tier fields 0xA89997AD
+ * in, 0x8939D1DD out). Returns the tier index, -1 when the weapon has none. */
+BF6_API int bf6_inspect_zoom_transition(bf6_ctx*, const char* item, float* in_s, float* out_s);
 /* The fitted optic's SightType (its module's WeaponOpticModifier), from
  * bf6_loadout_fitted_bundles text; -1 when no fitted part carries one. */
 BF6_API int bf6_inspect_optic_sight_type(bf6_ctx*, const char* bundles);

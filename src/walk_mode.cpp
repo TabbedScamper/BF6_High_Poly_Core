@@ -378,7 +378,10 @@ static void walk_step_impl(bf6_walk_state* st, const bf6_walk_input* in,
     const double dt = std::clamp(in->dt, 0.001, 0.1);   // a stall must not fling the walker
     const bool airborne_at_entry = st->grounded == 0;
     const double falling = st->vel_up;   // read before gravity, for the landing penalty
-    if (in->jump && st->grounded) {
+    /* crouch 2 is PRONE: the crawl speed, and no jump - a body on the ground has nothing
+     * to jump from (what the jump key does from prone is the caller's to decide). */
+    const bool prone = in->crouch == 2;
+    if (in->jump && st->grounded && !prone) {
         st->vel_up = T.jump_speed;
         st->grounded = 0;
         /* A JUMP FROM A STANDSTILL CARRIES NOTHING FORWARD. Below
@@ -410,7 +413,8 @@ static void walk_step_impl(bf6_walk_state* st, const bf6_walk_input* in,
     double penalty = st->vel[1] > 0.0 ? st->vel[1] : 1.0;
     penalty = std::min(1.0, penalty + T.landing_recovery_per_second * dt);
 
-    const double base_top = in->crouch ? T.crouch_speed : (in->run ? T.run_speed : T.walk_speed);
+    const double base_top = prone ? T.prone_speed
+                          : in->crouch ? T.crouch_speed : (in->run ? T.run_speed : T.walk_speed);
     const double top = base_top * penalty;
     const V3 target = mul(want, top);
     /* AIR CONTROL IS NOT GROUND CONTROL, and in the air it is the authored

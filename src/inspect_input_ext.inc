@@ -238,6 +238,79 @@ int bf6_inspect_zoom_sight_types(bf6_ctx* c, const char* item, int32_t* out, int
     return n;
 }
 
+/* THE ZOOM LEVEL'S WEAPON STATES, as the engine writes them. Each WeaponZoomLevelData
+ * carries a struct (0xF2D603DE) of procedural-motion settings - pitch kick time 0.2 at
+ * the hip and 0.01 aimed on the M4A1, push-back exponent, sway ... - and the soldier's
+ * AntBinding (common/gameplay/soldier/glacier_soldier) binds fields with the SAME
+ * field hashes to game states (fb.wep.pitchkick.time.float <- 0xFC78C9A9). The join is
+ * by hash on both sides. Left unset these states read 0, and the first-person
+ * post-update program divides by them: its weapon-kick chain went NaN and took the
+ * weapon's aim correction (Wep_Align) with it.
+ * Lines as bf6_weapon_md_states: "<state> <kind> x y z w". Returns the length needed. */
+int bf6_inspect_zoom_level_states(bf6_ctx* c, const char* item, int level, char* out, int out_len)
+{
+    if (!c || !item) return -1;
+    bf6ant::Graph g(c);
+    std::string why;
+    const bf6ant::Obj* data = bf6__weapon_data(c, item, g, why);
+    if (!data) return -1;
+    const bf6::EbxValue* levels = data->f(0xd96e9943u);
+    if (!levels || level < 0 || (size_t)level >= levels->items.size()) return -1;
+    const bf6ant::Obj* z = g.resolve(&levels->items[(size_t)level], data);
+    const bf6::EbxValue* st = z ? z->f(0xf2d603deu) : nullptr;
+    if (!st) return -1;
+    /* field hash -> bound state, over every instance of the soldier asset */
+    std::map<uint32_t, std::string> bound;
+    std::function<void(const bf6::EbxValue&)> walk = [&](const bf6::EbxValue& v) {
+        for (const auto& [h, fv] : v.fields) {
+            if (const bf6::EbxValue* r = fv.field(0x23de5099u))
+                if (r->kind == bf6::EbxValue::Kind::ImportRef && !r->import_path.empty() && r->import_path != "<not indexed>") {
+                    std::string p = r->import_path;
+                    if (p.size() > 4 && p.compare(p.size() - 4, 4, ".ebx") == 0) p.resize(p.size() - 4);
+                    bound.emplace(h, p);
+                }
+            walk(fv);
+        }
+        for (const auto& it : v.items) walk(it);
+    };
+    if (const bf6ant::Obj* sr = g.root("common/gameplay/soldier/glacier_soldier"))
+        for (int i = 0; i < 8192; ++i) {
+            bf6::EbxValue ref; ref.kind = bf6::EbxValue::Kind::InstanceRef; ref.instance = i;
+            const bf6ant::Obj* o = g.resolve(&ref, sr);
+            if (!o) break;
+            walk(o->v);
+        }
+    std::string s;
+    char b[512];
+    auto num = [](const bf6::EbxValue* v) -> float {
+        if (!v) return 0.f;
+        switch (v->kind) {
+        case bf6::EbxValue::Kind::Real: return (float)v->f;
+        case bf6::EbxValue::Kind::Int: return (float)v->i;
+        case bf6::EbxValue::Kind::Uint: return (float)v->u;
+        case bf6::EbxValue::Kind::Bool: return v->b ? 1.f : 0.f;
+        default: return 0.f;
+        }
+    };
+    for (const auto& [h, fv] : st->fields) {
+        auto it = bound.find(h);
+        if (it == bound.end()) continue;
+        char kind = 0; float v[4] = { 0, 0, 0, 0 };
+        switch (fv.kind) {
+        case bf6::EbxValue::Kind::Struct:
+            kind = 'v'; v[0] = num(fv.field(0x3901db14u)); v[1] = num(fv.field(0x42fc0f5eu)); v[2] = num(fv.field(0x32a99b9cu)); break;
+        case bf6::EbxValue::Kind::Bool: kind = 'b'; v[0] = fv.b ? 1.f : 0.f; break;
+        case bf6::EbxValue::Kind::Real: kind = 'f'; v[0] = (float)fv.f; break;
+        case bf6::EbxValue::Kind::Int: case bf6::EbxValue::Kind::Uint: kind = 'i'; v[0] = num(&fv); break;
+        default: continue;
+        }
+        std::snprintf(b, sizeof b, "%s %c %.9g %.9g %.9g %.9g\n", it->second.c_str(), kind, v[0], v[1], v[2], v[3]);
+        s += b;
+    }
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)s.size() + 1;
+}
+
 /* ------------------------------------------------ the roll's phase ---- */
 
 namespace {

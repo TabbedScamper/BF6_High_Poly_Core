@@ -60,21 +60,79 @@ struct AntExOps {
             const uint64_t h = bind_state(p, 0);
             std::memcpy(rt->vec_states[path[h]].data(), v, 16);
         }
+
+        /* TUNING CURVES (TuningCurveExp, EX_KERNELS_SPEC.md 0x140743520): channel 0's
+         * keys, each a point 0xA4862C49 (x,y), an in-control 0x27C8EF1E, an out-control
+         * 0xF4F24BD2 and a segment mode 0x0211E93A (0 step, 1 linear, 2 bezier). The
+         * native's x-bezier inversion (0x14067e7b0) is replaced by bisection here. */
+        struct Key { float x, y, ix, iy, ox, oy; int mode; };
+        std::map<uint64_t, std::vector<Key>> curves;
+        const std::vector<Key>& curve_keys(uint64_t h) {
+            auto it = curves.find(h);
+            if (it != curves.end()) return it->second;
+            std::vector<Key>& ks = curves[h];
+            const bf6ant::Obj* o = h < obj.size() ? obj[h] : nullptr;
+            if (const bf6::EbxValue* arr = o ? o->f(0x32E3F0CEu) : nullptr)
+                for (const auto& k : arr->items) {
+                    auto xy = [&](uint32_t f, float& x, float& y) {
+                        const bf6::EbxValue* v = k.field(f);
+                        x = v && v->field(0x3901db14u) ? (float)v->field(0x3901db14u)->f : 0.f;
+                        y = v && v->field(0x42fc0f5eu) ? (float)v->field(0x42fc0f5eu)->f : 0.f;
+                    };
+                    Key key{};
+                    xy(0xA4862C49u, key.x, key.y); xy(0x27C8EF1Eu, key.ix, key.iy); xy(0xF4F24BD2u, key.ox, key.oy);
+                    const bf6::EbxValue* m = k.field(0x0211E93Au);
+                    key.mode = m ? (int)(m->kind == bf6::EbxValue::Kind::Int ? m->i : (int64_t)m->u) : 0;
+                    ks.push_back(key);
+                }
+            return ks;
+        }
+        float curve(uint64_t h, float x) override {
+            const std::vector<Key>& k = curve_keys(h);
+            if (k.empty()) return 0.f;
+            if (k.size() == 1) return k[0].y;
+            size_t i = 0;
+            while (i + 2 < k.size() && x >= k[i + 1].x) ++i;
+            const Key &a = k[i], &b = k[i + 1];
+            switch (a.mode) {
+            case 0: return a.y;
+            case 1: { float t = (x - a.x) / (b.x - a.x); t = std::fmin(std::fmax(t, 0.f), 1.f); return (a.y - a.y * t) + b.y * t; }
+            case 2: {
+                if (x <= a.x) return a.y;
+                if (x >= b.x) return b.y;
+                auto bez = [](float p0, float p1, float p2, float p3, float u) {
+                    const float v = 1.f - u; return v * v * v * p0 + 3 * v * v * u * p1 + 3 * v * u * u * p2 + u * u * u * p3;
+                };
+                float lo = 0.f, hi = 1.f;
+                for (int it = 0; it < 40; ++it) {
+                    const float mid = 0.5f * (lo + hi);
+                    if (bez(a.x, a.ox, b.ix, b.x, mid) < x) lo = mid; else hi = mid;
+                }
+                return bez(a.y, a.oy, b.iy, b.y, 0.5f * (lo + hi));
+            }
+            default: return 0.f;
+            }
+        }
     };
 
-    struct Stage { bf6ex::Program prog; bf6ex::Instance inst; bool on = false; };
+    struct Stage { bf6ex::Program prog; bf6ex::Instance inst; bool on = false; bool seeded = false; };
     Stage pre, post;
     StateHost host;
     bf6ex::PoseArena arena;
     std::vector<int> dof_bone;       /* per DOF: skeleton bone, or -1 */
     std::vector<char> dof_comp;      /* 'q', 't', 's', or 0 for a scalar / non-bone DOF */
     std::vector<std::string> dof_name;
+    std::vector<std::array<float, 4>> dof_default;   /* resting value of each DOF */
     int seeds_total = 0, seeds_bound = 0;
     /* THE WEAPON'S ZOOM LEVELS' SIGHT TYPES (bf6_inspect_zoom_sight_types), level 0 the hip.
      * Before each pre-update the current level's value is written to
      * fb.wep.sighttype.enumgs, as the engine does. WHICH level is current is ours: the
      * engine switches levels as the zoom engages; here fb.ads.bool picks level 1. */
     std::vector<int32_t> zoom_sight;
+    /* each zoom level's procedural weapon states (bf6_inspect_zoom_level_states), applied
+     * when the current level changes */
+    std::vector<std::string> zoom_states;
+    int zoom_level_applied = -1;
     /* the clips' own programs, one instance each, loaded on first use */
     struct ClipProgram { std::unique_ptr<Stage> st; bool failed = false; };
     std::map<std::string, ClipProgram> clip_programs;
@@ -95,7 +153,7 @@ static bool bf6__ex_arena(bf6ant::Runtime& rt, AntExOps& ex, std::string& err)
     }
     bf6ex::PoseArena& a = ex.arena;
     a = bf6ex::PoseArena{};
-    ex.dof_bone.clear(); ex.dof_comp.clear(); ex.dof_name.clear();
+    ex.dof_bone.clear(); ex.dof_comp.clear(); ex.dof_name.clear(); ex.dof_default.clear();
     size_t k = 0;
     for (size_t s = 0; s < records.size(); ++s)
         for (const AnimBindingDofRecord& r : records[s]) {
@@ -112,6 +170,16 @@ static bool bf6__ex_arena(bf6ant::Runtime& rt, AntExOps& ex, std::string& err)
                 if (it != rt.bone_index.end()) { bone = it->second; comp = r.name[dot + 1]; }
             }
             ex.dof_bone.push_back(bone); ex.dof_comp.push_back(comp);
+            /* THE DOF'S RESTING VALUE, for DOFs no bone carries (deltaRotation, the
+             * trajectory ...): the rig's own default when it authors one, else identity
+             * for a quaternion (dof-set component tag 14), one for a scale, zero. A zero
+             * quaternion there made RootJointReader's normalize NaN. */
+            std::array<float, 4> dv{ 0, 0, 0, 0 };
+            auto dit = defaults.find(keys[k - 1]);
+            if (dit != defaults.end()) for (int c = 0; c < 4; ++c) dv[(size_t)c] = dit->second.value[c];
+            else if (r.component_type == 14u) dv = { 0, 0, 0, 1 };
+            else if (comp == 's') dv = { 1, 1, 1, 0 };
+            ex.dof_default.push_back(dv);
         }
     a.bytes.assign(a.offset.size() * 16, 0);
     a.valid.assign(a.offset.size(), 0);
@@ -126,7 +194,10 @@ static void bf6__ex_fill(AntExOps& ex, const bf6ant::Pose& p)
         const int b = ex.dof_bone[i];
         float* d = (float*)(a.bytes.data() + a.offset[i]);
         a.valid[i] = 0;
-        if (b < 0 || (size_t)b >= p.q.size()) continue;
+        if (b < 0 || (size_t)b >= p.q.size()) {
+            if (i < ex.dof_default.size()) std::memcpy(d, ex.dof_default[i].data(), 16);
+            continue;
+        }
         switch (ex.dof_comp[i]) {
         case 'q': std::memcpy(d, p.q[(size_t)b].data(), 16); a.valid[i] = 1; break;
         case 't': d[0] = p.t[(size_t)b][0]; d[1] = p.t[(size_t)b][1]; d[2] = p.t[(size_t)b][2]; d[3] = 0; a.valid[i] = 1; break;
@@ -156,7 +227,7 @@ static void bf6__ex_apply(AntExOps& ex, bf6ant::Pose& p)
             }
             float d = 0;
             for (int k = 0; k < 3; ++k) d = std::fmax(d, std::fabs(v[k] - was[k]));
-            if (d > 1e-4f)
+            if (d > 1e-4f || !std::isfinite(v[0] + v[1] + v[2] + v[3]))
                 std::fprintf(stderr, "ex dof %-28s (%.4f %.4f %.4f %.4f) was (%.4f %.4f %.4f %.4f)\n", ex.dof_name[i].c_str(),
                              v[0], v[1], v[2], v[3], was[0], was[1], was[2], was[3]);
         }

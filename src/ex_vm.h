@@ -38,6 +38,8 @@ struct Host {
     enum Kind { Bool, Float, Int, Vec3, Quat };
     virtual void read_state(uint64_t handle, void* out, Kind kind) = 0;
     virtual void write_state(uint64_t handle, const void* in, Kind kind) = 0;
+    /* A tuning-curve input (interface key 1088261122) evaluated at x (TuningCurveExp). */
+    virtual float curve(uint64_t handle, float x) { (void)handle; (void)x; return 0.f; }
 };
 
 /* THE POSE ARENA the Dof kernels address: a DOF table (index -> byte offset, width)

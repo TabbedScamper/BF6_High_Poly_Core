@@ -3939,10 +3939,16 @@ int bf6_ant_runtime_update(bf6_ant_runtime* r, float seconds)
         const bool ads = h->rt->st.as_bool(h->rt->g, h->rt->g.root("animations/glacier/global/gamestates/fb.ads.bool"), ok);
         const size_t lvl = ads && h->ex->zoom_sight.size() > 1 ? 1 : 0;
         h->rt->st.set_int("animations/glacier/global/gamestates/fb.wep.sighttype.enumgs", h->ex->zoom_sight[lvl]);
+        if ((int)lvl != h->ex->zoom_level_applied && lvl < h->ex->zoom_states.size()) {
+            bf6_ant_runtime_set_states_text(r, h->ex->zoom_states[lvl].c_str());
+            h->ex->zoom_level_applied = (int)lvl;
+        }
     }
     if (h->ex && h->ex->pre.on) {
         std::string e;
         bf6__ex_fill(*h->ex, h->pose.q.empty() ? h->rt->bind : h->pose);
+        /* the seeds' default slots copy the pose in: bind once there is a pose to copy */
+        if (!h->ex->pre.seeded) { h->ex->pre.inst.bind_seeds(); h->ex->pre.seeded = true; }
         if (!h->ex->pre.inst.run(ticks, e)) h->ex->errors.push_back("pre-update: " + e);
     }
     bf6ant::Pose p;
@@ -3951,6 +3957,7 @@ int bf6_ant_runtime_update(bf6_ant_runtime* r, float seconds)
     if (h->ex && h->ex->post.on) {
         std::string e;
         bf6__ex_fill(*h->ex, p);
+        if (!h->ex->post.seeded) { h->ex->post.inst.bind_seeds(); h->ex->post.seeded = true; }
         if (!h->ex->post.inst.run(ticks, e)) h->ex->errors.push_back("post-update: " + e);
         else bf6__ex_apply(*h->ex, p);
     }
@@ -3989,6 +3996,14 @@ int bf6_ant_runtime_set_ex(bf6_ant_runtime* r, const char* pre, const char* post
     if (!bf6__ex_arena(*h->rt, ex, e)) return fail(e);
     if (!bf6__ex_stage(*h->rt, ex, ex.pre, pre, e)) return fail("pre-update: " + e);
     if (!bf6__ex_stage(*h->rt, ex, ex.post, post, e)) return fail("post-update: " + e);
+    /* STAND-INS FOR ENGINE-COMPUTED STATES whose authored default the engine never
+     * leaves in place. OURS, and listed in the ex report so they stay visible:
+     *   fb.fovscalefactor.float  engine-computed (glacier_soldier binding 0xB75F91C5),
+     *                            default 0; the post-update program divides by it.
+     *                            1 = the field of view unscaled. The engine's formula
+     *                            is not yet read from the executable. */
+    h->rt->st.set_float("animations/glacier/global/gamestates/fb.fovscalefactor.float", 1.f);
+    ex.errors.push_back("stand-in: fb.fovscalefactor.float = 1 (engine formula not yet read)");
     AntExOps* exp = h->ex.get();
     bf6ant::Runtime* rtp = h->rt.get();
     h->rt->clip_expression = [exp, rtp](const bf6ant::Obj* program, const bf6ant::Pose& pose) {
@@ -4009,6 +4024,16 @@ void bf6_ant_runtime_set_vec(bf6_ant_runtime* r, const char* state, const float 
  * how many were set. */
 /* The weapon's zoom levels' sight types (bf6_inspect_zoom_sight_types), level 0 the
  * hip; fb.wep.sighttype.enumgs follows the current level before each pre-update. */
+/* One zoom level's procedural weapon states (bf6_inspect_zoom_level_states lines). */
+void bf6_ant_runtime_set_zoom_level_states(bf6_ant_runtime* r, int level, const char* text)
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h || !h->ex || level < 0 || !text) return;
+    if ((size_t)level >= h->ex->zoom_states.size()) h->ex->zoom_states.resize((size_t)level + 1);
+    h->ex->zoom_states[(size_t)level] = text;
+    h->ex->zoom_level_applied = -1;
+}
+
 void bf6_ant_runtime_set_zoom_sight_types(bf6_ant_runtime* r, const int32_t* types, int n)
 {
     auto* h = reinterpret_cast<AntRuntimeHandle*>(r);

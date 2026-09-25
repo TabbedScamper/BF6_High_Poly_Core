@@ -5329,6 +5329,9 @@ BF6_API int  bf6_ant_runtime_set_states_text(bf6_ant_runtime*, const char* text)
 /* The weapon's zoom levels' sight types (level 0 the hip); fb.wep.sighttype.enumgs
  * follows the current level (fb.ads.bool picks level 1) before each pre-update. */
 BF6_API void bf6_ant_runtime_set_zoom_sight_types(bf6_ant_runtime*, const int32_t* types, int n);
+/* One zoom level's procedural weapon states (bf6_inspect_zoom_level_states lines),
+ * applied when that level becomes current. */
+BF6_API void bf6_ant_runtime_set_zoom_level_states(bf6_ant_runtime*, int level, const char* text);
 /* What the scene ops did (seeds, missing kernels, notes, states written). */
 BF6_API int  bf6_ant_runtime_ex_report(const bf6_ant_runtime*, char* out, int out_len);
 BF6_API void bf6_ant_runtime_set_hand_ik(bf6_ant_runtime*, int on);
@@ -5432,6 +5435,10 @@ BF6_API float bf6_inspect_aim_step(const bf6_inspect_aim_params*, bf6_inspect_ai
  * Returns 1 when the specific weapon was read, 0 with a reason in `err`. */
 /* Each zoom level's WeaponZoomLevelData.SightType (level 0 the hip), as the engine
  * writes it to fb.wep.sighttype.enumgs. Returns the level count. */
+/* The zoom level's procedural weapon states (WeaponZoomLevelData 0xF2D603DE, joined by
+ * field hash to glacier_soldier's AntBinding), as "<state> <kind> x y z w" lines.
+ * Returns the length needed, -1 on failure. */
+BF6_API int bf6_inspect_zoom_level_states(bf6_ctx*, const char* item, int level, char* out, int out_len);
 BF6_API int bf6_inspect_zoom_sight_types(bf6_ctx*, const char* item, int32_t* out, int out_max, char* err, int err_len);
 BF6_API int bf6_inspect_ids(bf6_ctx*, const char* item, int32_t* specific_weapon,
                             int32_t* weapon_type, char* err, int err_len);

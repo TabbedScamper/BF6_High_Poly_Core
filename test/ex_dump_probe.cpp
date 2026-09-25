@@ -136,6 +136,30 @@ int main(int argc, char** argv)
                         (long long)(dir && i < dir->items.size() ? iv(&dir->items[i]) : -1), o ? o->path.c_str() : "?");
         }
     std::printf("DT %u %u\n", (uint32_t)iv(ex->f(0x5d4fe63fu)), (uint32_t)iv(ex->f(0xd4c91e35u)));
+    /* THE TYPED INITIALISER TABLES (FUN_142487220 over region 2 at instance build):
+     * dword tables at P+0x50+4*n3e (n40 dwords) and P+0x50+4*(n3e+n40) (n42 dwords);
+     * a record is w0 type id, w1-2 constructor (patched), w3-4 aux, w5-8, w9 count,
+     * then `count` region offsets. */
+    {
+        const uint32_t n3e = P.u16(0x3e), n40 = P.u16(0x40), n42 = P.u16(0x42);
+        std::printf("HDR n3e %u n40 %u n42 %u h20 %u h28 %u h30 %u h34 %u h44 %u\n", n3e, n40, n42,
+                    P.u32(0x20), P.u32(0x28), P.u32(0x30), P.u32(0x34), (unsigned)P.b[0x44]);
+        for (int tab = 0; tab < 2; ++tab) {
+            size_t o = 0x50 + 4 * (size_t)(n3e + (tab ? n40 : 0));
+            const size_t end = o + 4 * (size_t)(tab ? n42 : n40);
+            while (o + 40 <= end) {
+                const uint32_t cnt = P.u32(o + 36);
+                std::printf("INIT%d type %08x aux %u %u w5-8 %u %u %u %u count %u offs", tab, P.u32(o),
+                            P.u32(o + 12), P.u32(o + 16), P.u32(o + 20), P.u32(o + 24), P.u32(o + 28), P.u32(o + 32), cnt);
+                for (uint32_t k = 0; k < cnt && k < 64; ++k) std::printf(" %u", P.u32(o + 40 + 4 * (size_t)k));
+                std::printf("\n");
+                o += 40 + 4 * (size_t)cnt;
+            }
+        }
+        /* and the typed-dispatch records (P+0x50, n3e dwords, 5 per record) */
+        for (size_t o = 0x50; o + 20 <= 0x50 + 4 * (size_t)n3e; o += 20)
+            std::printf("TDISP %u type %08x %u %u %u %u\n", (unsigned)((o - 0x50) / 4), P.u32(o), P.u32(o + 4), P.u32(o + 8), P.u32(o + 12), P.u32(o + 16));
+    }
     /* THE SLOTS THE ENGINE SEEDS BEFORE A RUN (0x68b8a237), six numbers a row: a name
      * hash, a kind, then slot a:b and a second pair. The DofReader/DofWriter handles
      * are among these slots. */

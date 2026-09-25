@@ -128,7 +128,16 @@ void k_TanFloat3(Call& c) { float *x = V(A(0)), *o = V(A(1)); for (int k = 0; k 
 void k_ATanFloat3(Call& c) { float *x = V(A(0)), *o = V(A(1)); for (int k = 0; k < 3; ++k) o[k] = std::atan(x[k]); }
 void k_DotFloat3(Call& c) { float *x = V(A(0)), *y = V(A(1)); F(A(2)) = x[0] * y[0] + x[1] * y[1] + x[2] * y[2]; }
 void k_MagnitudeFloat3(Call& c) { float* x = V(A(0)); F(A(1)) = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]); }
-void k_NormalizeFloat3(Call& c) { float *x = V(A(0)), *o = V(A(1)); const float l = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]); for (int k = 0; k < 3; ++k) o[k] = x[k] / l; }
+/* 0x142493da7: zero when every lane is within 1.19e-7 (as expression_pure_ops.cpp
+ * established for the same native); the recoil vector at rest is exactly zero. */
+void k_NormalizeFloat3(Call& c)
+{
+    float *x = V(A(0)), *o = V(A(1));
+    const float eps = 1.19209290e-7f;
+    if (std::fabs(x[0]) <= eps && std::fabs(x[1]) <= eps && std::fabs(x[2]) <= eps) { o[0] = o[1] = o[2] = 0; return; }
+    const float l = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+    for (int k = 0; k < 3; ++k) o[k] = x[k] / l;
+}
 void k_EqualsFloat3(Call& c) { float *x = V(A(0)), *y = V(A(1)); B(A(2)) = x[0] == y[0] && x[1] == y[1] && x[2] == y[2]; }
 void k_ClampFloat3(Call& c) { float *x = V(A(0)), *lo = V(A(1)), *hi = V(A(2)), *o = V(A(3)); for (int k = 0; k < 3; ++k) o[k] = std::fmin(std::fmax(x[k], lo[k]), hi[k]); }
 
@@ -485,6 +494,12 @@ void wrstate(Call& c, Host::Kind kind)
     StateCtx* s = *(StateCtx**)c.in[1];
     if (s && s->host) s->host->write_state(*(uint64_t*)c.in[2], c.in[0], kind);
 }
+/* 0x140743520 (list 0x19): ins (x, the curve input's handle slot), out (y) */
+void k_TuningCurveExp(Call& c)
+{
+    StateCtx* s = c.inst ? reinterpret_cast<StateCtx*>(&c.inst->state_ctx) : nullptr;
+    F(c.out[0]) = s && s->host ? s->host->curve(*(uint64_t*)c.in[1], F(c.in[0])) : 0.f;
+}
 void k_IBoolReader(Call& c) { rdstate(c, Host::Bool); }
 void k_IFloatReader(Call& c) { rdstate(c, Host::Float); }
 void k_IIntegerReader(Call& c) { rdstate(c, Host::Int); }
@@ -508,6 +523,193 @@ void k_DofReader(Call& c)
         src = pc->pose->bytes.data() + h.offset;
     std::memmove(c.out[0], src, n);
 }
+/* ---- the joint readers (EX_KERNELS_SPEC.md: AntJointReader 0x1408ecf00,
+ *      RootJointReader 0x1408f6090) ---- */
+const uint8_t* dof_at(const Instance::PoseCtx* pc, const DofHandle& h)
+{
+    if (!pc || !pc->pose || h.index == kUnbound || h.offset + 16 > pc->pose->bytes.size()) return nullptr;
+    return pc->pose->bytes.data() + h.offset;
+}
+bool dof_valid(const Instance::PoseCtx* pc, const DofHandle& h)
+{
+    return pc && pc->pose && h.index != kUnbound && (size_t)h.index < pc->pose->valid.size() && pc->pose->valid[(size_t)h.index];
+}
+void compose_rows(const float* s, const float* q, const float* t, float* M)
+{
+    float R[12]; quat_rows(q, R);
+    for (int i = 0; i < 3; ++i) { for (int j = 0; j < 3; ++j) M[i * 4 + j] = R[i * 4 + j] * s[i]; M[i * 4 + 3] = 0; }
+    M[12] = t[0]; M[13] = t[1]; M[14] = t[2]; M[15] = 1;
+}
+void decompose_out(const float* M, float* so, float* qo, float* to)
+{
+    float n[16]; std::memcpy(n, M, sizeof n); float s[3];
+    for (int i = 0; i < 3; ++i) { s[i] = std::sqrt(M[i * 4] * M[i * 4] + M[i * 4 + 1] * M[i * 4 + 1] + M[i * 4 + 2] * M[i * 4 + 2]); for (int j = 0; j < 3; ++j) n[i * 4 + j] = M[i * 4 + j] / s[i]; }
+    so[0] = s[0]; so[1] = s[1]; so[2] = s[2]; so[3] = 0;
+    mat_to_quat(n, qo);
+    to[0] = M[12]; to[1] = M[13]; to[2] = M[14]; to[3] = M[15];
+}
+/* ins: primary ctx, fallback ctx, initial matrix, joint count (u16), use fallback (bool),
+ * then per joint (scale h, rotation h, translation h, scale def, rotation def, translation def);
+ * outs: scale, rotation, translation, matrix.  M = J[n-1] * ... * J[0] * initial. */
+void k_AntJointReader(Call& c)
+{
+    const Instance::PoseCtx* prim = *(Instance::PoseCtx**)c.in[0];
+    const Instance::PoseCtx* fall = *(Instance::PoseCtx**)c.in[1];
+    float M[16]; std::memcpy(M, c.in[2], sizeof M);
+    const int n = *(uint16_t*)c.in[3];
+    const bool use_fb = B(c.in[4]) != 0;
+    auto resolve = [&](const void* hp, const void* def) -> const float* {
+        const DofHandle h = rd<DofHandle>((const uint8_t*)hp);
+        if (!use_fb) { if (dof_valid(prim, h)) if (const uint8_t* p = dof_at(prim, h)) return (const float*)p; return (const float*)def; }
+        if (h.index == kUnbound) return (const float*)def;
+        const uint8_t* p = dof_at(dof_valid(prim, h) ? prim : fall, h);
+        return p ? (const float*)p : (const float*)def;
+    };
+    for (int j = 0; j < n && 5 + 6 * j + 5 < c.nin; ++j) {
+        void** g = c.in + 5 + 6 * j;
+        const float* s = resolve(g[0], g[3]);
+        const float* q = resolve(g[1], g[4]);
+        const float* t = resolve(g[2], g[5]);
+        float J[16]; compose_rows(s, q, t, J);
+        mmul(J, M, M);
+    }
+    decompose_out(M, V(c.out[0]), V(c.out[1]), V(c.out[2]));
+    std::memcpy(c.out[3], M, sizeof M);
+}
+/* ins: pose A, pose B, scale h (B), scale default, rotation h (B), translation h (B),
+ * rotation h (A), translation h (A); outs: scale, rotation, translation, matrix */
+void k_RootJointReader(Call& c)
+{
+    const Instance::PoseCtx* pa = *(Instance::PoseCtx**)c.in[0];
+    const Instance::PoseCtx* pb = *(Instance::PoseCtx**)c.in[1];
+    const DofHandle hs = rd<DofHandle>((const uint8_t*)c.in[2]);
+    const DofHandle hrb = rd<DofHandle>((const uint8_t*)c.in[4]), htb = rd<DofHandle>((const uint8_t*)c.in[5]);
+    const DofHandle hra = rd<DofHandle>((const uint8_t*)c.in[6]), hta = rd<DofHandle>((const uint8_t*)c.in[7]);
+    float s[4], q[4] = { 0, 0, 0, 1 }, t[4] = { 0, 0, 0, 0 };
+    const uint8_t* sp = hs.index != kUnbound ? dof_at(pb, hs) : nullptr;
+    std::memcpy(s, sp ? sp : (const uint8_t*)c.in[3], 16);
+    const uint8_t *qb = dof_at(pb, hrb), *tb = dof_at(pb, htb);
+    if (qb && tb) {
+        const uint8_t *qa = dof_at(pa, hra), *ta = dof_at(pa, hta);
+        float QA[4] = { 0, 0, 0, 1 }, TA[4] = { 0, 0, 0, 0 }, QB[4], TB[4];
+        if (qa) std::memcpy(QA, qa, 16);
+        if (ta) std::memcpy(TA, ta, 16);
+        std::memcpy(QB, qb, 16); std::memcpy(TB, tb, 16);
+        float r[3]; rotate(QB, TA, r);
+        t[0] = r[0] + TB[0]; t[1] = r[1] + TB[1]; t[2] = r[2] + TB[2]; t[3] = TA[3] + TB[3];
+        qmul(QA, QB, q);
+        const float l = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+        for (int k = 0; k < 4; ++k) q[k] /= l;
+    }
+    std::memcpy(c.out[0], s, 16); std::memcpy(c.out[1], q, 16); std::memcpy(c.out[2], t, 16);
+    float M[16]; compose_rows(s, q, t, M); std::memcpy(c.out[3], M, sizeof M);
+}
+/* 0x14248b810: (q, scalar, out), all four lanes */
+void k_MultiplyQuaternionFloatQuaternion(Call& c) { const float* q = V(c.a[0]); const float s = F(c.a[1]); float* o = V(c.a[2]); for (int k = 0; k < 4; ++k) o[k] = q[k] * s; }
+/* 0x14249aac0: (point_a, point_b, origin, out) - note the leading minus the executable applies */
+void k_AngleBetweenQuaternion(Call& c)
+{
+    const float *pa = V(c.a[0]), *pb = V(c.a[1]), *o = V(c.a[2]); float* out = V(c.a[3]);
+    out[0] = out[1] = out[2] = 0; out[3] = 1;
+    const float u[3] = { pa[0] - o[0], pa[1] - o[1], pa[2] - o[2] }, v[3] = { pb[0] - o[0], pb[1] - o[1], pb[2] - o[2] };
+    const float lu = std::sqrt((u[0] * u[0] + u[1] * u[1]) + u[2] * u[2]), lv = std::sqrt((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]);
+    const float den = lu * lv;
+    if (!(den > 1.1920929e-7f)) return;
+    const float rc = ((v[0] * u[0] + v[1] * u[1]) + v[2] * u[2]) / den;
+    const float ang = std::acos(std::fmin(std::fmax(rc, -1.f), 1.f));
+    float ax[3] = { u[1] * v[2] - v[1] * u[2], u[2] * v[0] - v[2] * u[0], u[0] * v[1] - v[0] * u[1] };
+    const float al = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+    if (rc < 0.f && al < 1.1920929e-7f) {
+        const float a[3] = { std::fabs(ax[0]), std::fabs(ax[1]), std::fabs(ax[2]) };
+        const int i = (a[0] > a[1] && a[0] > a[2]) ? 0 : (a[1] > a[0] && a[1] > a[2]) ? 1 : (a[2] > a[0] && a[2] > a[1]) ? 2 : 0;
+        const int j = (i + 1) % 3;
+        const float ai = a[i], aj = a[j];
+        ax[0] = ax[1] = ax[2] = 0; ax[i] = -aj; ax[j] = ai;
+    }
+    const float d = ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2];
+    if (d > 1.1920929e-7f) {
+        const float l = std::sqrt(d), sn = std::sin(ang * 0.5f);
+        out[0] = -(ax[0] / l) * sn; out[1] = -(ax[1] / l) * sn; out[2] = -(ax[2] / l) * sn; out[3] = -std::cos(ang * 0.5f);
+    }
+}
+/* 0x1405da3e0, list form: ins (trigger, delay, dt_ticks, reset, one_shot), out (out),
+ * contexts (elapsed, fired, initialized, armed, inhibit) */
+void k_DiceDelay(Call& c)
+{
+    uint8_t& out = B(c.out[0]);
+    float& el = F(c.ctx[0]); uint8_t &fired = B(c.ctx[1]), &init = B(c.ctx[2]), &armed = B(c.ctx[3]), &inhibit = B(c.ctx[4]);
+    out = 0;
+    if (!init || B(c.in[3]) || inhibit) { el = 0; init = 1; fired = 0; armed = 0; inhibit = 0; }
+    if (B(c.in[0])) armed = 1;
+    else if (!armed) { out = fired; return; }
+    if (el < F(c.in[1])) {
+        const float t = F(c.in[2]) * 0.016666668f + el;
+        el = t;
+        if (t >= F(c.in[1])) { fired = 1; if (B(c.in[4])) inhibit = 1; }
+    }
+    out = fired;
+}
+/* 0x1405dd8f0: (origin, point_a, point_b, axis_index 1..3, flip, out) */
+void k_DiceAim(Call& c)
+{
+    const float *o = V(c.a[0]), *pa = V(c.a[1]), *pb = V(c.a[2]); int ax = I(c.a[3]); const bool flip = B(c.a[4]) != 0; float* out = V(c.a[5]);
+    float a[3] = { pa[0] - o[0], pa[1] - o[1], pa[2] - o[2] }, b[3] = { pb[0] - o[0], pb[1] - o[1], pb[2] - o[2] };
+    auto tiny = [](const float* v) { return std::fabs(v[0]) <= 1.1920929e-7f && std::fabs(v[1]) <= 1.1920929e-7f && std::fabs(v[2]) <= 1.1920929e-7f; };
+    out[0] = out[1] = out[2] = 0; out[3] = 1;
+    if (tiny(a) || tiny(b)) return;
+    auto norm = [](float* v) { const float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); v[0] /= l; v[1] /= l; v[2] /= l; };
+    norm(a); norm(b);
+    if (ax < 0) { a[0] = -a[0]; a[1] = -a[1]; a[2] = -a[2]; ax = -ax; }
+    if (flip) { b[0] = -b[0]; b[1] = -b[1]; b[2] = -b[2]; }
+    if (ax < 1 || ax > 3) return;   /* the executable has no range check; out of range writes past its basis */
+    float cc[3] = { a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] }; norm(cc);
+    const float d[3] = { a[1] * cc[2] - a[2] * cc[1], a[2] * cc[0] - a[0] * cc[2], a[0] * cc[1] - a[1] * cc[0] };
+    float row[4][3];
+    std::memcpy(row[ax], a, 12);
+    std::memcpy(row[(ax % 3) + 1], d, 12);
+    std::memcpy(row[((ax + 1) % 3) + 1], cc, 12);
+    const float *r0 = row[1], *r1 = row[2], *r2 = row[3];
+    if ((r0[0] + r1[1] + r2[2]) > 0) {
+        const float s = std::sqrt((r0[0] + r1[1] + r2[2]) + 1.f), h = 0.5f / s;
+        out[0] = (r1[2] - r2[1]) * h; out[1] = (r2[0] - r0[2]) * h; out[2] = (r0[1] - r1[0]) * h; out[3] = s * 0.5f;
+    } else if (r1[1] < r0[0] && r2[2] < r0[0]) {
+        const float s = std::sqrt((r0[0] - (r2[2] + r1[1])) + 1.f), h = 0.5f / s;
+        out[0] = s * 0.5f; out[1] = (r1[0] + r0[1]) * h; out[2] = (r2[0] + r0[2]) * h; out[3] = (r1[2] - r2[1]) * h;
+    } else if (r2[2] < r1[1]) {
+        const float s = std::sqrt((r1[1] - (r2[2] + r0[0])) + 1.f), h = 0.5f / s;
+        out[0] = (r1[0] + r0[1]) * h; out[1] = s * 0.5f; out[2] = (r2[1] + r1[2]) * h; out[3] = (r2[0] - r0[2]) * h;
+    } else {
+        const float s = std::sqrt((r2[2] - (r0[0] + r1[1])) + 1.f), h = 0.5f / s;
+        out[0] = (r2[0] + r0[2]) * h; out[1] = (r2[1] + r1[2]) * h; out[2] = s * 0.5f; out[3] = (r0[1] - r1[0]) * h;
+    }
+}
+/* 0x1405db0f0, list form: ins (select_b, a4, b4, half_life, dt_ticks), out (out4),
+ * contexts (previous_select, initialized, offset4, velocity4, previous_a4, previous_b4) */
+void k_InertializationBlendNode(Call& c)
+{
+    const bool sel = B(c.in[0]) != 0; const float *a = V(c.in[1]), *b = V(c.in[2]);
+    const float hl = F(c.in[3]); const float dt0 = F(c.in[4]) <= 1.0e-6f ? 1.0e-6f : F(c.in[4]); const float dt = dt0 * 0.016666668f;
+    uint8_t &psel = B(c.ctx[0]), &init = B(c.ctx[1]); float *off = V(c.ctx[2]), *vel = V(c.ctx[3]), *pa = V(c.ctx[4]), *pb = V(c.ctx[5]);
+    float* out = V(c.out[0]);
+    if (!init) { for (int k = 0; k < 4; ++k) { off[k] = vel[k] = 0; pa[k] = a[k]; pb[k] = b[k]; } init = 1; }
+    float va[4], vb[4];
+    for (int k = 0; k < 4; ++k) { va[k] = (a[k] - pa[k]) / dt; vb[k] = (b[k] - pb[k]) / dt; }
+    const float* s = sel ? b : a; const float* sv = sel ? vb : va;
+    if (sel != (psel != 0)) {
+        const float* os = psel ? pb : pa; const float* ov = psel ? vb : va;
+        for (int k = 0; k < 4; ++k) { off[k] = (os[k] + off[k]) - s[k]; vel[k] = (ov[k] + vel[k]) - sv[k]; }
+    }
+    const float y = 1.3862944f / (hl + 1.0e-5f), ydt = y * dt;
+    const float e = 1.f / ((((ydt * 0.235f) + 0.48f) * ydt + 1.f) * ydt + 1.f);
+    for (int k = 0; k < 4; ++k) {
+        const float ov = vel[k], j0 = y * off[k] + ov;
+        off[k] = (j0 * dt + off[k]) * e;
+        vel[k] = (ov - j0 * y * dt) * e;
+        out[k] = s[k] + off[k];
+    }
+    psel = sel; for (int k = 0; k < 4; ++k) { pa[k] = a[k]; pb[k] = b[k]; }
+}
+
 /* 0x1408f43f0: DofReader without the validity check */
 void k_ForceDofReader(Call& c)
 {
@@ -589,6 +791,11 @@ const KernelImpl kKernels[] = {
     { "CeilingFloatFloat", k_CeilingFloatFloat, nullptr }, { "AngleDelta", k_AngleDelta, nullptr },
     { "IncDec", k_IncDec, nullptr }, { "DurationBool", k_DurationBool, nullptr },
     { "DurationBoolSeconds", k_DurationBoolSeconds, nullptr }, { "SpringDamper", k_SpringDamper, nullptr },
+    { "AntJointReader", nullptr, k_AntJointReader }, { "RootJointReader", nullptr, k_RootJointReader },
+    { "MultiplyQuaternionFloatQuaternion", k_MultiplyQuaternionFloatQuaternion, nullptr },
+    { "AngleBetweenQuaternion", k_AngleBetweenQuaternion, nullptr }, { "DiceDelay", nullptr, k_DiceDelay },
+    { "DiceAim", k_DiceAim, nullptr }, { "InertializationBlendNode", nullptr, k_InertializationBlendNode },
+    { "TuningCurveExp", nullptr, k_TuningCurveExp },
 };
 
 /* Every kernel name the programs are known to call, implemented or not, so a
@@ -776,7 +983,10 @@ bool Instance::run(float dt_ticks, std::string& err, uint32_t entry, uint64_t ma
     PoseCtx* pcp = &pose_ctx; StateCtx* scp = reinterpret_cast<StateCtx*>(&state_ctx);
     const uint64_t zero = 0;
     put(P.slot_ctx0, &pcp, 8);
-    put(P.slot_ctx1, &zero, 8);
+    /* THE SECOND HOST VALUE is a second pose context (RootJointReader reads pose B from
+     * it: the root joint). What the engine hands in there is not established; the
+     * current pose is used - ours. */
+    put(P.slot_ctx1, &pcp, 8);
     put(P.slot_dt, &dt_ticks, 4);
     put(P.slot_ctx2, &scp, 8);
     put(P.slot_ctx3, &zero, 8);
@@ -810,6 +1020,32 @@ bool Instance::run(float dt_ticks, std::string& err, uint32_t entry, uint64_t ma
             KernelFn f = c.a ? k->direct : k->list;
             if (!f) { notes.push_back(std::string("kernel ") + k->name + " called in the other form"); return; }
             f(c);
+            /* BF6_EX_NAN=N: the first N calls whose inputs are finite and whose output is
+             * not - where a NaN is BORN, not where it lands. Inputs/outputs read as 4 floats. */
+            static long nan_left = std::getenv("BF6_EX_NAN") ? std::atol(std::getenv("BF6_EX_NAN")) : 0;
+            if (nan_left > 0) {
+                /* scalar-output kernels are checked on their first float only: a scalar's
+                 * neighbours in the slot file are other values, often NaN on purpose */
+                const std::string kn = k->name;
+                const bool wide = kn.find("Float3") != std::string::npos || kn.find("Quaternion") != std::string::npos ||
+                                  kn.find("Matrix") != std::string::npos || kn.find("44") != std::string::npos ||
+                                  kn.find("Joint") != std::string::npos || kn.find("Vec3") != std::string::npos ||
+                                  kn.find("Euler") != std::string::npos || kn.find("Rotate") != std::string::npos ||
+                                  kn.find("Aim") != std::string::npos || kn.find("Inertialization") != std::string::npos ||
+                                  kn.find("Vector3") != std::string::npos || kn.find("Axes") != std::string::npos;
+                const int lanes = wide ? 4 : 1;
+                auto bad = [&](void* p) { if (!p) return false; const float* v = (const float*)p; for (int q = 0; q < lanes; ++q) if (!std::isfinite(v[q])) return true; return false; };
+                bool in_bad = false, out_bad = false;
+                if (c.a) { for (int i = 0; i + 1 < c.n; ++i) in_bad = in_bad || bad(c.a[i]); out_bad = bad(c.a[c.n - 1]); }
+                else { for (int i = 0; i < c.nin; ++i) in_bad = in_bad || bad(c.in[i]); for (int i = 0; i < c.nout; ++i) out_bad = out_bad || bad(c.out[i]); }
+                if (out_bad && !in_bad) {
+                    --nan_left;
+                    std::fprintf(stderr, "ex NaN born at pc %u in %s:", pc, k->name);
+                    void** ins_ = c.a ? c.a : c.in; const int n_ = c.a ? c.n - 1 : c.nin;
+                    for (int i = 0; i < n_ && i < 6; ++i) { const float* v = (const float*)ins_[i]; std::fprintf(stderr, " (%g %g %g %g)", v[0], v[1], v[2], v[3]); }
+                    std::fprintf(stderr, "\n");
+                }
+            }
         };
         if (op <= 0x13) {
             ins.clear();

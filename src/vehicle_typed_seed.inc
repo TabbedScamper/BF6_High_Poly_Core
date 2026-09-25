@@ -646,7 +646,14 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             continue;
         }
         const auto st = slot_stride.find(slot->second);
-        const bool by_reference = st != slot_stride.end() && st->second && st->second < lay.size;
+        /* A POOL WORD THE BINDING TABLE FILLS BY INSTANCE REFERENCE holds a handle,
+         * whatever the slot spacing says. The UH-60's door curve is one: laid inline,
+         * its forty bytes ran over the next constant (the slot the door graph looks its
+         * vehicle up by) and the doors never saw their seat. */
+        bool bound_by_ref = false;
+        for (const auto& rp : ref_places) bound_by_ref = bound_by_ref || rp.pool_offset == pl.pool_offset;
+        const bool by_reference = bound_by_ref ||
+            (st != slot_stride.end() && st->second && st->second < lay.size);
         std::map<uint32_t, uint32_t> patches;
         if (by_reference) {
             /* The slot holds a handle, so only the curve handle goes in the pool. */
@@ -707,6 +714,9 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
                 for (const auto& f : fields)
                     if ((f.second & 0xFFFF0000u) == 0xC0DE0000u) {
                         patches[pool] = 0xC0DF0000u | (f.second & 0xFFFFu);
+                        /* and the handle's high word (a relocated pointer, unknown
+                         * offline), as for a by-reference placement */
+                        if (!std::getenv("BF6_HANDLE_HI_OFF")) patches[pool + 4] = 0u;
                         if (dbg) std::fprintf(stderr, "seed: curve handle pool 0x%X <- instance [%td],"
                                                       " curve %u (%s)\n",
                                               pool, &val - kept.data(), f.second & 0xFFFFu, how);

@@ -25,6 +25,8 @@ struct bf6_vehicle {
     /* Wheel and track speeds by channel name, from the last tick's tyre calls, placed
      * by where each call's contact point sits on the body (see the step). */
     std::map<std::string, float> wheel_spin;
+    std::map<std::string, bool> wheel_contact;   /* HasContact_Wheel_<pos>, same placement */
+    int tyre_sections = 4;   /* wheel sections the drivetrain ran last tick (a bike has two) */
     float water_height = 0.0f;        /* the surface the hull and buoyancy read */
     bool water_present = false;
     /* THE CYCLIC, which nothing could command before. The step's `in` array carries
@@ -1209,11 +1211,16 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * (written back into d.omega after the previous tick), so this publishes the
      * drivetrain's answer rather than a second model. Four-wheel spellings only: the
      * aircraft FC/RL/RR and the tank tracks are not mapped to a tyre section yet. */
-    else if (!v->no_wheel_locators)
+    /* A TWO-WHEELER HAS TWO SECTIONS, rear then front on the dirt bike, and the
+     * four-wheel order put the rear tyre's speed on the front wheel. Fewer than four
+     * sections are placed by position instead (below). */
+    else if (!v->no_wheel_locators && v->tyre_sections >= 4)
         for (int w = 0; w < 4; ++w) s.set_float(wch[w], d.omega[w]);
     /* the positional wheel and track speeds (a car's four keep the locator path above) */
+    /* the same wheels' ground contact: any tyre call on that wheel that touched */
+    for (const auto& kv : v->wheel_contact) s.set_bool(kv.first, kv.second);
     for (const auto& kv : v->wheel_spin) {
-        const bool car_wheel = !v->no_wheel_locators &&
+        const bool car_wheel = !v->no_wheel_locators && v->tyre_sections >= 4 &&
             (kv.first == wch[0] || kv.first == wch[1] || kv.first == wch[2] || kv.first == wch[3]);
         if (!car_wheel) s.set_float(kv.first, kv.second);
     }
@@ -1230,6 +1237,12 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     s.set_int("Vehicle Damage State", 0);
     s.set_int("TeamId", v->team);
     s.set_bool("Autohover", v->autohover);
+    /* the local player's own vehicle, nobody in the second seat, and no camera toggle
+     * or zoom held (the feature graphs' camera and HUD inputs) */
+    s.set_bool("IsLocalVehicle", true);
+    s.set_bool("EntryActive Seat2 Local", false);
+    s.set_bool("Input ToggleCamera", false);
+    s.set_bool("InputZoom", false);
     s.set_float("Vehicle Health Normalized", 1.0f);
     s.set_bool("Vehicle Is Wreck", false);
     s.set_bool("EntryActive_Driver Local", true);
@@ -1516,6 +1529,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             const auto& om = s.wheel_ops().tyre_omegas();
             const auto& ct = s.wheel_ops().tyre_contacts();
             const size_t per = om.size() >= 8 ? 2 : 1;
+            if (!om.empty()) v->tyre_sections = (int)(om.size() / per);
             for (int w = 0; w < 4 && (size_t)(w + 1) * per <= om.size(); ++w) {
                 const size_t i = (size_t)(w + 1) * per - 1;
                 d.omega[w] = om[i];
@@ -1564,7 +1578,9 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             {
                 const auto& tp = s.wheel_ops().tyre_positions();
                 const auto& tom = s.wheel_ops().tyre_omegas();
+                const auto& tct = s.wheel_ops().tyre_contacts();
                 v->wheel_spin.clear();
+                v->wheel_contact.clear();
                 if (!tp.empty() && tp.size() == tom.size()) {
                     const float qi[4] = {-d.quat[0], -d.quat[1], -d.quat[2], d.quat[3]};
                     std::vector<std::array<float, 3>> loc(tp.size());
@@ -1578,14 +1594,23 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                         zmax = std::max(zmax, l[2]);
                     }
                     const float zmid = 0.5f * (zmin + zmax);
+                    /* a centred front wheel: FC where the graphs name one (an aircraft's
+                     * nose wheel), else the side it is on (a bike's FL) */
+                    uint32_t fc_hash = 0;
+                    const bool names_fc = s.channel_hash("AngularVelocity_Wheel_FC", fc_hash);
                     std::map<std::string, std::pair<float, int>> acc;
                     auto add = [&](const std::string& ch, float w) { acc[ch].first += w; acc[ch].second += 1; };
                     for (size_t i = 0; i < loc.size(); ++i) {
                         const bool left = loc[i][0] > 0.0f, front = loc[i][2] > zmid;
                         const bool centre = std::fabs(loc[i][0]) < 0.25f;
                         add(left ? "AngularVelocity_Track_Left" : "AngularVelocity_Track_Right", tom[i]);
-                        if (front && centre) add("AngularVelocity_Wheel_FC", tom[i]);
+                        if (front && centre && names_fc) add("AngularVelocity_Wheel_FC", tom[i]);
                         else add(std::string("AngularVelocity_Wheel_") + (front ? "F" : "R") + (left ? "L" : "R"), tom[i]);
+                        if (i < tct.size()) {
+                            const std::string pos = (front && centre && names_fc) ? "FC" : std::string(front ? "F" : "R") + (left ? "L" : "R");
+                            bool& c = v->wheel_contact["HasContact_Wheel_" + pos];
+                            c = c || tct[i] != 0;
+                        }
                     }
                     for (const auto& kv : acc) v->wheel_spin[kv.first] = kv.second.first / (float)kv.second.second;
                     if (std::getenv("BF6_WHEEL_MAP") && v->time > 1.0 && v->time < 1.02)

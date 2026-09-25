@@ -213,9 +213,27 @@ static Value materialize(const Graph& graph, const Instance* instance,
 {
     if (!width) return Value{};
     if (operand.region == 0) {
-        if (operand.offset > graph.constant_pool.size() ||
-            width > graph.constant_pool.size() - operand.offset)
-            return unknown(width);
+        if (operand.offset > graph.constant_pool.size()) return unknown(width);
+        /* A READ THAT RUNS PAST THE POOL'S END keeps the bytes it has. The MH-47 ramp's
+         * curve handles are the pool's last words and the curve node reads a 40-byte
+         * window from them: the handle is there, the rest is not, and only the rest is
+         * unknown. */
+        if (width > graph.constant_pool.size() - operand.offset) {
+            const size_t have = graph.constant_pool.size() - operand.offset;
+            Value v = unknown(width);
+            v.known_bytes.assign(width, 0);
+            std::copy(graph.constant_pool.begin() + operand.offset, graph.constant_pool.end(), v.bytes.begin());
+            if (instance)
+                for (auto it = instance->pool_patches.lower_bound(operand.offset >= 3 ? operand.offset - 3 : 0);
+                     it != instance->pool_patches.end() && it->first < operand.offset + width; ++it)
+                    for (uint32_t b = 0; b < 4; ++b) {
+                        const uint32_t at = it->first + b;
+                        if (at >= operand.offset && at < operand.offset + have)
+                            v.bytes[at - operand.offset] = (uint8_t)(it->second >> (8 * b));
+                    }
+            std::fill(v.known_bytes.begin(), v.known_bytes.begin() + (std::ptrdiff_t)have, (uint8_t)1);
+            return v;
+        }
         Value v;
         v.bytes.assign(graph.constant_pool.begin() + operand.offset,
                        graph.constant_pool.begin() + operand.offset + width);

@@ -5387,6 +5387,10 @@ BF6_API int  bf6_ant_runtime_node_active(const bf6_ant_runtime*, const char* par
 /* Mark the states named in `text` (bf6_ant_runtime_set_states_text lines) as written by
  * the fitted weapon parts: the caller's bool/float/int setters no longer override them. */
 BF6_API int  bf6_ant_runtime_own_states_text(bf6_ant_runtime*, const char* text);
+/* A bone's model-space transform (3x3 rows + translation) in the BASE pose of the
+ * super-layer whose path contains `part` (the pose it sits on, before its own layers).
+ * The first call starts watching; returns 1 once a frame has produced it. */
+BF6_API int  bf6_ant_runtime_base_bone(bf6_ant_runtime*, const char* part, const char* bone, float out[12]);
 
 /* The weapon-inspect drag: camera-yaw input -> fb.camerainput.yaw.float, as
  * the soldier logic computes it. Parameters are READ from the installed

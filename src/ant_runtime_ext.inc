@@ -120,6 +120,10 @@ struct Runtime {
      * it too). Read by bf6_ant_runtime_node_active: the caller's own action has to end
      * when the graph's does, and the top node alone cannot say that. */
     std::map<const void*, std::string> active_nodes;
+    /* SUPER-LAYER BASE POSES a caller asked to watch, by asset path part: the pose that
+     * layer sits on this frame, before any of its own layers. */
+    std::set<std::string> watch_base;
+    std::map<std::string, Pose> watched_base;
     /* VECTOR3 AND QUATERNION GAME STATES (x, y, z, w), keyed by state asset path.
      * States holds only bool/float/int; these are written by the EX scene ops
      * (1p.postupdate.expsop writes 1p.weproot.zoompose.vec3) and by the caller, and
@@ -1289,7 +1293,10 @@ struct SuperLayersCtrl : Ctrl {
             std::fprintf(stderr, "base %s <- %s additive %d\n", asset->path.c_str(), b->path.c_str(), nc->is_additive() ? 1 : 0);
             for (size_t li = 0; li < layers.size(); ++li) if (layers[li].e) {
                 const Obj* lc = rt.g.resolve(layers[li].e->f(0x81309ef7u), layers[li].e);
-                std::fprintf(stderr, "  layer %zu mode %d: %s\n", li, (int)numv(layers[li].e->f(0x787a258eu)), lc ? lc->path.c_str() : "empty");
+                const Obj* mk = rt.g.resolve(layers[li].e->f(0x795e0190u), layers[li].e);
+                const Obj* ws = rt.g.resolve(layers[li].e->f(0x71f01f90u), layers[li].e);
+                std::fprintf(stderr, "  layer %zu mode %d: %s  mask %s  weight %s\n", li, (int)numv(layers[li].e->f(0x787a258eu)),
+                             lc ? lc->path.c_str() : "empty", mk ? mk->path.c_str() : "-", ws ? ws->path.c_str() : "-");
             }
         }
         if (!base) base = std::move(nc);
@@ -1335,6 +1342,9 @@ struct SuperLayersCtrl : Ctrl {
         else out = rt.bind;
         base_pose = out;
         have_base_pose = true;
+        /* a caller watching this super-layer's base (bf6_ant_runtime_base_bone) gets a copy */
+        for (const std::string& w : rt.watch_base)
+            if (asset && asset->path.find(w) != std::string::npos) rt.watched_base[w] = out;
         for (auto& L : layers) {
             if (!L.e) continue;
             const Obj* e = L.e;
@@ -1489,6 +1499,28 @@ struct SuperLayersCtrl : Ctrl {
              * that is what wiped the stance out of 1p.gameplay.slc: 581 mm of crouch
              * at 1p.poselayer.slc became 0.0 one level up. */
             if (L.mask_lost) continue;
+            /* BF6_ANT_WHY_BONE=<bone>: every layer that moves that bone's translation by
+             * more than 5 cm, with its weight - which layer carries a pose into a bone */
+            static const char* why_bone = std::getenv("BF6_ANT_WHY_BONE");
+            int wb = -1; std::array<float, 3> wb_before{};
+            if (why_bone && *why_bone) {
+                auto it = rt.bone_index.find(why_bone);
+                if (it != rt.bone_index.end() && (size_t)it->second < out.t.size()) { wb = it->second; wb_before = out.t[(size_t)wb]; }
+            }
+            struct WhyBone {
+                Runtime& rt; const SuperLayersCtrl* s; const Layer& L; int b; std::array<float, 3> before; const Pose& o;
+                ~WhyBone() {
+                    if (b < 0) return;
+                    const auto& a = o.t[(size_t)b];
+                    const float d = std::fabs(a[0] - before[0]) + std::fabs(a[1] - before[1]) + std::fabs(a[2] - before[2]);
+                    if (d > 0.05f) {
+                        const Obj* lc = rt.g.resolve(L.e->f(0x81309ef7u), L.e);
+                        std::fprintf(stderr, "bone moved by %s layer %s W %.2f: (%.3f %.3f %.3f) -> (%.3f %.3f %.3f)\n",
+                                     s->asset ? s->asset->path.c_str() : "?", lc ? lc->path.c_str() : "?", L.W,
+                                     before[0], before[1], before[2], a[0], a[1], a[2]);
+                    }
+                }
+            } why_guard{rt, this, L, wb, wb_before, out};
             if (mode == 0) pose_blend(out, lp, L.W, L.mask);
             else if (mode == 1 || mode == 4) {
                 /* BF6_ANT_WHY_ADD=<path part of the super-layers asset>: how many slots the
@@ -4348,6 +4380,45 @@ int bf6_ant_runtime_node(const bf6_ant_runtime* r, char* out, int out_len)
         if (sf->node && sf->node->asset) s = sf->node->asset->path;
     if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
     return (int)s.size() + 1;
+}
+
+/* A bone's model-space transform (12 floats: 3x3 rows then translation, the fps_step
+ * layout) in the BASE pose of the super-layer whose path contains `part` - what that
+ * layer sits on, before its own layers. The first call starts watching and returns 0;
+ * later calls return 1 once a frame has run. */
+int bf6_ant_runtime_base_bone(bf6_ant_runtime* r, const char* part, const char* bone, float out[12])
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h || !h->rt || !part || !bone || !out) return 0;
+    bf6ant::Runtime& rt = *h->rt;
+    rt.watch_base.insert(part);
+    auto it = rt.watched_base.find(part);
+    auto bi = rt.bone_index.find(bone);
+    if (it == rt.watched_base.end() || bi == rt.bone_index.end()) return 0;
+    const bf6ant::Pose& p = it->second;
+    /* compose root to bone from the local transforms; a slot the pose did not write
+     * takes bind, as the skeleton would show it */
+    std::vector<int> chain;
+    for (int b = bi->second; b >= 0 && (size_t)b < rt.bone_parent.size(); b = rt.bone_parent[(size_t)b]) chain.push_back(b);
+    /* world_q = parent_q * local_q, world_t = parent_t + rotate(parent_q, local_t) */
+    float wq[4] = { 0, 0, 0, 1 }, wt[3] = { 0, 0, 0 };
+    for (auto c = chain.rbegin(); c != chain.rend(); ++c) {
+        const size_t b = (size_t)*c;
+        const auto& q = (b < p.vq.size() && p.vq[b]) ? p.q[b] : rt.bind.q[b];
+        const auto& t = (b < p.vt.size() && p.vt[b]) ? p.t[b] : rt.bind.t[b];
+        /* rotate t by wq: v' = v + 2w(u x v) + 2 u x (u x v) */
+        const float ux = wq[0], uy = wq[1], uz = wq[2], w = wq[3];
+        const float cx = uy * t[2] - uz * t[1], cy = uz * t[0] - ux * t[2], cz = ux * t[1] - uy * t[0];
+        const float dx = uy * cz - uz * cy, dy = uz * cx - ux * cz, dz = ux * cy - uy * cx;
+        wt[0] += t[0] + 2.f * (w * cx + dx);
+        wt[1] += t[1] + 2.f * (w * cy + dy);
+        wt[2] += t[2] + 2.f * (w * cz + dz);
+        float nq[4]; bf6ant::qmul(wq, q.data(), nq); bf6ant::qnorm(nq);
+        std::memcpy(wq, nq, sizeof wq);
+    }
+    bf6ant::rows_from_quat(wq, out);
+    out[9] = wt[0]; out[10] = wt[1]; out[11] = wt[2];
+    return 1;
 }
 
 /* 1 when a state-flow node whose path contains `part` is active anywhere in the graph,

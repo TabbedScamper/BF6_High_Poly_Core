@@ -919,6 +919,10 @@ static uint64_t variation_key(uint64_t state_key, const std::string& variation)
     // The hash is over the asset path with ".ebx" DROPPED and forward slashes,
     // exactly as the reference computes it - hashing the raw reference string
     // misses every entry, silently, thanks to the base-key fallback.
+    /* "#<decimal>": the variation's hash itself (a MeshVariationDatabase entry's
+     * VariationAssetNameHash, which IS djb2 of the path), for callers that have the
+     * database entry rather than the path */
+    if (variation[0] == '#') return state_key + (uint64_t)std::strtoull(variation.c_str() + 1, nullptr, 10);
     std::string p = variation;
     for (char& ch : p) if (ch == 0x5C) ch = '/';
     if (p.size() > 4 && p.compare(p.size() - 4, 4, ".ebx") == 0) p.resize(p.size() - 4);
@@ -1405,6 +1409,45 @@ static MeshHandle* assemble_mesh_geometry(bf6::MeshSet& ms, std::vector<bf6::Mes
     return mh;
 }
 
+/* THE VARIATION A PART'S OWN BUNDLE AUTHORS for a mesh. A weapon part bundle
+ * (dpf_<part>_<skin>_<id>_bundle_1p) carries <bundle>/meshvariationdb_win32 whose
+ * Entries (0xC7166A0C) name each Mesh (0x68E09280) with its VariationAssetNameHash
+ * (0xC7E5050D). Some parts keep their whole texture set behind that variation: the
+ * NF ATACR body's shader-depot records exist only at state_key + 607855128 (its
+ * wse0044 skin), so read without it the body bound nothing and drew flat white - the
+ * "every scope is white". Returns "#<hash>" for variation_key, or "" for none. */
+static bool ensure_types(bf6_ctx* c, std::string& err);
+static std::string bf6__bundle_mesh_variation(bf6_ctx* c, const std::string& bundle, const char* res_name)
+{
+    if (!c || bundle.empty() || !res_name) return std::string();
+    std::string types_err;
+    if (!ensure_types(c, types_err) || !c->types) return std::string();
+    std::string err;
+    std::vector<uint8_t> raw = c->src.get_ebx(bundle + "/meshvariationdb_win32", err);
+    if (raw.empty()) return std::string();
+    bf6::Ebx e(*c->types);
+    e.set_guid_index(&c->src.armory_partition_index());
+    if (!e.parse(std::move(raw), err) || e.instance_count() == 0) return std::string();
+    const bf6::EbxValue root = e.read_instance(0);
+    const bf6::EbxValue* entries = root.field(0xC7166A0Cu);
+    if (!entries) return std::string();
+    std::string want = res_name;
+    for (char& ch : want) ch = (char)std::tolower((unsigned char)ch);
+    for (const bf6::EbxValue& en : entries->items) {
+        const bf6::EbxValue* m = en.field(0x68E09280u);
+        const bf6::EbxValue* h = en.field(0xC7E5050Du);
+        if (!m || !h) continue;
+        std::string p = m->import_path;
+        for (char& ch : p) ch = (char)std::tolower((unsigned char)ch);
+        if (p.size() > 4 && p.compare(p.size() - 4, 4, ".ebx") == 0) p.resize(p.size() - 4);
+        if (p != want) continue;
+        const uint64_t v = h->kind == bf6::EbxValue::Kind::Uint ? (uint64_t)h->u
+                         : h->kind == bf6::EbxValue::Kind::Int ? (uint64_t)(uint32_t)h->i : 0;
+        return v ? "#" + std::to_string(v) : std::string();
+    }
+    return std::string();
+}
+
 static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod,
                                       const char* placing_bundle,
                                       const char* fallback_bundle,
@@ -1414,7 +1457,9 @@ static bf6_mesh* bf6__read_mesh_scoped(bf6_ctx* c, const char* res_name, int lod
     if (!c || !res_name) return nullptr;
     const std::string placing = placing_bundle ? placing_bundle : "";
     const std::string fallback = fallback_bundle ? fallback_bundle : "";
-    const std::string variant = variation ? variation : "";
+    /* no variation asked for: the one the placing bundle authors for this mesh, if any */
+    const std::string variant = (variation && *variation) ? std::string(variation)
+        : (armory_index ? bf6__bundle_mesh_variation(c, placing, res_name) : std::string());
     std::string err;
     std::vector<uint8_t> d = c->src.get_res(res_name, err);
     if (d.empty()) return nullptr;

@@ -283,6 +283,23 @@ public:
      * not pop must not leak into the next graph, where they re-key its root-level state
      * (a derived graph's reads landed on the simex's last pushed frame). */
     void reset_frames() { frames_.clear(); }
+
+    /* THE CHARACTERS NEAR THE VEHICLE. The engine's motion database holds every soldier;
+     * graphs query it by radius (0x16E0F8DA) and sort the hits by a channel's value
+     * (0xE88A04DB): a boat stays awake while an ALIVE character is within reach, a door
+     * opens for the soldier entering. Offline the only character is the vehicle's own
+     * driver, supplied by the caller each tick. */
+    struct Character {
+        uint32_t id = 0;              /* entity id; 0x000FFFFF is the unbound sentinel */
+        float center[3] = {0, 0, 0};  /* world-space centre of its bounds */
+        float half[3] = {0, 0, 0};    /* half extents of its bounds */
+        bool active = true;           /* the flag the search requires (+0x28 bit 3) */
+        int32_t health_state = 1;     /* MM.HealthState: 1 Alive, 2 ManDown, 5 Dead ... */
+    };
+    void set_characters(const std::vector<Character>& c) { characters_ = c; }
+    /* the channel an entity-query config (a relocated pool pointer) tests */
+    void map_condition_channel(uint32_t config, uint32_t channel) { condition_channel_[config] = channel; }
+    void set_heap_sink(HeapSink* sink) override { heap_ = sink; }
     void set_cell_raw(uint64_t key, uint32_t value) { cells_[key] = value; }
 
 private:
@@ -300,6 +317,9 @@ private:
         }
     }
     std::vector<Frame> frames_;
+    std::vector<Character> characters_;
+    std::map<uint32_t, uint32_t> condition_channel_;
+    HeapSink* heap_ = nullptr;
     std::vector<PushSeen> pushes_seen_;
     std::vector<ReadSeen> odd_reads_;
     bool trace_frames_ = false;

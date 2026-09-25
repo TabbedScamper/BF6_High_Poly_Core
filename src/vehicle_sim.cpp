@@ -200,6 +200,13 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                 }
             }
             g->inst.pool_patches[rl.pointer_field] = id;
+            /* A CONDITION CONFIG: a pool word that is both a channel binding and a
+             * relocated pointer is an entity-query config (0xE88A04DB) whose condition
+             * reads that channel - the RHIB's is HealthState. The pointer wins the pool
+             * word, so the host is told which channel the pointed-at config tests. */
+            for (const auto& b : g->binds)
+                if (b.region == 0 && b.kind == 0 && b.pool_offset == rl.pointer_field)
+                    state_.map_condition_channel(id, b.channel_hash);
         }
         /* Typed-copy sizes from the executable's reflection. */
         for (const auto& grp : g->graph.slot_values) {
@@ -763,7 +770,7 @@ void VehicleSim::tick() {
         /* BF6_SLOT_WATCH=hex,hex: every write this run to those slots of the
          * drivetrain graph, with the value and the writing record. */
         if (const char* at = std::getenv("BF6_RAN_AT"))
-            if (g->name.find("simex") != std::string::npos) {
+            if (g->name.find(std::getenv("BF6_RAN_GRAPH") ? std::getenv("BF6_RAN_GRAPH") : "simex") != std::string::npos) {
                 static int ticks = 0;
                 if (++ticks == std::atoi(at)) {
                     std::set<uint32_t> ran;

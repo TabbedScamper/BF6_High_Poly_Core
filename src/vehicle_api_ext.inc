@@ -578,6 +578,23 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     bf6::VehicleSim& s = v->sim;
     bf6::VehicleDynamics& d = v->dyn;
     s.set_bool("EntryActive_Driver", true);
+    /* THE DRIVER AS A CHARACTER. The graphs' entity queries look for soldiers near the
+     * vehicle, and the driver is one: alive (MM.HealthState 1), seated in the vehicle.
+     * Seated at the body's origin with a soldier's bounds (0.8 x 1.8 x 0.8 m, standing
+     * extents - the seat locator is not read yet), which only matters against a
+     * search radius, and those are metres. Entity id 1; the vehicle is entity 0. */
+    {
+        bf6::expression::StateHost::Character driver;
+        driver.id = 1u;
+        driver.center[0] = d.pos[0];
+        driver.center[1] = d.pos[1] + 0.9f;
+        driver.center[2] = d.pos[2];
+        driver.half[0] = 0.4f; driver.half[1] = 0.9f; driver.half[2] = 0.4f;
+        driver.active = true;
+        driver.health_state = 1;
+        /* BF6_NO_DRIVER: an empty vehicle, to check the queries find the driver */
+        s.state_mut().set_characters(std::getenv("BF6_NO_DRIVER") ? std::vector<bf6::expression::StateHost::Character>{} : std::vector<bf6::expression::StateHost::Character>{driver});
+    }
     /* BF6_HAS_PILOT=1: a helicopter's state list declares HasPilot beside Autopilot,
      * AutohoverEnabled and a Roll PID with its own errorSum and lastError, and nothing
      * here had ever seeded it - so offline it reads false. Three of the five

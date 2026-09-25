@@ -208,11 +208,21 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
 
 bool StateHost::describe(uint32_t key, OperatorSignature& out) {
     out = OperatorSignature{};
-    /* OPT-IN (BF6_ENTITY_INDEX=1). Served, it lets the staggered jobs run, and on a boat
-     * that job is a radius search for nearby entities (0x16E0F8DA) which finds no one
-     * offline - the driver is not an entity here - and the boat goes to sleep, skipping
-     * its physics. Until the player registry exists it stays unserved. */
-    if (key == 0xC8364385u && std::getenv("BF6_ENTITY_INDEX")) {   /* the entity index, zero inputs (see invoke) */
+    /* Served (BF6_NO_ENTITY_INDEX turns it off). It lets the staggered jobs run; on a
+     * boat that job is a radius search for alive characters (0x16E0F8DA, 0xE88A04DB)
+     * that keeps the boat awake, and it finds the driver in the character registry
+     * (set_characters). Without the driver there the boat sleeps, as it would empty. */
+    if (key == 0x16E0F8DAu) {   /* radius search over the characters, see invoke */
+        out.input_widths = {16, 4, 4};
+        out.output_width = 260;
+        return true;
+    }
+    if (key == 0xE88A04DBu) {   /* sort a character set by a channel's value, see invoke */
+        out.input_widths = {260, 4, 4};
+        out.output_width = 260;
+        return true;
+    }
+    if (key == 0xC8364385u && !std::getenv("BF6_NO_ENTITY_INDEX")) {   /* the entity index, zero inputs (see invoke) */
         out.input_widths = {};
         out.output_width = 4;
         return true;
@@ -822,6 +832,68 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
             std::memcpy(out.bytes.data(), it->second.data(), std::min<size_t>(it->second.size(), ch->width));
         else
             unsupplied_channels_[ck] += 1;       /* reads ZERO, recorded */
+        out.known = true;
+        return true;
+    }
+    if (key == 0x16E0F8DAu) {
+        /* FUN_14433DA50 via thunk 147EEBF10: every character whose bounds, grown by the
+         * radius, reach the point, as a count-prefixed id set (4 + 64 ids = 260 bytes,
+         * capped at 64). The filter struct's flags: +8 grows each bounds by an extra
+         * margin, +9 excludes the evaluating entity's own character, +10 a second one;
+         * a set flag is refused here rather than guessed at. */
+        if (args.size() != 3 || !args[0].known || !args[1].known || !args[2].known ||
+            args[0].bytes.size() < 12 || args[1].bytes.size() < 4) return false;
+        float p[3], radius = 0.0f;
+        std::memcpy(p, args[0].bytes.data(), 12);
+        std::memcpy(&radius, args[1].bytes.data(), 4);
+        if (heap_) {
+            std::vector<uint8_t> filter;
+            if (heap_->pool(args[2].as_u32(), 16, filter) && filter.size() >= 11 &&
+                (filter[8] || filter[9] || filter[10])) return false;
+        }
+        served_[key] += 1;
+        std::vector<uint32_t> set(65, 0u);
+        uint32_t n = 0;
+        for (const Character& c : characters_) {
+            if (!c.active || c.id == 0x000FFFFFu || n >= 64) continue;
+            const float dx = c.center[0] - p[0], dy = c.center[1] - p[1], dz = c.center[2] - p[2];
+            const float reach = std::sqrt(c.half[0] * c.half[0] + c.half[1] * c.half[1] +
+                                          c.half[2] * c.half[2]) + radius;
+            if (dx * dx + dy * dy + dz * dz <= reach * reach) set[1 + n++] = c.id;
+        }
+        set[0] = n;
+        out.bytes.assign(260, 0);
+        std::memcpy(out.bytes.data(), set.data(), 260);
+        out.known = true;
+        return true;
+    }
+    if (key == 0xE88A04DBu) {
+        /* FUN_144340420 with ONE condition: the ids of the input set whose value of the
+         * bound channel equals the given value (FUN_14434BC60 compares each condition
+         * equal / not-equal and combines them And / Or). Only the HealthState channel is
+         * known for a character offline, and only the single-condition form is served;
+         * the condition's compare mode sits in the channel's runtime entry, which this
+         * loader does not expose, so EQUALS - the form every graph seen here uses, a
+         * state value to match - is assumed and anything else refused. */
+        if (args.size() != 3 || !args[0].known || !args[1].known || !args[2].known ||
+            args[0].bytes.size() < 260) return false;
+        const uint32_t kHealthState = 0x4BB2B05Bu;
+        uint32_t channel = args[1].as_u32();
+        const auto cc = condition_channel_.find(channel);   /* a config pointer: its channel */
+        if (cc != condition_channel_.end()) channel = cc->second;
+        if (channel != kHealthState) return false;
+        const int32_t want = (int32_t)args[2].as_u32();
+        served_[key] += 1;
+        uint32_t in[65];
+        std::memcpy(in, args[0].bytes.data(), 260);
+        std::vector<uint32_t> set(65, 0u);
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < std::min<uint32_t>(in[0], 64u); ++i)
+            for (const Character& c : characters_)
+                if (c.id == in[1 + i] && c.health_state == want && n < 64) set[1 + n++] = c.id;
+        set[0] = n;
+        out.bytes.assign(260, 0);
+        std::memcpy(out.bytes.data(), set.data(), 260);
         out.known = true;
         return true;
     }

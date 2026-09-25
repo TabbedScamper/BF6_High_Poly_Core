@@ -322,8 +322,21 @@ const std::string* PureOps::name_for(uint32_t key) const {
     return it == names_.end() ? nullptr : &it->second;
 }
 
+/* "Translation" IS TWO OPERATORS. The name table maps both keys to one signature,
+ * LinearTransform -> Vec3 (read the translation out). Key 0xEADEC743 is the other
+ * overload, Vec3 -> LinearTransform: the F-14's gear graph builds its argument from
+ * three floats (a Vec3) and multiplies the result as a transform. Read as the first
+ * overload it took 64 bytes of neighbouring slots as its input and refused, and the
+ * gear never moved. By key, because the name cannot tell the two apart. */
+static const uint32_t kTranslationFromVec3 = 0xEADEC743u;
+
 bool PureOps::describe(uint32_t key, OperatorSignature& out) {
     out = OperatorSignature{};
+    if (key == kTranslationFromVec3) {
+        out.input_widths = {16};
+        out.output_width = 64;
+        return true;
+    }
     const std::string* n = name_for(key);
     if (!n) return false;
     const Spec* s = spec_for(*n);
@@ -337,6 +350,24 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     OperatorSignature signature;
     if (!describe(key, signature) || a.size() != signature.input_widths.size())
         return false;
+    if (key == kTranslationFromVec3) {
+        /* identity rotation, the Vec3 as the translation row; a Vec3 input's padding
+         * lane is not part of it */
+        if (a[0].bytes.size() < 12) return false;
+        bool xyz = a[0].known;
+        if (!xyz && a[0].known_bytes.size() >= 12) {
+            xyz = true;
+            for (size_t b = 0; b < 12; ++b) xyz = xyz && a[0].known_bytes[b];
+        }
+        if (!xyz) return false;
+        float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0};
+        std::memcpy(m + 12, a[0].bytes.data(), 12);
+        out = Value{};
+        out.bytes.assign(64, 0);
+        std::memcpy(out.bytes.data(), m, 64);
+        out.known = true;
+        return true;
+    }
     const std::string& n = *name_for(key);
     /* Same rule NamedBuiltins uses: an unknown input makes the result unknown, and
      * saying so is better than computing with a zero that was never there.

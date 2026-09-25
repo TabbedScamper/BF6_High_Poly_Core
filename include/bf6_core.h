@@ -3261,6 +3261,10 @@ BF6_API void bf6_vehicle_set_aim(bf6_vehicle*, float yaw, float pitch);
 /* A REMOTE WEAPON STATION's aim, same convention: Aim_RWS_<index>_Yaw / _Pitch, which
  * the derived graphs turn into "RWS Yaw" / "RWS Pitch". Index 0..3; zero is ahead. */
 BF6_API void bf6_vehicle_set_rws_aim(bf6_vehicle*, int32_t index, float yaw, float pitch);
+/* WHO SITS WHERE. Seat 0 is the driver's. A vehicle opens with the driver seated;
+ * clearing a seat and filling it again is getting out and in, which is what a door
+ * graph animates a door on. Seats 0..7. */
+BF6_API void bf6_vehicle_set_seat(bf6_vehicle*, int32_t seat, int32_t occupied);
 /* Presentation-graph bone writes from the most recent step. Each transform is
  * the absolute local Frostbite LinearTransform: right/up/forward/translation
  * rows at float offsets 0/4/8/12. The name is the authored skeleton bone name. */

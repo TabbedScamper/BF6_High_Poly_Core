@@ -52,11 +52,14 @@ struct bf6_vehicle {
         float theta = 0.0f, w = 0.0f;       /* +0x108 angle, +0x104 angular velocity */
         float prev_t[3] = {0, 0, 0}, prev_v[3] = {0, 0, 0};
         bool history = false;
+        float last_local[16] = {};   /* what this hinge wrote last tick */
+        bool wrote = false;
         float f(uint32_t off) const { auto it = d.find(off); return it == d.end() ? 0.0f : it->second; }
     };
     std::vector<FakeHinge> hinges;
     bf6_ctx* ctx = nullptr;
     float rws_yaw[4] = {}, rws_pitch[4] = {}; /* bf6_vehicle_set_rws_aim */
+    bool seat_occupied[8] = {true, false, false, false, false, false, false, false};
     bool boost = false;
     double time = 0.0;
     std::string name;
@@ -813,6 +816,11 @@ void bf6_vehicle_set_rws_aim(bf6_vehicle* v, int32_t index, float yaw, float pit
     v->rws_pitch[index] = pitch;
 }
 
+void bf6_vehicle_set_seat(bf6_vehicle* v, int32_t seat, int32_t occupied) {
+    if (!v || seat < 0 || seat > 7) return;
+    v->seat_occupied[seat] = occupied != 0;
+}
+
 void bf6_vehicle_set_boost(bf6_vehicle* v, float boost) {
     if (!v) return;
     v->boost = boost > 0.5f;
@@ -860,18 +868,29 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * vehicle, and the driver is one: alive (MM.HealthState 1), seated in the vehicle.
      * Seated at the body's origin with a soldier's bounds (0.8 x 1.8 x 0.8 m, standing
      * extents - the seat locator is not read yet), which only matters against a
-     * search radius, and those are metres. Entity id 1; the vehicle is entity 0. */
+     * search radius, and those are metres. Entity id 2; the vehicle is entity 1. */
     {
         bf6::expression::StateHost::Character driver;
-        driver.id = 1u;
+        driver.id = 2u;   /* the vehicle is 1 (WorldHost self id) */
         driver.center[0] = d.pos[0];
         driver.center[1] = d.pos[1] + 0.9f;
         driver.center[2] = d.pos[2];
         driver.half[0] = 0.4f; driver.half[1] = 0.9f; driver.half[2] = 0.4f;
         driver.active = true;
         driver.health_state = 1;
+        /* the door the driver enters by: LeftDoor1 (2), the value the door graphs test
+         * seat 0's occupant against (the flyer60's per-door constant for seat 0); the
+         * seat's own entry data is not read */
+        driver.open_door = 2;
         /* BF6_NO_DRIVER: an empty vehicle, to check the queries find the driver */
-        s.state_mut().set_characters(std::getenv("BF6_NO_DRIVER") ? std::vector<bf6::expression::StateHost::Character>{} : std::vector<bf6::expression::StateHost::Character>{driver});
+        const bool seated = v->seat_occupied[0] && !std::getenv("BF6_NO_DRIVER");
+        s.state_mut().set_characters(seated ? std::vector<bf6::expression::StateHost::Character>{driver}
+                                            : std::vector<bf6::expression::StateHost::Character>{});
+        /* the seats: the driver in seat 0 when seated; other seats have no one to fill
+         * them offline (entities 3.. would be passengers) */
+        std::vector<uint32_t> seats(8, 0u);
+        if (seated) seats[0] = driver.id;
+        s.state_mut().set_seats(seats);
     }
     /* BF6_HAS_PILOT=1: a helicopter's state list declares HasPilot beside Autopilot,
      * AutohoverEnabled and a Roll PID with its own errorSum and lastError, and nothing
@@ -1056,6 +1075,16 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         for (auto& h : v->hinges) {
             float rest[16], parent_model[16], model[16], B[16];
             if (!s.rig_rest_local(h.bone, rest)) continue;
+            /* THE HINGE SWINGS WHATEVER POSE THE GRAPHS GAVE THE BONE. A door graph opens
+             * the flyer60's doors by writing the door bone; a hinge built on the rest pose
+             * shut them again every tick. The bone's current local is the base when a
+             * graph wrote it this tick (it differs from the hinge's own last write),
+             * otherwise the rest pose, so the swing never compounds on itself. */
+            {
+                float cur[16];
+                if (s.rig_local(h.bone, cur) && !(h.wrote && std::memcmp(cur, h.last_local, 64) == 0))
+                    std::memcpy(rest, cur, 64);
+            }
             const int32_t par = s.rig_parent(h.bone);
             if (par >= 0 && s.rig_model(par, parent_model)) fh::lt(rest, parent_model, model);
             else std::memcpy(model, rest, 64);
@@ -1106,6 +1135,8 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             fh::axis_pivot(axis, pivot, next, H);
             fh::lt(H, rest, local);                               /* hinge, then the rest pose */
             s.write_rig_local(h.bone, local);
+            std::memcpy(h.last_local, local, 64);
+            h.wrote = true;
         }
         if (v->clip_layers.empty()) s.publish_bones();
     }

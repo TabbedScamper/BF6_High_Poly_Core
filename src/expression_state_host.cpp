@@ -212,6 +212,12 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
      * boat that job is a radius search for alive characters (0x16E0F8DA, 0xE88A04DB)
      * that keeps the boat awake, and it finds the driver in the character registry
      * (set_characters). Without the driver there the boat sleeps, as it would empty. */
+    /* THE SEAT / DOOR OPERATORS (see invoke) */
+    if (key == 0x91C21F3Cu) { out.input_widths = {260, 4}; out.output_width = 260; return true; }
+    if (key == 0x0221B337u) { out.input_widths = {260, 260, 4}; out.output_width = 1; return true; }
+    if (key == 0xBC689BF3u) { out.input_widths = {16}; out.output_width = 260; return true; }
+    if (key == 0x2B3256FDu) { out.input_widths = {16, 260}; out.output_width = 0; return true; }
+    if (key == 0xA04FF621u) { out.input_widths = {16}; out.output_width = 0; return true; }
     if (key == 0x16E0F8DAu) {   /* radius search over the characters, see invoke */
         out.input_widths = {16, 4, 4};
         out.output_width = 260;
@@ -835,6 +841,79 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out.known = true;
         return true;
     }
+    /* THE SEAT / DOOR OPERATORS, from the natives (Codex study, corpus 6a1c1b):
+     *   0x91C21F3C  FUN_1475F9B20: from the vehicle in the input collection, the entry
+     *               at the index (the vehicle's +0xD8 entry vector), its associated
+     *               player's entity: a collection of zero or one id
+     *   0x0221B337  FUN_143B67BD0: reflection equality of two values of the given type
+     *               (here two id collections), true when equal
+     *   0xBC689BF3  FUN_1443364B0: read the 260-byte value stored at a state locator
+     *   0x2B3256FD  FUN_144336550: write it back
+     *   0xA04FF621  FUN_142BB8D70: the locator's storage handler, slot +0x30 - its
+     *               target is unresolved; taken as a reset of that state to default,
+     *               stated
+     * So a door graph compares the seat's occupant with the one it stored and animates
+     * the door when they differ - someone got in or out. */
+    auto empty_collection = []() {
+        std::vector<uint8_t> b(260, 0);
+        const uint32_t none = 0x000FFFFFu;
+        for (int i = 1; i <= 64; ++i) std::memcpy(b.data() + 4 * i, &none, 4);
+        return b;
+    };
+    if (key == 0x91C21F3Cu) {
+        if (args.size() != 2 || !args[0].known || !args[1].known || args[0].bytes.size() < 8) return false;
+        served_[key] += 1;
+        out = Value{};
+        out.bytes = empty_collection();
+        out.known = true;
+        uint32_t count = 0;
+        std::memcpy(&count, args[0].bytes.data(), 4);
+        const uint32_t seat = args[1].as_u32();
+        if (count > 0 && seat < seats_.size() && seats_[seat] != 0) {
+            const uint32_t one = 1;
+            std::memcpy(out.bytes.data(), &one, 4);
+            std::memcpy(out.bytes.data() + 4, &seats_[seat], 4);
+        }
+        return true;
+    }
+    if (key == 0x0221B337u) {
+        if (args.size() != 3 || !args[0].known || !args[1].known ||
+            args[0].bytes.size() < 260 || args[1].bytes.size() < 260) return false;
+        served_[key] += 1;
+        out = known_bool(std::memcmp(args[0].bytes.data(), args[1].bytes.data(), 260) == 0);
+        return true;
+    }
+    if (key == 0xBC689BF3u) {
+        if (args.empty() || !args[0].known) return false;
+        served_[key] += 1;
+        take_descriptor(args[0]);
+        const auto it = wide_cells_.find(cell_key(args[0].as_u32()));
+        out = Value{};
+        out.bytes = it != wide_cells_.end() ? it->second : empty_collection();
+        out.known = true;
+        return true;
+    }
+    if (key == 0x2B3256FDu) {
+        if (args.size() != 2 || !args[0].known || !args[1].known || args[1].bytes.size() < 260) return false;
+        served_[key] += 1;
+        take_descriptor(args[0]);
+        wide_cells_[cell_key(args[0].as_u32())] =
+            std::vector<uint8_t>(args[1].bytes.begin(), args[1].bytes.begin() + 260);
+        out = Value{};
+        out.known = true;
+        return true;
+    }
+    if (key == 0xA04FF621u) {
+        if (args.empty() || !args[0].known) return false;
+        served_[key] += 1;
+        take_descriptor(args[0]);
+        const uint64_t k = cell_key(args[0].as_u32());
+        wide_cells_.erase(k);
+        cells_.erase(k);
+        out = Value{};
+        out.known = true;
+        return true;
+    }
     if (key == 0x16E0F8DAu) {
         /* FUN_14433DA50 via thunk 147EEBF10: every character whose bounds, grown by the
          * radius, reach the point, as a count-prefixed id set (4 + 64 ids = 260 bytes,
@@ -877,11 +956,11 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
          * state value to match - is assumed and anything else refused. */
         if (args.size() != 3 || !args[0].known || !args[1].known || !args[2].known ||
             args[0].bytes.size() < 260) return false;
-        const uint32_t kHealthState = 0x4BB2B05Bu;
+        const uint32_t kHealthState = 0x4BB2B05Bu, kOpenDoor = 0x8990F80Fu;
         uint32_t channel = args[1].as_u32();
         const auto cc = condition_channel_.find(channel);   /* a config pointer: its channel */
         if (cc != condition_channel_.end()) channel = cc->second;
-        if (channel != kHealthState) return false;
+        if (channel != kHealthState && channel != kOpenDoor) return false;
         const int32_t want = (int32_t)args[2].as_u32();
         served_[key] += 1;
         uint32_t in[65];
@@ -890,7 +969,8 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         uint32_t n = 0;
         for (uint32_t i = 0; i < std::min<uint32_t>(in[0], 64u); ++i)
             for (const Character& c : characters_)
-                if (c.id == in[1 + i] && c.health_state == want && n < 64) set[1 + n++] = c.id;
+                if (c.id == in[1 + i] && n < 64 &&
+                    (channel == kHealthState ? c.health_state : c.open_door) == want) set[1 + n++] = c.id;
         set[0] = n;
         out.bytes.assign(260, 0);
         std::memcpy(out.bytes.data(), set.data(), 260);
@@ -1601,8 +1681,8 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         return true;
     case kSubHandle:
         out.input_widths = {8, 4}; out.output_width = kSetBytes; return true;
-    case kEntityEntry:
-        out.input_widths = {kSetBytes, 4}; out.output_width = kSetBytes; return true;
+    case kEntityEntry:   /* served by StateHost, which has the seats */
+        return false;
     case kEaseProperty:
         out.input_widths = {4, 4, 4}; out.output_width = 4; return true;
     case kPlayerDefault:
@@ -2418,11 +2498,13 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
     served_[key] += 1;
     switch (key) {
     case kSetFromSlot: {
-        /* FUN_14433ac10(slot): slots 0 and 1 are the graph's own entity; slot 2 is
-         * a related entity this world does not have. A miss adds nothing. */
+        /* FUN_14433ac10(slot): slots 0 and 1 are the graph's own entity; slot 2 is the
+         * related entity at +0xF8 / +0xD0 of the context. A door graph passes slot 2 and
+         * the next call (0x91C21F3C) requires it to be a VehicleEntityData; offline the
+         * only one is the vehicle itself, so slot 2 answers the vehicle (stated). */
         out = empty_set();
         const uint32_t slot = args[0].as_u32();
-        if (slot < 2) {
+        if (slot <= 2) {
             const uint32_t one = 1;
             std::memcpy(out.bytes.data(), &one, 4);
             std::memcpy(out.bytes.data() + 4, &self_id_, 4);

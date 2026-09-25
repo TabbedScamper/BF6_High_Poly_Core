@@ -59,6 +59,7 @@ public:
     /* by rig index: rest local, current model, parent, and a local write (recorded
      * under the bone's channel when it has one, else under a synthetic key) */
     bool rig_rest_local(int32_t index, float out[16]) const { return state_.rest_local(index, out); }
+    bool rig_local(int32_t index, float out[16]) const { return state_.current_local(index, out); }
     bool rig_model(int32_t index, float out[16]) const { return state_.current_model(index, out); }
     int32_t rig_parent(int32_t index) const { return state_.bone_parent(index); }
     void write_rig_local(int32_t index, const float local[16]);
@@ -68,6 +69,7 @@ public:
         return false;
     }
     void publish_bones();
+    void set_seats(const std::vector<uint32_t>& s) { state_.set_seats(s); }
 
     /* Inputs by public-channel NAME (any channel any loaded graph binds). */
     bool set_float(const std::string& channel, float v, uint32_t mode = 0);

@@ -653,7 +653,14 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             std::map<uint32_t, uint32_t> fields;
             bf6__seed_value(*ctx->types, lay, *pl.value, 0, fields, 0, &sim.wheel_ops());
             for (const auto& f : fields)
-                if ((f.second & 0xFFFF0000u) == 0xC0DE0000u) patches[pl.pool_offset] = f.second;
+                if ((f.second & 0xFFFF0000u) == 0xC0DE0000u) {
+                    patches[pl.pool_offset] = f.second;
+                    /* the handle's high word: the pool holds a relocated 8-byte pointer
+                     * there, unknown offline, and an 8-byte copy of a half-known handle
+                     * leaves the curve call refused (the flyer60's door curve) */
+                    /* BF6_HANDLE_HI_OFF=1: leave it, for A/B */
+                    if (!std::getenv("BF6_HANDLE_HI_OFF")) patches[pl.pool_offset + 4] = 0u;
+                }
         } else {
             bf6__seed_value(*ctx->types, lay, *pl.value, pl.pool_offset, patches, 0,
                             &sim.wheel_ops());

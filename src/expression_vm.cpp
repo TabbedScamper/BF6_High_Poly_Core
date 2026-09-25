@@ -1560,6 +1560,27 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                         std::fill(a.known_bytes.begin(), a.known_bytes.end(), (uint8_t)1);
                         a.known = true;
                     }
+                    /* A CURVE HANDLE IS EIGHT BYTES. A graph that keeps its curves by
+                     * reference (slots eight apart) hands the keyed-curve operator a
+                     * 40-byte window whose first eight bytes are the handle and the rest
+                     * the NEXT slots - later doors' handles, not yet copied this tick on
+                     * the flyer60. The native dereferences the handle only, so a window
+                     * with a known seeded handle (0xC0DE / 0xC0DF tag) is known; the rest
+                     * reads zero, which the operator's inline fallback ignores. */
+                    if (record.operator_key == 0x9AFB0561u && !std::getenv("BF6_CURVE_WINDOW_OFF"))
+                        for (Value& a : args) {
+                            if (a.known || a.bytes.size() != 40 || a.known_bytes.size() != 40) continue;
+                            bool head = true;
+                            for (size_t b = 0; b < 8; ++b) head = head && a.known_bytes[b];
+                            uint32_t tag = 0;
+                            std::memcpy(&tag, a.bytes.data(), 4);
+                            tag &= 0xFFFF0000u;
+                            if (!head || (tag != 0xC0DE0000u && tag != 0xC0DF0000u)) continue;
+                            for (size_t b = 8; b < 40; ++b)
+                                if (!a.known_bytes[b]) a.bytes[b] = 0;
+                            std::fill(a.known_bytes.begin(), a.known_bytes.end(), (uint8_t)1);
+                            a.known = true;
+                        }
                 }
                 /* BF6_OP_INPUTS=<hex key>: every call of that operator, with each
                  * input's region, slot, first float, and - the point of it - whether

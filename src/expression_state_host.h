@@ -216,6 +216,11 @@ public:
         w.resize(64);
         std::memcpy(w.data(), local, 64);
     }
+    bool current_local(int32_t index, float out[16]) const {
+        if (index < 0 || (size_t)index >= skeleton_poses_.size()) return false;
+        std::memcpy(out, skeleton_poses_[(size_t)index].local.data(), 64);
+        return true;
+    }
     bool current_model(int32_t index, float out[16]) const {
         if (index < 0 || (size_t)index >= skeleton_poses_.size()) return false;
         std::memcpy(out, skeleton_poses_[(size_t)index].model.data(), 64);
@@ -314,8 +319,12 @@ public:
         float half[3] = {0, 0, 0};    /* half extents of its bounds */
         bool active = true;           /* the flag the search requires (+0x28 bit 3) */
         int32_t health_state = 1;     /* MM.HealthState: 1 Alive, 2 ManDown, 5 Dead ... */
+        int32_t open_door = 0;        /* Vehicle.OpenDoor.Enum: the door it entered by (2 LeftDoor1) */
     };
     void set_characters(const std::vector<Character>& c) { characters_ = c; }
+    /* THE SEATS: seat index -> the id of the entity sitting there (0 = empty). A door
+     * graph animates a door when its seat's occupant changes (0x91C21F3C / 0x0221B337). */
+    void set_seats(const std::vector<uint32_t>& s) { seats_ = s; }
     /* the channel an entity-query config (a relocated pool pointer) tests */
     void map_condition_channel(uint32_t config, uint32_t channel) { condition_channel_[config] = channel; }
     void set_heap_sink(HeapSink* sink) override { heap_ = sink; }
@@ -337,6 +346,9 @@ private:
     }
     std::vector<Frame> frames_;
     std::vector<Character> characters_;
+    std::vector<uint32_t> seats_;
+    /* 260-byte state values (an id collection kept between ticks) by cell key */
+    std::map<uint64_t, std::vector<uint8_t>> wide_cells_;
     std::map<uint32_t, uint32_t> condition_channel_;
     HeapSink* heap_ = nullptr;
     std::vector<PushSeen> pushes_seen_;

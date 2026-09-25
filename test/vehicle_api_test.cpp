@@ -111,6 +111,15 @@ int main(int argc, char** argv) {
         bf6_vehicle_set_cyclic(v, cp, cr);
         static const bool boost = std::getenv("BF6_BOOST") != nullptr;  /* hold InputSprint */
         bf6_vehicle_set_boost(v, boost ? 1.0f : 0.0f);
+        /* BF6_EXIT=a,b: the driver is out of seat 0 from second a to second b - getting
+         * out and back in, which is what a door graph animates a door on. */
+        static float exit_a = -1.0f, exit_b = -1.0f;
+        static const bool exit_parsed = std::getenv("BF6_EXIT") &&
+            std::sscanf(std::getenv("BF6_EXIT"), "%f,%f", &exit_a, &exit_b) == 2;
+        if (exit_parsed) {
+            const float ts = (float)f / 60.0f;
+            bf6_vehicle_set_seat(v, 0, (ts >= exit_a && ts < exit_b) ? 0 : 1);
+        }
         const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
         /* BF6_TIMING=1: the slowest step and the total, per simulated second - whether a
          * phase of flight (lift-off, say) makes the core itself stall the caller. */

@@ -44,18 +44,18 @@ int main(int argc, char** argv) {
     if (boat) bf6_vehicle_set_water(v, 0.0f, 1);
     float out[40] = {};
     /* AIRCRAFT GET A TAKE-OFF after the common sweep, so the parts that only move in
-     * flight (landing gear, gear doors) are exercised: throttle 14 s, nose up
-     * (pitch -0.4 on this rig, measured on the F-16) from 15 s to 20 s, then level.
+     * flight (landing gear, gear doors) are exercised: throttle from 11 s, nose up
+     * (pitch -0.4 on this rig, measured on the F-16) from 13 s to 25 s, then level.
      * Helicopters get the same throttle, which is their collective, to spin up. */
     const bool air = dir.find("/airplane/") != std::string::npos || dir.find("/helicopter/") != std::string::npos;
-    const int seconds = air ? 25 : 11;
+    const int seconds = air ? 35 : 11;
     for (int step = 0; step < 60 * seconds; ++step) {
         const int sec = step / 60;
         float in[9] = {0, 0, 0, 0, 1.0f / 60.0f, 0, 0, 0, 0};
         float pitch = 0, roll = 0, boost = 0;
         if (sec >= 11) {
             in[0] = 1;
-            if (sec >= 15 && sec < 20 && dir.find("/airplane/") != std::string::npos) pitch = -0.4f;
+            if (sec >= 13 && sec < 25 && dir.find("/airplane/") != std::string::npos) pitch = -0.4f;
         }
         switch (sec) {
             case 1: case 2: in[0] = 1; break;
@@ -72,6 +72,8 @@ int main(int argc, char** argv) {
         /* the driver's aim sweeps the turret: +-1 rad of yaw, +-0.15 rad of pitch */
         const float t = (float)step / 60.0f;
         bf6_vehicle_set_aim(v, std::sin(t * 0.8f), 0.15f * std::sin(t * 1.3f));
+        for (int i = 0; i < 2; ++i)   /* the remote weapon stations the same way */
+            bf6_vehicle_set_rws_aim(v, i, std::sin(t * 0.7f + (float)i), 0.2f * std::sin(t * 1.1f));
         bf6_vehicle_set_cyclic(v, pitch, roll);
         bf6_vehicle_set_boost(v, boost);
         bf6_vehicle_step(v, in, out);

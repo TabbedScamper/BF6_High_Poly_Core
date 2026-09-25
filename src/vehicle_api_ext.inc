@@ -34,6 +34,7 @@ struct bf6_vehicle {
      * `in`, because the Godot binding only guarantees six and would read past its buffer. */
     float cyclic_pitch = 0.0f, cyclic_roll = 0.0f;
     float aim_yaw = 0.0f, aim_pitch = 0.0f;   /* bf6_vehicle_set_aim */
+    float rws_yaw[4] = {}, rws_pitch[4] = {}; /* bf6_vehicle_set_rws_aim */
     bool boost = false;
     double time = 0.0;
     std::string name;
@@ -509,6 +510,12 @@ void bf6_vehicle_set_aim(bf6_vehicle* v, float yaw, float pitch) {
     v->aim_pitch = pitch;
 }
 
+void bf6_vehicle_set_rws_aim(bf6_vehicle* v, int32_t index, float yaw, float pitch) {
+    if (!v || index < 0 || index > 3) return;
+    v->rws_yaw[index] = yaw;
+    v->rws_pitch[index] = pitch;
+}
+
 void bf6_vehicle_set_boost(bf6_vehicle* v, float boost) {
     if (!v) return;
     v->boost = boost > 0.5f;
@@ -588,6 +595,11 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     s.set_float("InputPitch", v->cyclic_pitch);
     s.set_float("Aim_Driver_Yaw", v->aim_yaw);
     s.set_float("Aim_Driver_Pitch", v->aim_pitch);
+    for (int i = 0; i < 4; ++i) {
+        const std::string rws = "Aim_RWS_" + std::to_string(i) + "_";
+        s.set_float(rws + "Yaw", v->rws_yaw[i]);
+        s.set_float(rws + "Pitch", v->rws_pitch[i]);
+    }
     s.set_float("InputRoll", v->cyclic_roll);
     s.set_bool("Handbrake", handbrake);
     s.set_time(v->time);

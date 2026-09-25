@@ -41,7 +41,9 @@ const ContextOp kContextOps[] = {
     /* 0xE2EEC2BE removed: it is the game CLOCK (WorldHost), zero inputs. */
     /* 0x9A39505A removed: the game TICK (WorldHost), zero inputs, three outputs. */
     {0x2B65ED67u, 3},
-    {0xC8364385u, 1},
+    /* 0xC8364385 removed: its records carry ONE operand and it is the output (zero
+     * inputs), the same mistake as 0xC58D8EA6. It is the entity's own index, served
+     * below. */
     /* 0xF83207B2 and 0xCA1E499E removed: they are shape-B node records (code takes
      * (ctx, outputs[], inputs[])), not context handles. 0xCA1E499E is the
      * damage-affector entity query FUN_141723e60; answering it as a handle
@@ -206,6 +208,15 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
 
 bool StateHost::describe(uint32_t key, OperatorSignature& out) {
     out = OperatorSignature{};
+    /* OPT-IN (BF6_ENTITY_INDEX=1). Served, it lets the staggered jobs run, and on a boat
+     * that job is a radius search for nearby entities (0x16E0F8DA) which finds no one
+     * offline - the driver is not an entity here - and the boat goes to sleep, skipping
+     * its physics. Until the player registry exists it stays unserved. */
+    if (key == 0xC8364385u && std::getenv("BF6_ENTITY_INDEX")) {   /* the entity index, zero inputs (see invoke) */
+        out.input_widths = {};
+        out.output_width = 4;
+        return true;
+    }
     if (key == 0x0F063D92u) {   /* the skeleton constraint, bone_constraint_solve */
         out.input_widths = {16, 16, 64};
         out.output_width = 0;
@@ -812,6 +823,18 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         else
             unsupplied_channels_[ck] += 1;       /* reads ZERO, recorded */
         out.known = true;
+        return true;
+    }
+    if (key == 0xC8364385u) {
+        /* FUN_142BBC2C0: the evaluating entity's index in the engine's entity table (the
+         * unbound sentinel 0x000FFFFF when it is not registered). Graphs use it only to
+         * STAGGER periodic work across entities - the F-14 casts its airborne ray on
+         * the ticks where (index + tick / N) % M matches - so any stable index is a
+         * valid phase; in the game it is spawn order. The single offline vehicle is
+         * entity 0. */
+        if (!args.empty()) return false;
+        served_[key] += 1;
+        out = Value::from_u32(0u);
         return true;
     }
     if (key == 0x0F063D92u) {

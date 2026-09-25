@@ -277,7 +277,106 @@ void k_InverseMatrix44(Call& c)
     float* o = V(A(1)); for (int i = 0; i < 16; ++i) o[i] = inv[i] / det;
 }
 
+/* 0x1405d8b80: euler (x about +X, y about +Y, z about +Z) -> qZ*qY*qX */
+void k_EulerToQuaternion(Call& c)
+{
+    const float* e = V(A(0)); float* o = V(A(1));
+    const float sx = std::sin(e[0] * 0.5f), cx = std::cos(e[0] * 0.5f), sy = std::sin(e[1] * 0.5f), cy = std::cos(e[1] * 0.5f),
+                sz = std::sin(e[2] * 0.5f), cz = std::cos(e[2] * 0.5f);
+    const float r[4] = { sx * cy * cz - cx * sy * sz, sx * cy * sz + cx * sy * cz, cx * cy * sz - sx * sy * cz, cx * cy * cz + sx * sy * sz };
+    std::memcpy(o, r, sizeof r);
+}
+/* 0x1405d8f50: the inverse of the above, not normalizing its input */
+void k_QuaternionToEuler(Call& c)
+{
+    const float* q = V(A(0)); float* o = V(A(1));
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float Aa = 2 * (w * x + y * z), Bb = 2 * (w * y - x * z), Cc = 2 * (w * z + x * y);
+    const float D0 = 1 - 2 * (x * x + y * y), D2 = 1 - 2 * (y * y + z * z), cc = std::sqrt(Aa * Aa + D0 * D0);
+    float r[4];
+    if (cc > 0.001f) { r[0] = std::atan2(Aa, D0); r[1] = std::atan2(Bb, cc); r[2] = std::atan2(Cc, D2); r[3] = 0; }
+    else { r[0] = std::atan2(2 * (w * x - y * z), 1 - 2 * (x * x + z * z)); r[1] = std::atan2(Bb, cc); r[2] = 0; r[3] = 0; }
+    std::memcpy(o, r, sizeof r);
+}
+/* 0x1408fd460 / 0x1408fdba0: (angle, out_quat, out_normalized_angle) */
+void k_RotateY(Call& c) { const float a = F(A(0)); float* q = V(A(1)); q[0] = 0; q[1] = std::sin(a * 0.5f); q[2] = 0; q[3] = std::cos(a * 0.5f); F(A(2)) = norm_pi(a); }
+void k_RotateZ(Call& c) { const float a = F(A(0)); float* q = V(A(1)); q[0] = 0; q[1] = 0; q[2] = std::sin(a * 0.5f); q[3] = std::cos(a * 0.5f); F(A(2)) = norm_pi(a); }
+/* 0x140f0c040 / 0x140f0c300: (a, b, t, out), out = (a - a t) + b t */
+void k_InterpolateFloat(Call& c) { const float a = F(A(0)), b = F(A(1)), t = F(A(2)); F(A(3)) = (a - a * t) + b * t; }
+void k_InterpolateFloat3(Call& c) { const float *a = V(A(0)), *b = V(A(1)); const float t = F(A(2)); float* o = V(A(3)); for (int k = 0; k < 4; ++k) o[k] = (a[k] - a[k] * t) + b[k] * t; }
+/* 0x142495fd0 */
+void k_RangeChange(Call& c)
+{
+    const float x = F(A(0)), il = F(A(1)), ih = F(A(2)), ol = F(A(3)), oh = F(A(4));
+    const float d = ih - il;
+    if (!(std::fabs(d) > 1.52587890625e-5f)) { F(A(5)) = ol; return; }
+    float t = (x - il) / d;
+    t = t > 0.f ? t : 0.f;            /* maxss: a NaN t becomes 0 */
+    t = t < 1.f ? t : 1.f;
+    F(A(5)) = (ol - ol * t) + oh * t;
+}
+void k_Sign(Call& c) { F(A(1)) = F(A(0)) < 0.f ? -1.f : 1.f; }                       /* 0x1405dd300 */
+void k_RoundFloatFloat(Call& c) { F(A(1)) = std::round(F(A(0))); }                  /* halves away from zero */
+void k_CeilingFloatFloat(Call& c) { F(A(1)) = std::ceil(F(A(0))); }
+/* 0x1405dd7a0: b - a normalized to [-pi, pi) */
+void k_AngleDelta(Call& c)
+{
+    const float v = (F(A(1)) - F(A(0))) + 3.1415927410125732f;
+    const float k = std::floor(v * 0.15915493667125702f);
+    F(A(2)) = (v - k * 6.2831854820251465f) - 3.1415927410125732f;
+}
+
 /* timers and ramps */
+/* 0x1405dcc70: (up, initial, increment, decrement, lo, hi, reset, out, value, initialized) */
+void k_IncDec(Call& c)
+{
+    F(A(7)) = 0;
+    if (!B(A(9))) { F(A(8)) = F(A(1)); B(A(9)) = 1; }
+    float v = F(A(8));
+    v = B(A(0)) ? v + F(A(2)) : v - F(A(3));
+    F(A(8)) = v;
+    if (B(A(6))) { v = F(A(1)); F(A(8)) = v; }
+    v = std::fmin(std::fmax(F(A(4)), v), F(A(5)));
+    F(A(8)) = v; F(A(7)) = v;
+}
+/* 0x1405dc9b0: (trigger, duration:int, active, remaining_out:int, remaining:int state) */
+void k_DurationBool(Call& c)
+{
+    I(A(3)) = 0;
+    if (B(A(0))) I(A(4)) = I(A(1));
+    if (I(A(4)) > 0) { B(A(2)) = 1; I(A(3)) = I(A(4)); I(A(4)) -= 1; }
+    else B(A(2)) = 0;
+}
+/* 0x1405dcaf0: (trigger, duration_s, dt_ticks, active, remaining_out, remaining) */
+void k_DurationBoolSeconds(Call& c)
+{
+    F(A(4)) = 0;
+    if (B(A(0))) F(A(5)) = F(A(1));
+    if (0.f < F(A(5))) {
+        B(A(3)) = 1;
+        float r = F(A(5)) - F(A(2)) * 0.016666668f;
+        if (r < 0) r = 0;
+        F(A(5)) = r; F(A(4)) = r;
+    } else { B(A(3)) = 0; F(A(5)) = 0; F(A(4)) = 0; }
+}
+/* 0x1407912a0: (target4, smooth_time, dt_ticks, out4, initialized, position4, velocity4);
+ * the maximum-change clamp is loaded as (0,0,0,0), the disabled sentinel */
+void k_SpringDamper(Call& c)
+{
+    float *tgt = V(A(0)), *out = V(A(3)), *pos = V(A(5)), *vel = V(A(6));
+    const float st = F(A(1)), dt = F(A(2));
+    if (!B(A(4))) { for (int k = 0; k < 4; ++k) { pos[k] = tgt[k]; vel[k] = 0; } B(A(4)) = 1; }
+    if (st != 0.f) {
+        const float omega = std::fmax(1.f / st, 0.f);
+        const float e = std::exp(-(omega * dt)), a = e * (1.f + omega * dt), cc = -e * omega * omega * dt;
+        for (int k = 0; k < 4; ++k) {
+            const float old = pos[k], ov = vel[k], d = old - tgt[k];
+            pos[k] = tgt[k] + a * d + (e * dt) * ov;
+            vel[k] = cc * d + (e - e * omega * dt) * ov;
+        }
+    }
+    for (int k = 0; k < 4; ++k) out[k] = pos[k];
+}
 /* 0x1405da5c0 (read off the disassembly): (up, dt_ticks, in_time, out_time, out, value, initialized) */
 void k_IncDecNormal(Call& c)
 {
@@ -406,6 +505,16 @@ void k_DofReader(Call& c)
         src = pc->pose->bytes.data() + h.offset;
     std::memmove(c.out[0], src, n);
 }
+/* 0x1408f43f0: DofReader without the validity check */
+void k_ForceDofReader(Call& c)
+{
+    Instance::PoseCtx* pc = *(Instance::PoseCtx**)c.in[0];
+    const DofHandle h = rd<DofHandle>((const uint8_t*)c.in[1]);
+    const uint8_t n = B(c.in[3]);
+    const uint8_t* src = (const uint8_t*)c.in[2];
+    if (pc && pc->pose && h.index != kUnbound && h.offset + n <= pc->pose->bytes.size()) src = pc->pose->bytes.data() + h.offset;
+    std::memmove(c.out[0], src, n);
+}
 void k_DofWriter(Call& c)
 {
     Instance::PoseCtx* pc = *(Instance::PoseCtx**)c.in[0];
@@ -469,7 +578,14 @@ const KernelImpl kKernels[] = {
     { "IBoolWriter", nullptr, k_IBoolWriter }, { "IFloatWriter", nullptr, k_IFloatWriter },
     { "IIntegerWriter", nullptr, k_IIntegerWriter }, { "IVector3Writer", nullptr, k_IVector3Writer },
     { "IQuaternionWriter", nullptr, k_IQuaternionWriter },
-    { "DofReader", nullptr, k_DofReader }, { "DofWriter", nullptr, k_DofWriter },
+    { "DofReader", nullptr, k_DofReader }, { "DofWriter", nullptr, k_DofWriter }, { "ForceDofReader", nullptr, k_ForceDofReader },
+    { "EulerToQuaternion", k_EulerToQuaternion, nullptr }, { "QuaternionCompose", k_EulerToQuaternion, nullptr },
+    { "QuaternionToEuler", k_QuaternionToEuler, nullptr }, { "RotateY", k_RotateY, nullptr }, { "RotateZ", k_RotateZ, nullptr },
+    { "InterpolateFloat", k_InterpolateFloat, nullptr }, { "InterpolateFloat3", k_InterpolateFloat3, nullptr },
+    { "RangeChange", k_RangeChange, nullptr }, { "Sign", k_Sign, nullptr }, { "RoundFloatFloat", k_RoundFloatFloat, nullptr },
+    { "CeilingFloatFloat", k_CeilingFloatFloat, nullptr }, { "AngleDelta", k_AngleDelta, nullptr },
+    { "IncDec", k_IncDec, nullptr }, { "DurationBool", k_DurationBool, nullptr },
+    { "DurationBoolSeconds", k_DurationBoolSeconds, nullptr }, { "SpringDamper", k_SpringDamper, nullptr },
 };
 
 /* Every kernel name the programs are known to call, implemented or not, so a

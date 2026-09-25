@@ -3864,12 +3864,20 @@ bf6_ant_runtime* bf6_ant_runtime_create(bf6_ctx* c, const char* root_asset, cons
     return reinterpret_cast<bf6_ant_runtime*>(out);
 }
 
+/* A STATE THE SCENE OPS WRITE IS THEIRS. With the game's programs running, a caller's
+ * per-frame write to a state they compute (stance transitions, the landing trigger,
+ * the ADS-arms layer, the zoompose weight - 40 of the walker's states measured) would
+ * overwrite the program's answer every frame; such writes are dropped. */
+static bool bf6__ex_owned(const AntRuntimeHandle* h, const char* s)
+{
+    return h->ex && h->ex->host.owned.count(s) != 0;
+}
 void bf6_ant_runtime_set_bool(bf6_ant_runtime* r, const char* s, int v)
-{ if (r && s) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_bool(s, v != 0); }
+{ if (r && s && !bf6__ex_owned(reinterpret_cast<AntRuntimeHandle*>(r), s)) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_bool(s, v != 0); }
 void bf6_ant_runtime_set_float(bf6_ant_runtime* r, const char* s, float v)
-{ if (r && s) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_float(s, v); }
+{ if (r && s && !bf6__ex_owned(reinterpret_cast<AntRuntimeHandle*>(r), s)) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_float(s, v); }
 void bf6_ant_runtime_set_int(bf6_ant_runtime* r, const char* s, int32_t v)
-{ if (r && s) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_int(s, v); }
+{ if (r && s && !bf6__ex_owned(reinterpret_cast<AntRuntimeHandle*>(r), s)) reinterpret_cast<AntRuntimeHandle*>(r)->rt->st.set_int(s, v); }
 
 /* THE POSE A LAYER SITS ON, 7 floats per bone: quaternion x,y,z,w then the
  * translation. A quaternion rather than the 3x4 rows the pose OUTPUT uses, so a

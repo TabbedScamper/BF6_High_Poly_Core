@@ -20,6 +20,7 @@ struct AntExOps {
         std::vector<const bf6ant::Obj*> obj;
         std::vector<std::string> path;
         std::vector<uint32_t> writes;
+        std::set<std::string> owned;    /* states a program has written: callers may not override them */
         uint64_t bind_state(const std::string& p, uint32_t) override {
             for (size_t i = 0; i < path.size(); ++i) if (path[i] == p) return i;
             const bf6ant::Obj* o = p.empty() ? nullptr : rt->g.root(p.c_str());
@@ -48,6 +49,7 @@ struct AntExOps {
         void write_state(uint64_t h, const void* in, Kind k) override {
             if (h >= obj.size()) return;
             ++writes[h];
+            owned.insert(path[h]);
             switch (k) {
             case Bool: rt->st.set_bool(path[h], *(const uint8_t*)in != 0); break;
             case Float: { float f; std::memcpy(&f, in, 4); rt->st.set_float(path[h], f); break; }

@@ -21,6 +21,7 @@
 
 #include "ant_graph.h"
 #include "arm_ik.h"
+#include "ex_vm.h"
 
 namespace bf6ant {
 
@@ -113,6 +114,11 @@ struct Runtime {
      * Empty means nothing has written it yet, and a reader then contributes nothing,
      * which is the same as the layer being absent. */
     std::map<std::string, Pose> pose_states;
+    /* VECTOR3 AND QUATERNION GAME STATES (x, y, z, w), keyed by state asset path.
+     * States holds only bool/float/int; these are written by the EX scene ops
+     * (1p.postupdate.expsop writes 1p.weproot.zoompose.vec3) and by the caller, and
+     * read by the controllers that take a state operand (JointCopy's 0x70b68613). */
+    std::map<std::string, std::array<float, 4>> vec_states;
     explicit Runtime(bf6_ctx* cc) : c(cc), g(cc) {}
     ~Runtime() { for (auto& kv : cdbs) if (kv.second) bf6_free(c, kv.second); }
     void note(const std::string& s) {
@@ -3221,6 +3227,12 @@ struct JointCopyCtrl : Ctrl {
         float v[4] = {0, 0, 0, 0};
         float q[4] = {0, 0, 0, 1};
         const Obj* weight_src = nullptr;
+        /* THE OPERAND FROM A GAME STATE (0x70b68613), when the entry names one: for
+         * 1p.weproot.zoompose.jointadjust it is 1p.weproot.zoompose.vec3, which the
+         * post-update program sets to minus the sight pivot. The constant 0x8cf424e7 is
+         * only its fallback - read alone it said "translation to the origin", which put
+         * the sight 88.5 mm above the eye. */
+        const Obj* vec_src = nullptr;
         float weight_const = 1.f;
         const Obj* enable_src = nullptr;
         bool enable_const = true;
@@ -3246,6 +3258,7 @@ struct JointCopyCtrl : Ctrl {
             read_xyzw(eo->f(0x8cf424e7u), en.v);
             read_xyzw(eo->f(0xbce46c70u), en.q);
             en.weight_src = rt.g.resolve(eo->f(0x71f01f90u), eo);
+            en.vec_src = rt.g.resolve(eo->f(0x70b68613u), eo);
             en.weight_const = (float)numv(eo->f(0x89b14df8u));
             en.enable_src = rt.g.resolve(eo->f(0x6e8c0b93u), eo);
             en.enable_const = boolv(eo->f(0x6e8c0b93u));
@@ -3255,9 +3268,18 @@ struct JointCopyCtrl : Ctrl {
             const Obj* ds = rt.g.resolve(eo->f(0x668f29acu), eo);
             if (ds) {
                 const char want = en.kind == KindRotation ? 'q' : 't';
-                for (const auto& rec : ds_records(ds)) {
-                    if (rec.second != want) continue;
-                    auto it = rt.bone_index.find(rec.first);
+                const auto recs = ds_records(ds);
+                /* ONE DOF, NOT THE WHOLE SET: 0x89f57f2e is the record index in the dof
+                 * set. 1p.weproot.zoompose.jointadjust's entries carry 0 (Wep_Root.q) and
+                 * 3 (Wep_Root.t) over weaponroot.ds. Applying an entry to every record of
+                 * its kind also moved Wep_SpineX - Wep_Root's parent - so the zoompose
+                 * offset landed twice and the sight went 184 mm too low. */
+                const bf6::EbxValue* at = eo->f(0x89f57f2eu);
+                const int only = at ? (int)numv(at) : -1;
+                for (size_t r = 0; r < recs.size(); ++r) {
+                    if (only >= 0 && (int)r != only) continue;
+                    if (recs[r].second != want) continue;
+                    auto it = rt.bone_index.find(recs[r].first);
                     if (it != rt.bone_index.end()) en.bones.push_back(it->second);
                 }
             }
@@ -3326,6 +3348,12 @@ struct JointCopyCtrl : Ctrl {
                 }
                 continue;
             }
+            float operand[4] = { en.v[0], en.v[1], en.v[2], en.v[3] };
+            if (en.vec_src) {
+                auto it = rt.vec_states.find(en.vec_src->path);
+                if (it != rt.vec_states.end()) for (int c = 0; c < 4; ++c) operand[c] = it->second[(size_t)c];
+                else read_xyzw(en.vec_src->f(0x97ea1523u), operand);   /* the state's authored default */
+            }
             for (int b : en.bones) {
                 if (b < 0 || (size_t)b >= out.q.size()) continue;
                 /* Copy takes the joint out of the source; Set takes the operand. */
@@ -3338,7 +3366,7 @@ struct JointCopyCtrl : Ctrl {
                 } else if (en.kind == KindTranslation) {
                     if (from_src && !src.vt[(size_t)b]) continue;
                     for (int c = 0; c < 3; ++c)
-                        out.t[(size_t)b][c] = from_src ? src.t[(size_t)b][(size_t)c] : en.v[c];
+                        out.t[(size_t)b][c] = from_src ? src.t[(size_t)b][(size_t)c] : operand[c];
                     out.vt[(size_t)b] = 1;
                 }
             }
@@ -3700,6 +3728,8 @@ std::unique_ptr<Ctrl> Runtime::make(const Obj* a)
 
 /* ------------------------------------------------------------ C API --- */
 
+#include "ant_ex_ext.inc"
+
 struct AntRuntimeHandle {
     std::unique_ptr<bf6ant::Runtime> rt;
     std::unique_ptr<bf6ant::Ctrl> root;
@@ -3711,6 +3741,8 @@ struct AntRuntimeHandle {
     bool hand_ik = false;
     float hand_ik_miss[2] = {0, 0};   /* each hand's distance to its marker before the solve */
     float hand_ik_after[2] = {0, 0};  /* and after it: 0 unless the marker was out of reach */
+    /* THE SCENE OPS (bf6_ant_runtime_set_ex): null unless asked for. */
+    std::unique_ptr<AntExOps> ex;
 };
 
 /* THE ENGINE'S HAND IK, after the graph.
@@ -3880,9 +3912,23 @@ int bf6_ant_runtime_update(bf6_ant_runtime* r, float seconds)
         if (!h->root) h->rt->note("root asset has no controller: " + h->root_path);
     }
     if (!h->root) return 0;
+    /* sceneopmatrix1p order: 1p.preupdate.expsop, the controllers, 1p.postupdate.expsop,
+     * then the rig ops (the hand IK stands in that last place here). */
+    const float ticks = seconds * 60.f;
+    if (h->ex && h->ex->pre.on) {
+        std::string e;
+        bf6__ex_fill(*h->ex, h->pose.q.empty() ? h->rt->bind : h->pose);
+        if (!h->ex->pre.inst.run(ticks, e)) h->ex->errors.push_back("pre-update: " + e);
+    }
     bf6ant::Pose p;
     h->root->update(*h->rt, seconds * bf6ant::kTicksPerSecond, p);
     if (p.q.size() != h->rt->bind.q.size()) p = h->rt->bind;
+    if (h->ex && h->ex->post.on) {
+        std::string e;
+        bf6__ex_fill(*h->ex, p);
+        if (!h->ex->post.inst.run(ticks, e)) h->ex->errors.push_back("post-update: " + e);
+        else bf6__ex_apply(*h->ex, p);
+    }
     h->pose = p;
     if (h->hand_ik) bf6__hand_ik(*h);
     h->rt->first_update = false;
@@ -3901,6 +3947,67 @@ int32_t bf6_ant_runtime_get_int(const bf6_ant_runtime* r, const char* state, int
     const int32_t v = rt.st.as_int(rt.g, rt.g.root(state), k);
     if (ok) *ok = k ? 1 : 0;
     return v;
+}
+
+/* THE GAME'S SCENE OPS AROUND THE GRAPH (ant_ex_ext.inc): `pre` runs before each
+ * controller update and `post` after it; either may be null. Returns the number of
+ * the programs' DOF seeds this rig resolves, or -1 with `err` set. */
+int bf6_ant_runtime_set_ex(bf6_ant_runtime* r, const char* pre, const char* post, char* err, int err_len)
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (!h) return -1;
+    auto fail = [&](const std::string& why) { if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", why.c_str()); h->ex.reset(); return -1; };
+    h->ex = std::make_unique<AntExOps>();
+    AntExOps& ex = *h->ex;
+    ex.host.rt = h->rt.get();
+    std::string e;
+    if (!bf6__ex_arena(*h->rt, ex, e)) return fail(e);
+    if (!bf6__ex_stage(*h->rt, ex, ex.pre, pre, e)) return fail("pre-update: " + e);
+    if (!bf6__ex_stage(*h->rt, ex, ex.post, post, e)) return fail("post-update: " + e);
+    return ex.seeds_bound;
+}
+
+/* A vector3 or quaternion game state for the scene ops (x, y, z, w). */
+void bf6_ant_runtime_set_vec(bf6_ant_runtime* r, const char* state, const float v[4])
+{
+    auto* h = reinterpret_cast<AntRuntimeHandle*>(r);
+    if (h && h->ex && state && v) h->ex->host.set_vec(state, v);
+}
+
+/* What the scene ops did: seeds bound, kernels missing, notes, run errors, and every
+ * state they wrote with its current value. Returns the length needed. */
+int bf6_ant_runtime_ex_report(const bf6_ant_runtime* r, char* out, int out_len)
+{
+    const auto* h = reinterpret_cast<const AntRuntimeHandle*>(r);
+    std::string s;
+    if (!h || !h->ex) s = "scene ops off\n";
+    else {
+        const AntExOps& ex = *h->ex;
+        char b[512];
+        std::snprintf(b, sizeof b, "seeds %d/%d, arena %zu DOFs, %u DOF writes so far\n", ex.seeds_bound, ex.seeds_total, ex.dof_name.size(), ex.dofs_written);
+        s += b;
+        for (const AntExOps::Stage* st : { &ex.pre, &ex.post }) {
+            if (!st->on) continue;
+            s += "program " + st->prog.path + "\n";
+            for (const std::string& m : st->prog.missing_kernels()) s += "  missing kernel " + m + "\n";
+            std::map<std::string, int> n;
+            for (const std::string& x : st->inst.notes) ++n[x];
+            for (const auto& [x, k] : n) { std::snprintf(b, sizeof b, "  note x%d: ", k); s += b + x + "\n"; }
+        }
+        for (const std::string& e : ex.errors) s += "error " + e + "\n";
+        bf6ant::Runtime& rt = *h->rt;
+        for (size_t i = 0; i < ex.host.path.size(); ++i) {
+            if (!ex.host.writes[i]) continue;
+            bool ok = false;
+            const bf6ant::Obj* o = ex.host.obj[i];
+            const auto& v = rt.vec_states[ex.host.path[i]];
+            std::snprintf(b, sizeof b, "  wrote %s = f%g b%d v(%g %g %g %g)\n", ex.host.path[i].c_str(),
+                          o ? rt.st.as_float(rt.g, o, ok) : 0.f, o ? (int)rt.st.as_bool(rt.g, o, ok) : 0, v[0], v[1], v[2], v[3]);
+            s += b;
+        }
+    }
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", s.c_str());
+    return (int)s.size() + 1;
 }
 
 void bf6_ant_runtime_set_hand_ik(bf6_ant_runtime* r, int on)

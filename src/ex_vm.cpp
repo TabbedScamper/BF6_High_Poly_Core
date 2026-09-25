@@ -448,7 +448,10 @@ void spring(Call& c, int lanes)
         const float h = dt * 0.01666666753590107f, kk = h * stiff * h, sq = std::sqrt(kk);
         const float a = std::fmax(1.f - kk, 0.f), b = std::fmax(1.f - (damp + damp) * sq, 0.f);
         for (int k = 0; k < lanes; ++k) {
-            const float l = lanes == 1 ? lo[0] : lo[k], u = lanes == 1 ? hi[0] : hi[k];
+            /* lo/hi are SCALARS for every lane, Vec3 included: the post-update program's
+             * SpineX_Loco spring passes the constants -10000 and 10000, and reading them
+             * as vectors took the next pool words as bounds and pinned y at 10000. */
+            const float l = lo[0], u = hi[0];
             const bool ranged = std::fabs(u - l) > 1.1920928955078125e-07f;
             const float tc = ranged ? std::fmin(u, std::fmax(l, tgt[k])) : tgt[k];
             const float d = pos[k] - tc, bv = b * vel[k];
@@ -472,26 +475,26 @@ struct StateCtx { Host* host; };
  * (context, handle) -> value (IBoolReader at pc 216 of the pre-update program reads
  * ins 1:5192 = the program's state-context slot, then 1:784 = an input's handle);
  * a writer is (value, context, handle). EX_VM_SPEC.md has context and handle swapped. */
-void rdstate(Call& c, int bytes)
+void rdstate(Call& c, Host::Kind kind)
 {
     StateCtx* s = *(StateCtx**)c.in[0];
-    if (s && s->host) s->host->read_state(*(uint64_t*)c.in[1], c.out[0], bytes);
+    if (s && s->host) s->host->read_state(*(uint64_t*)c.in[1], c.out[0], kind);
 }
-void wrstate(Call& c, int bytes)
+void wrstate(Call& c, Host::Kind kind)
 {
     StateCtx* s = *(StateCtx**)c.in[1];
-    if (s && s->host) s->host->write_state(*(uint64_t*)c.in[2], c.in[0], bytes);
+    if (s && s->host) s->host->write_state(*(uint64_t*)c.in[2], c.in[0], kind);
 }
-void k_IBoolReader(Call& c) { rdstate(c, 1); }
-void k_IFloatReader(Call& c) { rdstate(c, 4); }
-void k_IIntegerReader(Call& c) { rdstate(c, 4); }
-void k_IVector3Reader(Call& c) { rdstate(c, 16); }
-void k_IQuaternionReader(Call& c) { rdstate(c, 16); }
-void k_IBoolWriter(Call& c) { wrstate(c, 1); }
-void k_IFloatWriter(Call& c) { wrstate(c, 4); }
-void k_IIntegerWriter(Call& c) { wrstate(c, 4); }
-void k_IVector3Writer(Call& c) { wrstate(c, 16); }
-void k_IQuaternionWriter(Call& c) { wrstate(c, 16); }
+void k_IBoolReader(Call& c) { rdstate(c, Host::Bool); }
+void k_IFloatReader(Call& c) { rdstate(c, Host::Float); }
+void k_IIntegerReader(Call& c) { rdstate(c, Host::Int); }
+void k_IVector3Reader(Call& c) { rdstate(c, Host::Vec3); }
+void k_IQuaternionReader(Call& c) { rdstate(c, Host::Quat); }
+void k_IBoolWriter(Call& c) { wrstate(c, Host::Bool); }
+void k_IFloatWriter(Call& c) { wrstate(c, Host::Float); }
+void k_IIntegerWriter(Call& c) { wrstate(c, Host::Int); }
+void k_IVector3Writer(Call& c) { wrstate(c, Host::Vec3); }
+void k_IQuaternionWriter(Call& c) { wrstate(c, Host::Quat); }
 
 /* 0x1408ee0e0 / 0x1408ee270 */
 void k_DofReader(Call& c)

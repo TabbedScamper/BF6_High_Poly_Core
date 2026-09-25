@@ -33,10 +33,11 @@ struct Host {
     /* An input's handle: called once per program input at setup. `key` is the
      * per-input interface key (field 0x653bfba0); return any 8-byte value. */
     virtual uint64_t bind_state(const std::string& path, uint32_t key) = 0;
-    /* Read / write a state through its handle. `bytes` is 1 (bool), 4 (float, int)
-     * or 16 (vector3 padded to 16, quaternion). */
-    virtual void read_state(uint64_t handle, void* out, int bytes) = 0;
-    virtual void write_state(uint64_t handle, const void* in, int bytes) = 0;
+    /* Read / write a state through its handle, typed by the kernel that asked:
+     * Bool 1 byte, Float and Int 4, Vec3 16 (float3 padded), Quat 16. */
+    enum Kind { Bool, Float, Int, Vec3, Quat };
+    virtual void read_state(uint64_t handle, void* out, Kind kind) = 0;
+    virtual void write_state(uint64_t handle, const void* in, Kind kind) = 0;
 };
 
 /* THE POSE ARENA the Dof kernels address: a DOF table (index -> byte offset, width)

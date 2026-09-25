@@ -33,9 +33,10 @@ struct MapHost : bf6ex::Host {
             }
         return path.size() - 1;
     }
-    void read_state(uint64_t h, void* out, int n) override { if (h < value.size()) std::memcpy(out, value[h].data(), n); }
-    void write_state(uint64_t h, const void* in, int n) override {
-        if (h < value.size()) { std::memcpy(value[h].data(), in, n); ++writes[h]; }
+    void read_state(uint64_t h, void* out, Kind k) override { if (h < value.size()) std::memcpy(out, value[h].data(), bytes(k)); }
+    static int bytes(Kind k) { return k == Bool ? 1 : k == Float || k == Int ? 4 : 16; }
+    void write_state(uint64_t h, const void* in, Kind k) override {
+        if (h < value.size()) { std::memcpy(value[h].data(), in, bytes(k)); ++writes[h]; }
     }
 };
 }  // namespace

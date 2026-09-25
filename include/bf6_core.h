@@ -5313,6 +5313,14 @@ BF6_API int  bf6_ant_runtime_update(bf6_ant_runtime*, float seconds);
  * (0 Neither disabled, 1 Left, 2 Right, 3 Both) is solved onto the weapon's
  * Wep_IK_LeftHand / Wep_IK_RightHand marker with a two-bone arm solve, and the arm bones
  * are marked written. Off by default. */
+/* The game's EX scene ops around the graph: `pre` (e.g. 1p.preupdate.expsop) before
+ * each controller update, `post` (1p.postupdate.expsop) after it, over this runtime's
+ * states and pose. Returns the DOF seeds resolved, or -1 with err set. */
+BF6_API int  bf6_ant_runtime_set_ex(bf6_ant_runtime*, const char* pre, const char* post, char* err, int err_len);
+/* A vector3/quaternion game state for the scene ops, x y z w. */
+BF6_API void bf6_ant_runtime_set_vec(bf6_ant_runtime*, const char* state, const float v[4]);
+/* What the scene ops did (seeds, missing kernels, notes, states written). */
+BF6_API int  bf6_ant_runtime_ex_report(const bf6_ant_runtime*, char* out, int out_len);
 BF6_API void bf6_ant_runtime_set_hand_ik(bf6_ant_runtime*, int on);
 /* An int game state's current value as the graph sees it; *ok = 0 when not evaluable. */
 BF6_API int32_t bf6_ant_runtime_get_int(const bf6_ant_runtime*, const char* state, int* ok);

@@ -28,6 +28,10 @@ int main(int argc, char** argv)
                                                  skp, err, (int)sizeof(err));
     if (!rt) { std::printf("create: %s\n", err); return 1; }
     bf6_ant_runtime_set_float(rt, "animations/common/mm.vehicle.steeringangle.float", 0.5f);
+    /* BF6_1POR3P=<n>: mm.1por3p.enumgs, which picks each 13p sequence's member (0 = the 3P
+     * clips, 1 = the 1P ones, and 1 is the default). */
+    if (const char* v = std::getenv("BF6_1POR3P"))
+        bf6_ant_runtime_set_int(rt, "animations/glacier/global/gamestates/mm.1por3p.enumgs", std::atoi(v));
     for (int f = 0; f < frames; ++f) bf6_ant_runtime_update(rt, 1.0f / 60.0f);
     std::vector<float> pose((size_t)sk->bone_count * 12);
     std::vector<uint8_t> vr((size_t)sk->bone_count), vt((size_t)sk->bone_count);
@@ -50,6 +54,9 @@ int main(int argc, char** argv)
     }
     std::printf("%s: %d bone(s) with written translation, %d off their bind length by > 5 mm\n",
                 argv[2], written_t, stretched);
+    std::vector<char> notes((size_t)bf6_ant_runtime_notes(rt, nullptr, 0) + 1);
+    bf6_ant_runtime_notes(rt, notes.data(), (int)notes.size());
+    std::printf("notes:\n%s", notes.data());
     bf6_free(c, rt);
     return 0;
 }

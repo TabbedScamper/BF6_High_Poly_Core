@@ -1005,13 +1005,18 @@ std::string resolve_idle_clip(bf6_ctx* c, const std::string& role,
      * the same controllers, not alternatives to this base entry - they are the
      * next thing to add, not a fallback.
      *
-     * The "cl_" spelling is the class-loadout surface's own naming; the plain
-     * one is the loadout screen's, which is what a spawner preview stands for,
-     * so it is tried first. _01 remains last as a genuine last resort. */
+     * THE "cl_" SPELLING FIRST - it is the one those RCs import. All four
+     * (ui.loadout.idlecl.<class>.rc) name idle_cl_<class>_02 as the unit-weight
+     * base entry and no controller references the plain idle_<class>_02 at all.
+     * Trying the plain spelling first, on the belief that it was the loadout
+     * screen's, gave spawners a clip the menu never plays: support leaning back
+     * 45 degrees and recon 24 along the whole spine, for the whole clip, where
+     * the cl_ takes stand upright. Found by rendering every class
+     * (native/render_diag.gd pose:<class>). _01 remains a genuine last resort. */
     static const char* const kVariants[3] = { "_02", "_01", "_03" };
     const std::string base = "animations/glacier/assets/frontend/mainmenu/loadout/"
                              "ui_frontend_standing_idle_";
-    const std::string stems[2] = { role, "cl_" + role };
+    const std::string stems[2] = { "cl_" + role, role };
     std::string clip_path;
     int count = 0;
     for (const std::string& stem : stems) {

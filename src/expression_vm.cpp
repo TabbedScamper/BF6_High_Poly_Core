@@ -1516,6 +1516,30 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                     args.push_back(materialize(graph, instance, slots,
                                                *call.inputs[i],
                                                signature.input_widths[i]));
+                /* A VEC3'S PADDING LANE IS NOT AN INPUT. A Vec3 occupies 16 bytes and a
+                 * graph that assembles one from three floats never writes the fourth, so
+                 * the whole vector read as unknown and every part downstream refused
+                 * (the quad's dampers, springs and tie rods). For operators whose
+                 * reflected signature takes Vec3s and uses x, y, z only, an argument
+                 * unknown in bytes 12..16 alone is known, with that lane zero. Listed by
+                 * key, not guessed from width, because a 16-byte quaternion's w is real. */
+                {
+                    static const uint32_t kVec3Ops[] = {
+                        0xD8353A9Bu,   /* MultiplyFloat3FloatFloat3 */
+                        0x6D98A861u,   /* LinearTransform(Vec3 Translation, Vec3 Rotation, Vec3 Scale) */
+                    };
+                    bool vec3_op = false;
+                    for (uint32_t k : kVec3Ops) vec3_op = vec3_op || record.operator_key == k;
+                    for (Value& a : args) {
+                        if (!vec3_op || a.known || a.bytes.size() != 16 || a.known_bytes.size() != 16) continue;
+                        bool xyz = true;
+                        for (size_t b = 0; b < 12; ++b) xyz = xyz && a.known_bytes[b];
+                        if (!xyz) continue;
+                        std::fill(a.bytes.begin() + 12, a.bytes.end(), (uint8_t)0);
+                        std::fill(a.known_bytes.begin(), a.known_bytes.end(), (uint8_t)1);
+                        a.known = true;
+                    }
+                }
                 /* BF6_OP_INPUTS=<hex key>: every call of that operator, with each
                  * input's region, slot, first float, and - the point of it - whether
                  * the slot is one NO record writes. A state input on such a slot reads

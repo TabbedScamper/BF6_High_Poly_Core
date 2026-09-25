@@ -424,6 +424,64 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
                 by_base_wide[rec.operands[0].offset].push_back({rec.operands[1].offset,
                                                                rec.operands[0].offset});
             }
+        /* THE FIELD EACH SELECTOR NAMES, AS THE GRAPH ITSELF RECORDS IT. The binding
+         * table beside the pool carries one entry per selector word: its pool offset
+         * (0xFC636C1F {region, offset}), a binding kind (0x207099BE) and a one-element
+         * hash list (0xD5E6EF7E) holding the FIELD'S NAME HASH. That is what the loader
+         * resolves against the reflected field table. Assigning selectors by position
+         * instead is right only when a graph reads every field of a struct in order: the
+         * MH-47 reads one field of its rebuilt rotor struct (selector 0x1564, name hash
+         * 0xEA141055, the same field 0x14F0 reads) and position sent it to the first
+         * field, so its rotor RPM ceiling read zero and the rotors never turned. */
+        std::map<uint32_t, uint32_t> field_hash_of_pool;
+        {
+            const uint32_t kPoolRef = 0xFC636C1Fu, kRegion = 0xBDF81E34u, kOffset = 0x4FF541E4u;
+            const uint32_t kKind = 0x207099BEu, kHashes = 0xD5E6EF7Eu;
+            std::function<void(const bf6::EbxValue&, int)> walk = [&](const bf6::EbxValue& v, int depth) {
+                if (depth > 24) return;
+                if (v.kind == bf6::EbxValue::Kind::Struct) {
+                    const bf6::EbxValue* pr = v.field(kPoolRef);
+                    const bf6::EbxValue* hs = v.field(kHashes);
+                    if (pr && hs && v.field(kKind) && hs->items.size() == 1) {
+                        const bf6::EbxValue* reg = pr->field(kRegion);
+                        const bf6::EbxValue* off = pr->field(kOffset);
+                        const bf6::EbxValue& h = hs->items[0];
+                        const bool reg0 = reg && ((reg->kind == bf6::EbxValue::Kind::Uint && reg->u == 0) ||
+                                                  (reg->kind == bf6::EbxValue::Kind::Int && reg->i == 0));
+                        if (reg0 && off) {
+                            const uint32_t o = off->kind == bf6::EbxValue::Kind::Uint ? (uint32_t)off->u
+                                             : (uint32_t)off->i;
+                            const uint32_t hv = h.kind == bf6::EbxValue::Kind::Uint ? (uint32_t)h.u
+                                              : (uint32_t)h.i;
+                            field_hash_of_pool[o] = hv;
+                        }
+                    }
+                }
+                for (const auto& kv : v.fields) walk(kv.second, depth + 1);
+                for (const auto& it : v.items) walk(it, depth + 1);
+            };
+            for (const auto& v : kept) walk(v, 0);
+            if (dbg)
+                std::fprintf(stderr, "seed: %zu selector(s) carry a field name hash\n",
+                             field_hash_of_pool.size());
+        }
+        /* Every call on this base resolved by field name, or none (-> position). */
+        auto by_name = [&](const bf6::TypeLayout& lay, const std::vector<Call>& calls,
+                           std::map<uint32_t, uint32_t>& patch) {
+            if (std::getenv("BF6_SELECTORS_BY_POSITION")) return false;   /* the old rule, to compare */
+            std::map<uint32_t, uint32_t> got;
+            for (const Call& c : calls) {
+                const auto fh = field_hash_of_pool.find(c.selector);
+                if (fh == field_hash_of_pool.end()) return false;
+                bool found = false;
+                for (const auto& f : lay.fields)
+                    if (f.name_hash == fh->second) { got[c.selector] = f.offset; found = true; break; }
+                if (!found) return false;
+            }
+            for (const auto& kv : got) patch[kv.first] = kv.second;
+            return true;
+        };
+        size_t named_bases = 0;
         std::map<uint32_t, uint32_t> sel_patch;
         for (auto& kv : by_base_wide) {
             const auto ty = slot_type.find(kv.first);
@@ -432,6 +490,7 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             if (!ctx->types->guid_by_name_hash(ty->second, g)) continue;
             const bf6::TypeLayout& lay = ctx->types->layout_full(g);
             if (!lay.valid || lay.fields.empty()) continue;
+            if (by_name(lay, kv.second, sel_patch)) { ++named_bases; continue; }
             std::sort(kv.second.begin(), kv.second.end(),
                       [](const Call& a, const Call& b) { return a.selector < b.selector; });
             std::vector<uint32_t> sorted_off;
@@ -462,6 +521,7 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
             if (!ctx->types->guid_by_name_hash(ty->second, g)) continue;
             const bf6::TypeLayout& lay = ctx->types->layout_full(g);
             if (!lay.valid || lay.fields.empty()) continue;
+            if (by_name(lay, kv.second, sel_patch)) { ++named_bases; continue; }
             std::sort(kv.second.begin(), kv.second.end(),
                       [](const Call& a, const Call& b) { return a.selector < b.selector; });
             /* ONLY THE FIELDS THAT COME THROUGH AN ADDRESS. A field too wide to pass
@@ -522,6 +582,8 @@ void bf6__seed_typed_values(bf6_ctx* ctx, const std::string& name, bf6::VehicleS
                 std::fprintf(stderr, "seed: slot 0x%X type %08X, %zu field address(es)\n",
                              kv.first, ty->second, kv.second.size());
         }
+        if (dbg)
+            std::fprintf(stderr, "seed: %zu base object(s) resolved by field name\n", named_bases);
         if (!sel_patch.empty()) {
             sim.add_pool_patches(name, sel_patch);
             if (dbg)

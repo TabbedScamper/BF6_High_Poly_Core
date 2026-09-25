@@ -1536,7 +1536,11 @@ int bf6_base_weapon_stats(bf6_ctx* c, const char* weapon_class,
         }
         if (haveConsensus && !disagree) damage = consensus;
     }
-    if (damage < 0.0) { std::fprintf(stderr, "base stats: no controlled damage curve in %s\n", projectile.c_str()); return 0; }
+    /* NO DAMAGE CURVE IS NOT NO WEAPON. The rate of fire, magazine and muzzle speed
+     * above are read and real; refusing them all over the damage left 22 guns
+     * (the AK-205, G36, M16A3, MG5, Vector ... every 5.56, 9x19 PDW and 7.62 MG
+     * round) with no automatic fire. Damage alone is reported unknown: -1. */
+    if (damage < 0.0) std::fprintf(stderr, "base stats: no controlled damage curve in %s (damage unknown)\n", projectile.c_str());
 
     /* NumericalStatsDBD feeds Value + Delta through the installed
      * BFRoundingEntityData in Round mode before PropertyCast converts it for
@@ -1545,7 +1549,43 @@ int bf6_base_weapon_stats(bf6_ctx* c, const char* weapon_class,
     double gravity = 0.0;
     for (size_t i = 0; i < pe.instance_count() && gravity == 0.0; i++)
         bf6__armory_find_number(pe.read_instance(i), 0xd9d33d20u, gravity);
-    out->damage = (int32_t)std::lround(damage);
+    /* the fire logic: primary 0x16E6FA59, alternates 0x9B956C3D (see bf6_core.h) */
+    for (int k = 0; k < 4; ++k) out->fire_modes[k] = -1;
+    out->fire_mode_count = 0;
+    for (size_t i = 0; i < wb.instance_count() && out->fire_mode_count == 0; i++)
+    {
+        const bf6::EbxValue v = wb.read_instance(i);
+        double primary = -1.0;
+        if (!bf6__armory_find_number(v, 0x16E6FA59u, primary) || primary < 0.0 || primary > 5.0) continue;
+        out->fire_modes[out->fire_mode_count++] = (int32_t)primary;
+        if (const bf6::EbxValue* alts = bf6__armory_find_value(v, 0x9B956C3Du))
+            for (const bf6::EbxValue& a : alts->items)
+            {
+                double m = -1.0;
+                if (!bf6__armory_number(&a, m) || m < 0.0 || m > 5.0 || out->fire_mode_count >= 4) continue;
+                out->fire_modes[out->fire_mode_count++] = (int32_t)m;
+            }
+    }
+    /* the firing sound config the blueprint imports (see bf6_core.h) */
+    out->firing_config[0] = 0;
+    {
+        std::function<bool(const bf6::EbxValue&)> find_cfg = [&](const bf6::EbxValue& v) -> bool {
+            if (v.kind == bf6::EbxValue::Kind::ImportRef) {
+                std::string p = v.import_path;
+                if (p.find("common/sound/weapons/") == 0 && p.find("_firing_config") != std::string::npos) {
+                    if (p.size() > 4 && p.compare(p.size() - 4, 4, ".ebx") == 0) p.resize(p.size() - 4);
+                    std::snprintf(out->firing_config, sizeof out->firing_config, "%s", p.c_str());
+                    return true;
+                }
+            }
+            for (const auto& f : v.fields) if (find_cfg(f.second)) return true;
+            for (const auto& it : v.items) if (find_cfg(it)) return true;
+            return false;
+        };
+        for (size_t i = 0; i < wb.instance_count() && !out->firing_config[0]; i++)
+            find_cfg(wb.read_instance(i));
+    }
+    out->damage = damage < 0.0 ? -1 : (int32_t)std::lround(damage);
     out->rate_of_fire = (int32_t)std::lround(rof);
     out->magazine = (int32_t)std::lround(mag);
     out->muzzle_speed = (float)speed;

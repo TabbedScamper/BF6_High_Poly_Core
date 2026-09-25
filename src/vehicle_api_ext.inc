@@ -21,6 +21,9 @@ struct bf6_vehicle {
     bf6::VehicleDynamics dyn;
     bf6_ray_scene* scene = nullptr;
     bool no_wheel_locators = false;   /* the rig had none: graph physics only */
+    /* Wheel and track speeds by channel name, from the last tick's tyre calls, placed
+     * by where each call's contact point sits on the body (see the step). */
+    std::map<std::string, float> wheel_spin;
     float water_height = 0.0f;        /* the surface the hull and buoyancy read */
     bool water_present = false;
     /* THE CYCLIC, which nothing could command before. The step's `in` array carries
@@ -255,6 +258,12 @@ void bf6__collide_vehicle(bf6_vehicle* v, float dt) {
 bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* tris, int32_t vert_count,
                               char* err, int32_t err_len)
 {
+    return bf6_vehicle_open_ex(c, vehicle_dir, tris, vert_count, 0, err, err_len);
+}
+
+bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const float* tris, int32_t vert_count,
+                                 int32_t flags, char* err, int32_t err_len)
+{
     auto fail = [&](const std::string& m) -> bf6_vehicle* {
         if (err && err_len > 0) std::snprintf(err, (size_t)err_len, "%s", m.c_str());
         return nullptr;
@@ -266,13 +275,29 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
     const size_t s0 = s1 == std::string::npos ? std::string::npos : dir.rfind('/', s1 - 1);
     if (s1 == std::string::npos || s0 == std::string::npos) return fail("vehicle dir must be .../<class>/<vehicle>");
     const std::string veh = dir.substr(s1 + 1), cls = dir.substr(s0 + 1, s1 - s0 - 1);
+    /* THE GRAPHS AND THE RIG CAN LIVE IN DIFFERENT FOLDERS. The rig is always this
+     * vehicle's own; the graphs come from gdir. A vehicle whose folder is art only runs
+     * its twin's graphs: the Cheetah's folder holds a rig, meshes and a customization
+     * whose abilities are ability_gepard_* and nothing else, so it drives as the Gepard. */
+    const std::string root = dir.substr(0, s0 + 1);
+    std::string gdir = dir, gveh = veh, gcls = cls;
+    static const struct { const char* vehicle; const char* donor; } kGraphDonor[] = {
+        {"tank/cheetah", "tank/gepard"},
+    };
+    for (const auto& d : kGraphDonor)
+        if (cls + "/" + veh == d.vehicle) {
+            const std::string dd = d.donor;
+            gdir = root + dd;
+            gcls = dd.substr(0, dd.find('/'));
+            gveh = dd.substr(dd.find('/') + 1);
+        }
 
     std::string exe;
     for (const std::string& cand : bf6::TypeDb::exe_candidates(c->src.game_dir())) { exe = cand; break; }
     if (exe.empty()) return fail("no executable for operator names");
 
     /* THE VEHICLE'S HARDWARE PACKAGES. A level mount does not carry them (a vehicle
-     * folder is mostly in the Update packages); widen the mount once, which only ever
+     * folder is mostly in the Update packages); widen the mount, which only ever
      * adds names, exactly as the first-person path does. */
     auto have = [&](const std::string& name) {
         const uint8_t* probe = nullptr;
@@ -280,23 +305,31 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
     };
     /* THE DRIVETRAIN GRAPH, whatever its class spells it: cars, helicopters and tanks
      * use simex_<class>_<vehicle>, airplanes simex_veh_airplane_<vehicle>. */
-    const std::string sim_a = dir + "/simex_" + cls + "_" + veh;
-    const std::string sim_b = dir + "/simex_veh_" + cls + "_" + veh;
-    if (!have(sim_a) && !have(sim_b)) {
+    const std::string sim_a = gdir + "/simex_" + gcls + "_" + gveh;
+    const std::string sim_b = gdir + "/simex_veh_" + gcls + "_" + gveh;
+    /* Unconditionally: a level mount can carry the drivetrain graph and still miss
+     * the presentation ones: the AH-64 rotor graph is only in the level archives of
+     * levels that field it, so every level is mounted, as the soldier sim does. */
+    {
         char merr[256] = {};
-        bf6_mount_all(c, 0, merr, (int)sizeof(merr));
+        bf6_mount_all(c, 1, merr, (int)sizeof(merr));
     }
     /* A HYPHENATED DESIGNATION. The MQ-9 drone's folder is mq9 but its graph is
      * simex_veh_airplane_mq-9: the hyphen sits between the letters and the digits. */
-    std::string hy = veh;
+    std::string hy = gveh;
     {
         size_t k = hy.size();
         while (k > 0 && std::isdigit((unsigned char)hy[k - 1])) --k;
         if (k > 0 && k < hy.size() && hy[k - 1] != '-') hy.insert(k, "-");
     }
-    const std::string sim_c = dir + "/simex_veh_" + cls + "_" + hy;
+    const std::string sim_c = gdir + "/simex_veh_" + gcls + "_" + hy;
     const std::string simex = have(sim_a) ? sim_a : have(sim_b) ? sim_b : have(sim_c) ? sim_c : sim_b;
-    if (!have(simex)) return fail("no drivetrain graph: " + sim_a);
+    /* PRESENTATION ONLY (BF6_VEHICLE_OPEN_PRESENTATION): no drivetrain graph is not a
+     * refusal when the caller only wants the parts to move. Emplacements and drones
+     * ship presentation graphs and no simex; a drone's live in drone/<veh>/expressions. */
+    const bool presentation_only = !have(simex);
+    if (presentation_only && !(flags & BF6_VEHICLE_OPEN_PRESENTATION))
+        return fail("no drivetrain graph: " + sim_a);
     std::unique_ptr<bf6_vehicle> v(new bf6_vehicle());
     v->name = veh;
     v->scene = bf6_ray_scene_create();
@@ -313,25 +346,70 @@ bf6_vehicle* bf6_vehicle_open(bf6_ctx* c, const char* vehicle_dir, const float* 
      * airplanes use either one combined landinggearandcontrolsurfaces partition or
      * TWO split partitions. Stopping at the first presentation candidate omitted the
      * F-16/JAS-39 control surfaces or gear entirely. */
-    std::vector<std::string> graphs = {simex};
-    if (cls == "airplane") {
+    std::vector<std::string> graphs;
+    if (!presentation_only) graphs.push_back(simex);
+    if (gcls == "airplane") {
         const std::string aircraft[] = {
-            dir + "/presex_" + veh + "_controlsurfaces",
-            dir + "/presex_" + veh + "_landinggear",
-            dir + "/presex_" + veh + "_landinggearandcontrolsurfaces",
+            gdir + "/presex_" + gveh + "_controlsurfaces",
+            gdir + "/presex_" + gveh + "_landinggear",
+            gdir + "/presex_" + gveh + "_landinggearandcontrolsurfaces",
         };
         for (const std::string& cand : aircraft)
             if (have(cand)) graphs.push_back(cand);
     } else {
         const std::string cands[] = {
-            dir + "/presex_" + veh + "_suspensionmovement_1",
-            dir + "/presex_" + veh + "_suspensionmovement",
-            dir + "/presex_" + cls + "_" + veh + "_wheelmovement",
-            dir + "/presex_vehicle_" + veh + "_wheelmovement",
+            gdir + "/presex_" + gveh + "_suspensionmovement_1",
+            gdir + "/presex_" + gveh + "_suspensionmovement",
+            gdir + "/presex_" + gcls + "_" + gveh + "_wheelmovement",
+            gdir + "/presex_vehicle_" + gveh + "_wheelmovement",
         };
         for (const std::string& cand : cands)
             if (have(cand)) { graphs.push_back(cand); break; }
     }
+    /* THE REST OF THE VEHICLE'S PRESENTATION GRAPHS. Each fl_veh_*_singlefeature_*
+     * feature imports one presex graph: handlebars and steering wheels
+     * (presex_vehicle_controller_<veh>), helicopter rotors (presex_<veh>_rotormovement),
+     * turret and gunner parts. Every graph directly in the vehicle's folder is hosted,
+     * except the damage-shader ones, which write material parameters, not bones.
+     * Ability graphs live in subfolders and are not presentation. */
+    for (const std::string& pre : {gdir + "/presex_", gdir + "/expressions/presex_",
+                                   root + "drone/" + gveh + "/expressions/presex_"}) {
+        const int n = bf6_list_res(c, pre.c_str(), nullptr, 0);
+        std::vector<bf6_asset> rows((size_t)std::max(n, 0));
+        const int got = n > 0 ? std::clamp(bf6_list_res(c, pre.c_str(), rows.data(), n), 0, n) : 0;
+        std::vector<std::string> extra;
+        for (int i = 0; i < got; ++i) {
+            const std::string name = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+            if (name.compare(0, pre.size(), pre) != 0) continue;
+            if (name.find('/', pre.size()) != std::string::npos) continue;
+            if (name.find("damageshader") != std::string::npos) continue;
+            /* one wheel graph was picked above; a second spelling would drive them twice */
+            if (name.find("suspensionmovement") != std::string::npos ||
+                name.find("wheelmovement") != std::string::npos) continue;
+            if (std::find(graphs.begin(), graphs.end(), name) != graphs.end()) continue;
+            if (std::find(extra.begin(), extra.end(), name) != extra.end()) continue;
+            extra.push_back(name);
+        }
+        std::sort(extra.begin(), extra.end());
+        graphs.insert(graphs.end(), extra.begin(), extra.end());
+    }
+    /* BF6_SKIP_GRAPHS=<substr>[,<substr>...]: leave matching graphs out, to test what one
+     * graph contributes (a diagnostic, never a default). */
+    if (const char* sk = std::getenv("BF6_SKIP_GRAPHS")) {
+        std::vector<std::string> subs;
+        for (std::string t = sk; !t.empty();) {
+            const size_t comma = t.find(',');
+            subs.push_back(t.substr(0, comma));
+            t = comma == std::string::npos ? std::string() : t.substr(comma + 1);
+        }
+        graphs.erase(std::remove_if(graphs.begin(), graphs.end(), [&](const std::string& g) {
+            for (const std::string& sub : subs) if (!sub.empty() && g.find(sub) != std::string::npos) return true;
+            return false;
+        }), graphs.end());
+    }
+    if (graphs.empty()) return fail("no drivetrain or presentation graph: " + sim_a);
+    if (std::getenv("BF6_VEHICLE_GRAPHS"))
+        for (const std::string& g : graphs) std::fprintf(stderr, "vehicle graph %s\n", g.c_str());
     const std::string ske = dir + "/art/ske_veh_" + cls + "_" + veh + "_base";
     std::string e;
     if (!v->sim.open(c, exe, graphs, ske, bf6__vehicle_trace, v.get(), e)) {
@@ -424,6 +502,17 @@ int32_t bf6_vehicle_bone(bf6_vehicle* v, int32_t index,
     return 1;
 }
 
+int32_t bf6_vehicle_motion_report(bf6_vehicle* v, char* out, int32_t cap) {
+    if (!v) return 0;
+    const std::string j = v->sim.motion_json();
+    if (out && cap > 0) {
+        const size_t n = std::min(j.size(), (size_t)cap - 1);
+        std::memcpy(out, j.data(), n);
+        out[n] = 0;
+    }
+    return (int32_t)j.size();
+}
+
 void bf6_vehicle_set_pose(bf6_vehicle* v, const float pos[3], const float quat[4]) {
     if (!v) return;
     for (int i = 0; i < 3; ++i) { v->dyn.pos[i] = pos[i]; v->dyn.vel[i] = 0; v->dyn.angvel[i] = 0; }
@@ -488,6 +577,53 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             s.set_float(wch[w], d.omega[w]);
             s.state_mut().set_wheel_state(w, d.omega[w], d.fz[w] > 0.0f);
         }
+    /* THE WHEEL SPEEDS THE PRESENTATION READS. Native code publishes each wheel's
+     * speed on AngularVelocity_Wheel_*; the suspension and wheel graphs spin the hubs
+     * from it. In graph physics the value is the graph's own last tyre speed per wheel
+     * (written back into d.omega after the previous tick), so this publishes the
+     * drivetrain's answer rather than a second model. Four-wheel spellings only: the
+     * aircraft FC/RL/RR and the tank tracks are not mapped to a tyre section yet. */
+    else if (!v->no_wheel_locators)
+        for (int w = 0; w < 4; ++w) s.set_float(wch[w], d.omega[w]);
+    /* the positional wheel and track speeds (a car's four keep the locator path above) */
+    for (const auto& kv : v->wheel_spin) {
+        const bool car_wheel = !v->no_wheel_locators &&
+            (kv.first == wch[0] || kv.first == wch[1] || kv.first == wch[2] || kv.first == wch[3]);
+        if (!car_wheel) s.set_float(kv.first, kv.second);
+    }
+    /* WHAT IS KNOWN ABOUT A VEHICLE IN THE EDITOR. These are game-state channels whose
+     * value here is not in doubt: a vehicle placed on a map at full health, driven by
+     * the local player, not in a level-insertion sequence, not a free-to-play call-in,
+     * not on a scripted exotic spline, awake. Channels whose meaning is not yet proven
+     * (Vehicle Damage State's enum, Airborne State, TeamId) are left unsupplied. */
+    s.set_float("Vehicle Health Normalized", 1.0f);
+    s.set_bool("Vehicle Is Wreck", false);
+    s.set_bool("EntryActive_Driver Local", true);
+    s.set_bool("IsInLevelInsertion", false);
+    s.set_bool("HoldVehicleInInsertion", false);
+    s.set_bool("IsF2PCallIn", false);
+    s.set_bool("IsOnExoticSpline", false);
+    s.set_float("ExoticVehicleThrottle", 0.0f);
+    s.set_bool("IsSleeping", false);
+    s.set_bool("IsPlayingExternalState", false);
+    s.set_bool("IsPlayingMainExternalState", false);
+    /* player inputs this binding has no key for: none held */
+    s.set_float("InputCrawlSpeed", 0.0f);
+    s.set_bool("Input Freelook", false);
+    s.set_bool("ThermalCamera_Active", false);
+    if (!v->water_present) s.set_bool("Vehicle.IsInWater", false);
+    /* HEIGHT ABOVE WHAT IS UNDER IT: one ray straight down from the body through the
+     * same ground the wheels trace (and the water plane when there is one). */
+    {
+        const double from[3] = {d.pos[0], d.pos[1] + 0.5, d.pos[2]};
+        const double to[3] = {d.pos[0], d.pos[1] - 2000.0, d.pos[2]};
+        double hit[3] = {}, nrm[3] = {};
+        float h = 2000.0f;
+        if (bf6__vehicle_trace(v, from, to, hit, nrm)) h = d.pos[1] - (float)hit[1];
+        s.set_float("Vehicle DistanceToTerrain", h);
+        const float hw = v->water_present ? std::min(h, d.pos[1] - v->water_height) : h;
+        s.set_float("Vehicle DistanceToTerrainOrWater", hw);
+    }
     s.set_vec3("LinearVelocity", d.vel, 0);
     s.set_vec3("AngularVelocity", d.angvel, 0);
     /* GRAPH PHYSICS: the car's own wheel functions (ray, suspension, tyre, spin) run
@@ -556,6 +692,44 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                     std::fprintf(stderr, "%s", s.record_info((uint32_t)r).c_str());
                     p = *end ? end + 1 : end;
                 }
+        /* BF6_POOL_DUMP=<graph name>:<hex>[,<hex>...]: the on-disk pool words (8 bytes)
+         * at those offsets and the loader's patch, once */
+        if (const char* pd = std::getenv("BF6_POOL_DUMP"))
+            if (v->time < 0.02) {
+                const std::string spec = pd;
+                const size_t colon = spec.rfind(':');
+                const std::string gname = spec.substr(0, colon);
+                const bf6::expression::Graph* gr = s.graph_named(gname);
+                for (size_t p = colon + 1; gr && p < spec.size();) {
+                    const size_t comma = spec.find(',', p);
+                    const uint32_t off = (uint32_t)std::strtoul(spec.substr(p, comma - p).c_str(), nullptr, 16);
+                    uint32_t w0 = 0, w1 = 0, patched = 0;
+                    if (off + 8 <= gr->constant_pool.size()) {
+                        std::memcpy(&w0, gr->constant_pool.data() + off, 4);
+                        std::memcpy(&w1, gr->constant_pool.data() + off + 4, 4);
+                    }
+                    const bool has = s.pool_patch(gname, off, patched);
+                    std::fprintf(stderr, "pool 0x%X: %08X %08X%s", off, w0, w1, has ? "" : "\n");
+                    if (has) std::fprintf(stderr, "  patched %08X\n", patched);
+                    if (comma == std::string::npos) break;
+                    p = comma + 1;
+                }
+            }
+        /* BF6_LIST_RECS=<graph substr>:<lo hex>-<hi hex>: the records in that range, once */
+        if (const char* ls = std::getenv("BF6_LIST_RECS"))
+            if (v->time < 0.02) {
+                char gname[128] = {};
+                unsigned lo = 0, hi = 0;
+                if (std::sscanf(ls, "%127[^:]:%x-%x", gname, &lo, &hi) == 3)
+                    std::fprintf(stderr, "%s", s.list(gname, lo, hi).c_str());
+            }
+        /* BF6_CHANNEL_USE=<name>: once, every record that names that channel and what follows */
+        if (const char* cu = std::getenv("BF6_CHANNEL_USE"))
+            if (v->time < 0.02) std::fprintf(stderr, "%s", s.readers(cu).c_str());
+        /* BF6_CHANNEL_SRC=<name>: at BF6_GRAPH_REC_T, who writes that channel and from what */
+        if (const char* ch = std::getenv("BF6_CHANNEL_SRC"))
+            if (std::fabs(v->time - (std::getenv("BF6_GRAPH_REC_T") ? std::atof(std::getenv("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
+                std::fprintf(stderr, "%s", s.writers(ch).c_str());
         if (const char* src = std::getenv("BF6_GRAPH_SRC"))
             if (std::fabs(v->time - (std::getenv("BF6_GRAPH_REC_T") ? std::atof(std::getenv("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
                 std::fprintf(stderr, "%s", s.sources((uint32_t)std::strtoul(src, nullptr, 16)).c_str());
@@ -620,6 +794,46 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                 }
             }
             s.state_mut().clear_unseeded_frame_reads();
+            /* WHICH WHEEL EACH TYRE CALL IS, BY WHERE IT TOUCHES. A vehicle without the
+             * four car locators names its wheels by position instead - an aircraft's
+             * AngularVelocity_Wheel_FC / RL / RR, a tank's AngularVelocity_Track_Left and
+             * _Right - and native code publishes each from that wheel's physics. The
+             * graph's own tyre calls carry their contact points, so each call is placed
+             * on the body (forward +Z, left +X, the core frame) and its speed goes to the
+             * channel for that position; several calls on one wheel or track average. */
+            {
+                const auto& tp = s.wheel_ops().tyre_positions();
+                const auto& tom = s.wheel_ops().tyre_omegas();
+                v->wheel_spin.clear();
+                if (!tp.empty() && tp.size() == tom.size()) {
+                    const float qi[4] = {-d.quat[0], -d.quat[1], -d.quat[2], d.quat[3]};
+                    std::vector<std::array<float, 3>> loc(tp.size());
+                    float zmin = 1e9f, zmax = -1e9f;
+                    for (size_t i = 0; i < tp.size(); ++i) {
+                        const float rel[3] = {tp[i][0] - d.pos[0], tp[i][1] - d.pos[1], tp[i][2] - d.pos[2]};
+                        float l[3];
+                        bf6__qrot(qi, rel, l);
+                        loc[i] = {l[0], l[1], l[2]};
+                        zmin = std::min(zmin, l[2]);
+                        zmax = std::max(zmax, l[2]);
+                    }
+                    const float zmid = 0.5f * (zmin + zmax);
+                    std::map<std::string, std::pair<float, int>> acc;
+                    auto add = [&](const std::string& ch, float w) { acc[ch].first += w; acc[ch].second += 1; };
+                    for (size_t i = 0; i < loc.size(); ++i) {
+                        const bool left = loc[i][0] > 0.0f, front = loc[i][2] > zmid;
+                        const bool centre = std::fabs(loc[i][0]) < 0.25f;
+                        add(left ? "AngularVelocity_Track_Left" : "AngularVelocity_Track_Right", tom[i]);
+                        if (front && centre) add("AngularVelocity_Wheel_FC", tom[i]);
+                        else add(std::string("AngularVelocity_Wheel_") + (front ? "F" : "R") + (left ? "L" : "R"), tom[i]);
+                    }
+                    for (const auto& kv : acc) v->wheel_spin[kv.first] = kv.second.first / (float)kv.second.second;
+                    if (std::getenv("BF6_WHEEL_MAP") && v->time > 1.0 && v->time < 1.02)
+                        for (size_t i = 0; i < loc.size(); ++i)
+                            std::fprintf(stderr, "tyre %zu at body (%.2f %.2f %.2f) omega %.2f\n",
+                                         i, loc[i][0], loc[i][1], loc[i][2], tom[i]);
+                }
+            }
         }
         if (s.wheel_ops().com_set()) {
             v->graph_com_written = true;

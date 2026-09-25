@@ -206,6 +206,16 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
 
 bool StateHost::describe(uint32_t key, OperatorSignature& out) {
     out = OperatorSignature{};
+    if (key == 0x0F063D92u) {   /* the skeleton constraint, bone_constraint_solve */
+        out.input_widths = {16, 16, 64};
+        out.output_width = 0;
+        return true;
+    }
+    if (key == 0xE7488ECEu) {   /* kNamedHandle, below: the named-provider lookup */
+        out.input_widths = {4, 4};
+        out.output_width = 8;
+        return true;
+    }
     if (key == kPushFrame) {
         out.input_widths = {4, 4, 4, 4};
         out.output_width = 0;
@@ -367,6 +377,162 @@ static bool lt_inverse(const float m[16], float out[16]) {
     return true;
 }
 
+/* THE SKELETON CONSTRAINT (0x0F063D92), transcribed from the natives:
+ *   FUN_1443342C0 -> FUN_144335CB0  resolves the two bones and gathers the poses
+ *   FUN_1443324B0                   the setup from rest poses and the 64-byte config
+ *   FUN_144332A40                   the solve, into the bone's LOCAL pose
+ *   FUN_144185640                   the look-at basis
+ * Every suspension graph ends in a block of these: a damper aims at its lower mount,
+ * a spring stretches between its seats, a CV shaft hinges to follow the knuckle.
+ * Rows are Frostbite LinearTransform rows (right, up, forward, translation) and points
+ * transform as row vectors, as lt_mul composes. The polynomial sin/cos the native uses
+ * are its own approximations of sin and cos, taken here from the standard library. */
+namespace cns {
+struct V3 { float x, y, z; };
+static V3 v3(float x, float y, float z) { return {x, y, z}; }
+static V3 row(const float* m, int r) { return {m[r * 4], m[r * 4 + 1], m[r * 4 + 2]}; }
+static void set_row(float* m, int r, V3 v) { m[r * 4] = v.x; m[r * 4 + 1] = v.y; m[r * 4 + 2] = v.z; }
+static V3 add(V3 a, V3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+static V3 sub(V3 a, V3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+static V3 mul(V3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
+static float dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static V3 cross(V3 a, V3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+static float len(V3 a) { return std::sqrt(dot(a, a)); }
+/* p * m, a point */
+static V3 xf(const float* m, V3 p) {
+    return add(add(add(mul(row(m, 0), p.x), mul(row(m, 1), p.y)), mul(row(m, 2), p.z)), row(m, 3));
+}
+/* v * m, a direction */
+static V3 xd(const float* m, V3 v) {
+    return add(add(mul(row(m, 0), v.x), mul(row(m, 1), v.y)), mul(row(m, 2), v.z));
+}
+/* rotate v by the quaternion (axis * sin(a/2), cos(a/2)): v + 2 q x (q x v + w v) */
+static V3 qrot(V3 axis, float angle, V3 v) {
+    const float s = std::sin(angle * 0.5f), w = std::cos(angle * 0.5f);
+    const V3 q = mul(axis, s);
+    const V3 t = add(mul(v, w), cross(q, v));
+    return add(v, mul(cross(q, t), 2.0f));
+}
+static float sign_of(float v) { return v < 0.0f ? -1.0f : (v > 0.0f ? 1.0f : 0.0f); }
+} // namespace cns
+
+/* rest_local, rest_model: the constrained bone; rest_model_t, cur_model_t: its target;
+ * cur_model_p: its parent (identity for a root); cfg: the 16-float config block;
+ * out: in the bone's current local pose, out the solved one. */
+static void bone_constraint_solve(const float rest_local[16], const float rest_model[16],
+                                  const float rest_model_t[16], const float cur_model_t[16],
+                                  const float cur_model_p[16], const float cfg[16], float out[16]) {
+    using namespace cns;
+    uint8_t flag_stretch = 0, flag_target_frame = 0;
+    std::memcpy(&flag_stretch, (const uint8_t*)cfg + 0x38, 1);
+    std::memcpy(&flag_target_frame, (const uint8_t*)cfg + 0x39, 1);
+    int32_t type = 0;
+    std::memcpy(&type, cfg + 13, 4);
+
+    /* ---- FUN_1443324B0: the setup ---- */
+    const float* frame = flag_target_frame ? rest_model_t : rest_model;
+    const V3 tp_model = xf(frame, v3(cfg[0], cfg[1], cfg[2]));
+    float inv_rest_model[16];
+    if (!lt_inverse(rest_model, inv_rest_model)) return;
+    const V3 L = xf(inv_rest_model, tp_model);          /* target in the bone's rest frame */
+    int axis = 0;
+    float sgn = 1.0f;
+    /* The axis code is an INTEGER in the block (the quad's dampers carry 2, +Y), though
+     * the decompile types the block as floats: 0 picks the dominant component, 1..3 are
+     * +X..+Z and 4..6 are -X..-Z. */
+    int32_t axis_code = 0;
+    std::memcpy(&axis_code, cfg + 12, 4);
+    if (axis_code == 0) {                               /* the dominant component */
+        const float ax = std::fabs(L.x), ay = std::fabs(L.y), az = std::fabs(L.z);
+        if (std::max(ay, az) < ax) { axis = 0; sgn = sign_of(L.x); }
+        else if (ay <= az)         { axis = 2; sgn = sign_of(L.z); }
+        else                       { axis = 1; sgn = sign_of(L.y); }
+    } else {                                            /* 1..3 = +X..+Z, 4..6 = -X..-Z */
+        const int code = axis_code;
+        axis = ((code - 1) % 3 + 3) % 3;
+        sgn = code < 4 ? 1.0f : -1.0f;
+    }
+    const V3 aim_row = mul(row(rest_local, axis), sgn);
+    bool plane = false;
+    V3 normal{0, 0, 0};
+    {
+        const V3 n = v3(cfg[8], cfg[9], cfg[10]);
+        const float n2 = dot(n, n);
+        if (1e-6f < n2) { plane = true; normal = xd(rest_local, mul(n, 1.0f / std::sqrt(n2))); }
+    }
+    const V3 unit = axis == 0 ? v3(1, 0, 0) : axis == 1 ? v3(0, 1, 0) : v3(0, 0, 1);
+    const float along = dot(L, mul(unit, sgn));
+    const V3 aim_rest = xf(rest_local, mul(unit, sgn * along));   /* on the aim axis, parent space */
+    const float rest_len = len(sub(aim_rest, row(rest_local, 3)));
+    float inv_rest_model_t[16];
+    if (!lt_inverse(rest_model_t, inv_rest_model_t)) return;
+    const V3 tp_in_target = xf(inv_rest_model_t, xf(rest_model, L));
+    const V3 tp_rest_parent = xf(rest_local, L);
+
+    /* ---- FUN_144332A40: the solve ---- */
+    float inv_p[16];
+    if (!lt_inverse(cur_model_p, inv_p)) return;
+    V3 delta = sub(xf(inv_p, xf(cur_model_t, tp_in_target)), tp_rest_parent);
+    if (plane) delta = mul(normal, dot(delta, normal));
+    const V3 aim = add(add(v3(cfg[4], cfg[5], cfg[6]), delta), aim_rest);
+    const V3 pos = row(out, 3);
+    const float stretch = flag_stretch && rest_len > 0.0f ? len(sub(pos, aim)) / rest_len : 1.0f;
+
+    if (type == 3) {                                    /* look-at, FUN_144185640 */
+        const V3 up = axis == 1 ? v3(0, 0, -sgn) : v3(0, 1, 0);
+        V3 f = sub(aim, pos);
+        const float fl = dot(f, f);
+        f = fl < 1e-6f ? v3(0, 0, 1) : mul(f, 1.0f / std::sqrt(fl));
+        V3 u = up;
+        if (0.9999f < std::fabs(dot(f, up))) u = v3(up.y, up.z, up.x);
+        V3 r = cross(u, f);
+        r = mul(r, 1.0f / std::max(len(r), 1e-12f));
+        const V3 b1 = cross(f, r);
+        if (axis == 0) {
+            set_row(out, 0, mul(f, sgn * stretch));
+            set_row(out, 2, mul(r, -sgn));
+            set_row(out, 1, b1);
+        } else if (axis == 1) {
+            set_row(out, 1, mul(f, sgn * stretch));
+            set_row(out, 0, r);
+            set_row(out, 2, mul(b1, -sgn));
+        } else {
+            set_row(out, 2, mul(f, sgn * stretch));
+            set_row(out, 0, mul(r, sgn));
+            set_row(out, 1, b1);
+        }
+        return;
+    }
+    if (type == 0 || type == 1 || type == 2) {          /* hinge about a rest axis */
+        const V3 hinge = row(rest_local, type);
+        V3 d = sub(aim, pos);
+        d = sub(d, mul(hinge, dot(d, hinge)));
+        const float dl = len(d);
+        if (dl > 0.0f) d = mul(d, 1.0f / dl);
+        float c = dot(d, aim_row);
+        c = std::max(-1.0f, std::min(1.0f, c));
+        float a = std::acos(c);
+        if (type == 0 && 0.0f < dot(d, row(rest_local, 1))) a = -a;
+        if (type == 1 && dot(d, row(rest_local, 0)) < 0.0f) a = -a;
+        if (type == 2 && 0.0f < dot(d, row(rest_local, 1))) a = -a;
+        if (type == 0) {
+            set_row(out, 2, qrot(hinge, a, row(rest_local, 2)));
+            set_row(out, 1, cross(row(out, 2), row(out, 0)));
+        } else if (type == 1) {
+            set_row(out, 2, qrot(hinge, a, row(rest_local, 2)));
+            set_row(out, 0, cross(row(out, 1), row(out, 2)));
+        } else {
+            set_row(out, 0, qrot(hinge, a, row(rest_local, 0)));
+            set_row(out, 1, cross(row(out, 2), row(out, 0)));
+        }
+    }
+    if (flag_stretch) {                                 /* LAB_14433362B */
+        V3 r = row(out, axis);
+        const float rl = len(r);
+        if (rl > 0.0f) set_row(out, axis, mul(r, stretch / rl));
+    }
+}
+
 /* THREE ROOT OPERATORS, each identified by measuring the records rather than trusting
  * the table's arity.
  *
@@ -385,6 +551,15 @@ static const uint32_t kDeltaTime = 0xC58D8EA6u;
 static const uint32_t kTRS = 0x6D98A861u;
 static const uint32_t kEq64 = 0xE22FCA6Fu;
 static const uint32_t kNamedTransform = 0xABAAAD01u; /* see the header */
+/* 0xE7488ECE, engine node FUN_14432A210: looks the id up in the engine's registry of
+ * named providers and, when found, writes an 8-byte packed handle whose low 20 bits
+ * are the provider's index; the unbound default is 0x000FFFFF / 0xFFFF / 0 / 0, the
+ * sentinel 0xF0F74455 tests against. Its consumers ask whether a named transform
+ * exists before they read it (the quad's suspension gates all its detail parts on
+ * RootTransform). Offline the providers are exactly the transforms this host
+ * publishes, so a published name answers a bound handle (index 0: the consumers seen
+ * only test validity) and an unpublished one stays unknown rather than guessed. */
+static const uint32_t kNamedHandle = 0xE7488ECEu;
 
 void StateHost::set_named_transform(uint32_t name_hash, const float rows[16]) {
     std::vector<uint8_t> bytes(64, 0);
@@ -402,6 +577,32 @@ void StateHost::set_skeleton_bone(int32_t index, int32_t parent,
     std::memcpy(p.rest_model.data(), model, 64);
     std::memcpy(p.local.data(), local, 64);
     std::memcpy(p.model.data(), model, 64);
+}
+
+/* Write a bone's LOCAL pose and recompose its subtree, so a later getter in this
+ * evaluation observes it immediately. Bone indices are topological. */
+void StateHost::commit_local(int32_t index, const float local[16]) {
+    if (index < 0 || (size_t)index >= skeleton_poses_.size()) return;
+    std::memcpy(skeleton_poses_[(size_t)index].local.data(), local, 64);
+    std::vector<uint8_t> changed(skeleton_poses_.size(), 0);
+    changed[(size_t)index] = 1;
+    for (size_t n = (size_t)index; n < skeleton_poses_.size(); ++n) {
+        const int32_t p = skeleton_poses_[n].parent;
+        if (n != (size_t)index && p >= 0 && changed[(size_t)p]) changed[n] = 1;
+        if (!changed[n]) continue;
+        if (p >= 0 && (size_t)p < skeleton_poses_.size())
+            lt_mul(skeleton_poses_[n].local.data(), skeleton_poses_[(size_t)p].model.data(),
+                   skeleton_poses_[n].model.data());
+        else
+            std::memcpy(skeleton_poses_[n].model.data(), skeleton_poses_[n].local.data(), 64);
+    }
+    for (const auto& mapped : skeleton_bone_index_) {
+        const int32_t n = mapped.second;
+        if (n < 0 || (size_t)n >= changed.size() || !changed[(size_t)n]) continue;
+        set_bone_pose(mapped.first, 0, skeleton_poses_[(size_t)n].local.data());
+        set_bone_pose(mapped.first, 1, skeleton_poses_[(size_t)n].model.data());
+        set_bone_pose(mapped.first, 2, skeleton_poses_[(size_t)n].model.data());
+    }
 }
 
 void StateHost::begin_bone_tick() {
@@ -435,6 +636,11 @@ bool StateHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
         if (consts[1] == 0xFFFFFFFFu || consts[2] > 2u) { out = OperatorSignature{}; return false; }
         out.input_widths = {4, 4, 4};
         out.output_width = 64;
+        return true;
+    }
+    if (key == kNamedHandle && consts.size() >= 2) {
+        out.input_widths = {4, 4};
+        out.output_width = 8;
         return true;
     }
     if (key == kPartTransform && !consts.empty()) {
@@ -496,29 +702,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
             } else if (mode != 0u) {
                 std::memcpy(local, desired_model, 64);
             }
-            std::memcpy(skeleton_poses_[(size_t)index].local.data(), local, 64);
-
-            /* Bone indices are topological. Recompose the changed subtree so a
-             * later getter in this evaluation observes the setter immediately. */
-            std::vector<uint8_t> changed(skeleton_poses_.size(), 0);
-            changed[(size_t)index] = 1;
-            for (size_t n = (size_t)index; n < skeleton_poses_.size(); ++n) {
-                const int32_t p = skeleton_poses_[n].parent;
-                if (n != (size_t)index && p >= 0 && changed[(size_t)p]) changed[n] = 1;
-                if (!changed[n]) continue;
-                if (p >= 0 && (size_t)p < skeleton_poses_.size())
-                    lt_mul(skeleton_poses_[n].local.data(), skeleton_poses_[(size_t)p].model.data(),
-                           skeleton_poses_[n].model.data());
-                else
-                    std::memcpy(skeleton_poses_[n].model.data(), skeleton_poses_[n].local.data(), 64);
-            }
-            for (const auto& mapped : skeleton_bone_index_) {
-                const int32_t n = mapped.second;
-                if (n < 0 || (size_t)n >= changed.size() || !changed[(size_t)n]) continue;
-                set_bone_pose(mapped.first, 0, skeleton_poses_[(size_t)n].local.data());
-                set_bone_pose(mapped.first, 1, skeleton_poses_[(size_t)n].model.data());
-                set_bone_pose(mapped.first, 2, skeleton_poses_[(size_t)n].model.data());
-            }
+            commit_local(index, local);
         } else {
             /* Retain unknown channel writes too: a later same-mode getter still
              * sees exactly what was written, even if this rig lacks the mapping. */
@@ -630,6 +814,53 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out.known = true;
         return true;
     }
+    if (key == 0x0F063D92u) {
+        /* FUN_144335CB0: both bones resolved, or nothing happens (the native returns). */
+        if (args.size() != 3 || !args[0].known || !args[1].known || !args[2].known ||
+            args[0].bytes.size() < 4 || args[1].bytes.size() < 4 || args[2].bytes.size() < 64)
+            return false;
+        served_[key] += 1;
+        out = Value{};
+        out.known = true;
+        uint32_t hb = 0, ht = 0;
+        std::memcpy(&hb, args[0].bytes.data(), 4);
+        std::memcpy(&ht, args[1].bytes.data(), 4);
+        const auto bi = skeleton_bone_index_.find(hb), ti = skeleton_bone_index_.find(ht);
+        if (bi == skeleton_bone_index_.end() || ti == skeleton_bone_index_.end()) return true;
+        const int32_t b = bi->second, t = ti->second;
+        if (b < 0 || t < 0 || (size_t)b >= skeleton_poses_.size() || (size_t)t >= skeleton_poses_.size())
+            return true;
+        const SkeletonPose& pb = skeleton_poses_[(size_t)b];
+        const SkeletonPose& pt = skeleton_poses_[(size_t)t];
+        float parent_model[16];
+        lt_identity(parent_model);
+        if (pb.parent >= 0 && (size_t)pb.parent < skeleton_poses_.size())
+            std::memcpy(parent_model, skeleton_poses_[(size_t)pb.parent].model.data(), 64);
+        float cfg[16], local[16];
+        std::memcpy(cfg, args[2].bytes.data(), 64);
+        std::memcpy(local, pb.local.data(), 64);
+        bone_constraint_solve(pb.rest_local.data(), pb.rest_model.data(), pt.rest_model.data(),
+                              pt.model.data(), parent_model, cfg, local);
+        for (int i = 0; i < 16; ++i) if (!std::isfinite(local[i])) return true;
+        commit_local(b, local);
+        std::vector<uint8_t>& written = bone_writes_[hb];
+        written.resize(64);
+        std::memcpy(written.data(), local, 64);
+        return true;
+    }
+    if (key == kNamedHandle && std::getenv("BF6_NAMED_HANDLE_DEBUG")) {
+        std::fprintf(stderr, "named handle: %zu arg(s)", args.size());
+        for (const auto& a : args) std::fprintf(stderr, " %s%08X", a.known ? "" : "?", a.as_u32());
+        std::fprintf(stderr, ", %zu published\n", named_transforms_.size());
+    }
+    if (key == kNamedHandle && args.size() == 2 && args[1].known) {
+        const uint32_t name = args[1].as_u32();
+        if (named_transforms_.find(name) == named_transforms_.end()) return false;
+        served_[key] += 1;
+        out.bytes.assign(8, 0);   /* index 0, bound */
+        out.known = true;
+        return true;
+    }
     if (key == kNamedTransform && args.size() == 3 && args[1].known && args[2].known) {
         served_[key] += 1;
         const uint32_t name = args[1].as_u32();
@@ -637,12 +868,26 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         if (it != named_transforms_.end()) {
             out.bytes = it->second;
         } else {
+            /* UNSUPPLIED IS UNKNOWN, NOT IDENTITY. A named transform is published by a
+             * native component (a helicopter's rotor, a linked sub-skeleton). Reading
+             * identity for one nobody publishes made skeleton-link graphs copy an
+             * identity pose - zero translation included - over bones another graph had
+             * just posed: the MH-47's link graph flattened the rotors that its own rotor
+             * graph was spinning. Unknown lets the dependent write refuse, so the bone
+             * keeps its last pose. Still recorded, so the gap stays visible. */
             unsupplied_transforms_[name] += 1;
-            out.bytes.assign(64, 0);                       /* identity, recorded */
-            const float one = 1.0f;
-            std::memcpy(out.bytes.data() + 0,  &one, 4);
-            std::memcpy(out.bytes.data() + 20, &one, 4);
-            std::memcpy(out.bytes.data() + 40, &one, 4);
+            out.bytes.assign(64, 0);
+            static const bool old_identity = std::getenv("BF6_NAMED_IDENTITY") != nullptr;
+            if (old_identity) {                          /* the old rule, to compare */
+                const float one = 1.0f;
+                std::memcpy(out.bytes.data() + 0,  &one, 4);
+                std::memcpy(out.bytes.data() + 20, &one, 4);
+                std::memcpy(out.bytes.data() + 40, &one, 4);
+                out.known = true;
+                return true;
+            }
+            out.known = false;
+            return true;
         }
         out.known = true;
         return true;
@@ -1060,7 +1305,7 @@ const uint32_t kEntryState    = 0x85766025u; /* thunk 147592EE0 -> 141564A10    
  *   0x77E24C80 Battlefield(Subjects, Tags) -> subjects carrying every tag. FUN_1417443C0
  *              clears the result first; this world has no tagged entities: empty.
  *   0x0F063D92 a skeleton constraint (FUN_1443342C0 -> FUN_144335CB0): two bone
- *              references and a 64-byte block, NO result. No skeleton offline: no-op.
+ *              references and a 64-byte block, NO result. Served by StateHost (bone_constraint_solve).
  *   0xF743C0B8 current RealmEx == input (FUN_14566BA10). The offline vehicle is the
  *              authoritative, server half: true only for RealmEx_Server 0x98BE5555.
  *              The bike tests Client (0xBF0F9789), which gates a client-only reset. */
@@ -1328,10 +1573,8 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         out.input_widths = {kSetBytes, 8};
         out.output_width = kSetBytes;
         return true;
-    case kBoneConstraint:
-        out.input_widths = {16, 16, 64};
-        out.output_width = 0;
-        return true;
+    case kBoneConstraint:   /* served by StateHost, which has the skeleton */
+        return false;
     case kRealmEquals:
         out.input_widths = {4};
         out.output_width = 1;
@@ -1861,12 +2104,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out = Value::from_u32(raw);
         return true;
     }
-    if (key == kBoneConstraint) {       /* a side effect with no result: no-op */
-        served_[key] += 1;
-        out = Value{};
-        out.known = true;
-        return true;
-    }
+
     if (key == kShooterStatus && args.empty()) {
         /* FUN_142CC9510 initializes (status, secondary) to (7, 0), then returns
          * unchanged when FUN_142CC9300 finds no shooter. Primary comes first. */

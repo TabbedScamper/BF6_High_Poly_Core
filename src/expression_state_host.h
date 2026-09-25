@@ -209,6 +209,8 @@ public:
     void set_skeleton_bone(int32_t index, int32_t parent,
                            const float local[16], const float model[16]);
     void map_skeleton_bone(uint32_t channel_hash, int32_t index);
+    /* Write a bone's local pose and recompose its subtree (the setter's commit). */
+    void commit_local(int32_t index, const float local[16]);
     void begin_bone_tick();
     const std::map<uint32_t, std::vector<uint8_t>>& bone_writes() const {
         return bone_writes_;

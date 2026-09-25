@@ -3425,6 +3425,11 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                      slip_angle, f_long, f_lat, st.v_long, rf(W, 0), rf(W, 8));
     tyre_omega_.push_back(sl.omega);
     tyre_contact_.push_back(contact ? 1 : 0);
+    {
+        std::array<float, 3> at{};
+        for (int i = 0; i < 3; ++i) at[(size_t)i] = rf(C, CT_POSITION + 4 * i);
+        tyre_pos_.push_back(at);
+    }
     /* ---- FUN_1443EBAD0 on the snapshot, then the velocity change over dt ---- */
     apply_all(s, recs);
 

@@ -9,6 +9,8 @@
 #include <map>
 #include <set>
 #include <cctype>
+#include <cmath>
+#include <algorithm>
 
 extern "C" uint32_t bf6__type_field_offsets_by_hash(bf6_ctx*, uint32_t, uint32_t*, uint32_t);
 
@@ -22,6 +24,10 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
     channel_hash_.clear();
     bone_identity_.clear();
     presented_bones_.clear();
+    host_set_.clear();
+    bone_binds_.clear();
+    rig_names_.clear();
+    motion_.clear();
     state_.set_allow_writes(true);
     physics_.set_tracer(tracer, tracer_user);
     wheel_.set_tracer(tracer, tracer_user);
@@ -97,6 +103,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             if (b.kind == 0) channel_hash_[b.channel_name] = b.channel_hash;
             else if (b.kind == 2) world_.set_tweakable(b.channel_hash, b.default_bits);
             else all_bone_binds.push_back(b);
+            if (b.kind == 1) bone_binds_[b.channel_hash] = b.channel_name;
             /* every binding name addresses its channel (the moded Vec3 channels such as
              * LinearAcceleration are not kind 0, and were unreachable by name) */
             if (b.kind != 2 && b.channel_name[0]) channel_hash_.emplace(b.channel_name, b.channel_hash);
@@ -209,6 +216,8 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
         std::map<uint32_t, int32_t> bone_of;
         for (int i = 0; i < nc && i < 1024; ++i) bone_of[hs[(size_t)i]] = bs[(size_t)i];
         if (sk) {
+            for (int32_t index = 0; index < sk->bone_count; ++index)
+                rig_names_.push_back(sk->bones[index].name ? sk->bones[index].name : "");
             for (int32_t index = 0; index < sk->bone_count; ++index) {
                 const float* m = sk->bones[index].model;
                 const float* l = sk->bones[index].local;
@@ -241,6 +250,7 @@ bool VehicleSim::hash_of(const std::string& name, uint32_t& h) const {
 bool VehicleSim::set_float(const std::string& channel, float v, uint32_t mode) {
     uint32_t h;
     if (!hash_of(channel, h)) return false;
+    host_set_.insert(channel);
     std::vector<uint8_t> b(4);
     std::memcpy(b.data(), &v, 4);
     state_.set_channel(h, b, mode);
@@ -250,6 +260,7 @@ bool VehicleSim::set_float(const std::string& channel, float v, uint32_t mode) {
 bool VehicleSim::set_bool(const std::string& channel, bool v) {
     uint32_t h;
     if (!hash_of(channel, h)) return false;
+    host_set_.insert(channel);
     state_.set_channel(h, std::vector<uint8_t>(1, (uint8_t)(v ? 1 : 0)));
     return true;
 }
@@ -257,6 +268,7 @@ bool VehicleSim::set_bool(const std::string& channel, bool v) {
 bool VehicleSim::set_int(const std::string& channel, int32_t v) {
     uint32_t h;
     if (!hash_of(channel, h)) return false;
+    host_set_.insert(channel);
     std::vector<uint8_t> b(4);
     std::memcpy(b.data(), &v, 4);
     state_.set_channel(h, b);
@@ -266,6 +278,7 @@ bool VehicleSim::set_int(const std::string& channel, int32_t v) {
 bool VehicleSim::set_vec3(const std::string& channel, const float v[3], uint32_t mode) {
     uint32_t h;
     if (!hash_of(channel, h)) return false;
+    host_set_.insert(channel);
     std::vector<uint8_t> b(16, 0);
     std::memcpy(b.data(), v, 12);
     state_.set_channel(h, b, mode);
@@ -407,6 +420,56 @@ std::map<uint32_t, std::string> VehicleSim::channel_name_map() const {
 std::vector<std::string> VehicleSim::channel_names() const {
     std::vector<std::string> out;
     for (const auto& kv : channel_hash_) out.push_back(kv.first);
+    return out;
+}
+
+/* WHO WRITES A CHANNEL: every channel-set record bound to it, in every graph, with
+ * the tree of records that fed its value on the last tick (sources). */
+std::string VehicleSim::writers(const std::string& channel, int depth) const {
+    uint32_t h;
+    if (!hash_of(channel, h)) return channel + ": no graph binds it\n";
+    static const uint32_t kSetOps[] = {0x6D86C436u, 0xC491CD96u, 0xCC162A96u, 0x95954635u};
+    std::string out;
+    for (const auto& g : graphs_) {
+        std::set<uint32_t> pool_offs;
+        for (const auto& b : g->binds)
+            if (b.region == 0 && b.channel_hash == h) pool_offs.insert(b.pool_offset);
+        if (pool_offs.empty()) continue;
+        for (const auto& rec : g->graph.records) {
+            bool is_set = false;
+            for (uint32_t k : kSetOps) is_set = is_set || (rec.has_operator && rec.operator_key == k);
+            if (!is_set || rec.operands.empty() || rec.operands[0].region != 0 ||
+                !pool_offs.count(rec.operands[0].offset)) continue;
+            char hb[160];
+            std::snprintf(hb, sizeof hb, "== %s writes %s at record 0x%X\n",
+                          g->name.substr(g->name.rfind('/') + 1).c_str(), channel.c_str(), rec.offset);
+            out += hb;
+            out += sources(rec.offset, depth);
+        }
+    }
+    return out.empty() ? channel + ": bound, but no graph writes it\n" : out;
+}
+
+/* WHO READS A CHANNEL: every record in every graph with an operand on one of the
+ * channel's bound pool entries, plus the records that follow it (the use). */
+std::string VehicleSim::readers(const std::string& channel, int follow) const {
+    uint32_t h;
+    if (!hash_of(channel, h)) return channel + ": no graph binds it" + std::string(1, (char)10);
+    std::string out;
+    for (const auto& g : graphs_) {
+        std::set<uint32_t> pool_offs;
+        for (const auto& b : g->binds)
+            if (b.region == 0 && b.channel_hash == h) pool_offs.insert(b.pool_offset);
+        if (pool_offs.empty()) continue;
+        const std::string gshort = g->name.substr(g->name.rfind('/') + 1);
+        for (const auto& rec : g->graph.records) {
+            bool hit = false;
+            for (const auto& op : rec.operands) hit = hit || (op.region == 0 && pool_offs.count(op.offset));
+            if (!hit) continue;
+            out += "== " + gshort + " uses " + channel + ":" + std::string(1, (char)10);
+            out += list(gshort, rec.offset, rec.offset + (uint32_t)follow);
+        }
+    }
     return out;
 }
 
@@ -850,6 +913,116 @@ void VehicleSim::tick() {
         std::memcpy(out.local.data(), written.second.data(), 64);
         presented_bones_.push_back(std::move(out));
     }
+    /* the motion scoreboard: how far each written bone has moved since its first write */
+    for (const auto& written : state_.bone_writes()) {
+        if (written.second.size() < 64) continue;
+        float m[16];
+        std::memcpy(m, written.second.data(), 64);
+        auto it = motion_.find(written.first);
+        if (it == motion_.end()) {
+            MotionTrack t;
+            std::memcpy(t.first.data(), m, 64);
+            t.writes = 1;
+            motion_[written.first] = t;
+            continue;
+        }
+        MotionTrack& t = it->second;
+        ++t.writes;
+        /* rows 0..2 are the basis (stride 4), row 3 the translation */
+        auto row = [](const float* r, int i, float out[3]) {
+            float n = std::sqrt(r[i * 4] * r[i * 4] + r[i * 4 + 1] * r[i * 4 + 1] + r[i * 4 + 2] * r[i * 4 + 2]);
+            if (n < 1e-6f) n = 1.0f;
+            for (int k = 0; k < 3; ++k) out[k] = r[i * 4 + k] / n;
+        };
+        float tr = 0.0f;
+        for (int i = 0; i < 3; ++i) {
+            float a[3], b[3];
+            row(t.first.data(), i, a);
+            row(m, i, b);
+            tr += a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        }
+        const float c = std::max(-1.0f, std::min(1.0f, (tr - 1.0f) * 0.5f));
+        const float deg = std::acos(c) * 57.2957795f;
+        const float dx = m[12] - t.first[12], dy = m[13] - t.first[13], dz = m[14] - t.first[14];
+        t.rot_deg = std::max(t.rot_deg, deg);
+        t.move_m = std::max(t.move_m, std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+}
+
+std::string VehicleSim::motion_json() const {
+    auto esc = [](const std::string& v) {
+        std::string o;
+        for (char ch : v) {
+            if (ch == '"' || ch == '\\') o += '\\';
+            if ((unsigned char)ch >= 0x20) o += ch;
+        }
+        return "\"" + o + "\"";
+    };
+    const std::map<uint32_t, std::string> names = channel_name_map();
+    auto name_of = [&](uint32_t h) {
+        const auto it = names.find(h);
+        if (it != names.end() && !it->second.empty()) return it->second;
+        char b[16];
+        std::snprintf(b, sizeof b, "0x%08X", h);
+        return std::string(b);
+    };
+    std::set<std::string> written, unsupplied;
+    for (const auto& kv : state_.channel_writes()) written.insert(name_of((uint32_t)kv.first));
+    /* GRAPH-OWNED: a channel some graph has a write record for, whether or not it ran.
+     * The F-16's simex sets Airborne State itself (true past an altitude test, false on
+     * touchdown); a read before its first write is the grounded default, not a missing
+     * engine input. Only a channel NOTHING can write is unsupplied. */
+    {
+        static const uint32_t kSetOps[] = {0x6D86C436u, 0xC491CD96u, 0xCC162A96u, 0x95954635u};
+        for (const auto& g : graphs_) {
+            std::map<uint32_t, uint32_t> hash_at;
+            for (const auto& b : g->binds)
+                if (b.region == 0 && b.kind != 2) hash_at[b.pool_offset] = b.channel_hash;
+            for (const auto& rec : g->graph.records) {
+                bool is_set = false;
+                for (uint32_t k : kSetOps) is_set = is_set || (rec.has_operator && rec.operator_key == k);
+                if (!is_set || rec.operands.empty() || rec.operands[0].region != 0) continue;
+                const auto it = hash_at.find(rec.operands[0].offset);
+                if (it != hash_at.end()) written.insert(name_of(it->second));
+            }
+        }
+    }
+    for (const auto& kv : state_.unsupplied_channels()) {
+        const std::string n = name_of((uint32_t)kv.first);
+        if (!host_set_.count(n) && !written.count(n)) unsupplied.insert(n);
+    }
+    std::string o = "{\"graphs\":[";
+    for (size_t i = 0; i < graphs_.size(); ++i) o += (i ? "," : "") + esc(graphs_[i]->name);
+    o += "],\"host_set\":[";
+    bool first = true;
+    for (const auto& n : host_set_) { o += (first ? "" : ",") + esc(n); first = false; }
+    o += "],\"graph_written\":[";
+    first = true;
+    for (const auto& n : written) { o += (first ? "" : ",") + esc(n); first = false; }
+    o += "],\"unsupplied\":[";
+    first = true;
+    for (const auto& n : unsupplied) { o += (first ? "" : ",") + esc(n); first = false; }
+    o += "],\"parts_unsupplied\":" + std::to_string(state_.unsupplied_parts().size());
+    o += ",\"rig\":[";
+    for (size_t i = 0; i < rig_names_.size(); ++i) o += (i ? "," : "") + esc(rig_names_[i]);
+    o += "],\"bones\":[";
+    first = true;
+    for (const auto& kv : bone_binds_) {
+        const auto id = bone_identity_.find(kv.first);
+        const auto mt = motion_.find(kv.first);
+        char b[160];
+        std::snprintf(b, sizeof b, ",\"rig_index\":%d,\"writes\":%u,\"rot_deg\":%.3f,\"move_m\":%.4f}",
+                      id == bone_identity_.end() ? -1 : id->second.index,
+                      mt == motion_.end() ? 0u : mt->second.writes,
+                      mt == motion_.end() ? 0.0f : mt->second.rot_deg,
+                      mt == motion_.end() ? 0.0f : mt->second.move_m);
+        o += (first ? "{" : ",{");
+        o += "\"channel\":" + esc(kv.second) + ",\"bone\":" +
+             esc(id == bone_identity_.end() ? std::string() : id->second.name) + b;
+        first = false;
+    }
+    o += "]}";
+    return o;
 }
 
 } // namespace bf6

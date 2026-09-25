@@ -3230,6 +3230,13 @@ BF6_API int bf6_skeleton_channel_bones(bf6_ctx*, const char* ske_ebx, uint32_t* 
 typedef struct bf6_vehicle bf6_vehicle;
 BF6_API bf6_vehicle* bf6_vehicle_open(bf6_ctx*, const char* vehicle_dir, const float* tris,
                                       int32_t vert_count, char* err, int32_t err_len);
+/* bf6_vehicle_open with flags. BF6_VEHICLE_OPEN_PRESENTATION: a vehicle with no
+ * drivetrain graph (emplacements, drones) still opens, hosting only its presentation
+ * graphs, so its parts animate; no graph drives its body. Without the flag such a
+ * vehicle is refused, as bf6_vehicle_open refuses it. */
+#define BF6_VEHICLE_OPEN_PRESENTATION 1
+BF6_API bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx*, const char* vehicle_dir, const float* tris,
+                                         int32_t vert_count, int32_t flags, char* err, int32_t err_len);
 BF6_API void bf6_vehicle_set_pose(bf6_vehicle*, const float pos[3], const float quat[4]);
 /* THE WATER SURFACE, for anything that floats. A boat's hull, and the buoyancy
  * every other class carries, ask the world for the water height under the body;
@@ -3252,6 +3259,14 @@ BF6_API void bf6_vehicle_set_boost(bf6_vehicle*, float boost);
 BF6_API int32_t bf6_vehicle_bone_count(bf6_vehicle*);
 BF6_API int32_t bf6_vehicle_bone(bf6_vehicle*, int32_t index,
                                  char* name, int32_t name_capacity, float local16[16]);
+/* THE MOTION SCOREBOARD since open, as JSON: "graphs"; the public channels the graphs
+ * read, split into "host_set" (this library's step supplies them), "graph_written" (a
+ * graph writes them) and "unsupplied" (nobody does: engine-native inputs still
+ * missing); "parts_unsupplied"; "rig" (every bone name); and "bones", one row per bone
+ * channel the graphs bind: channel, rig bone, rig_index (-1 unmapped), writes, and the
+ * largest rotation (rot_deg) and translation (move_m) since its first write.
+ * Writes up to cap-1 bytes plus a NUL; returns the full length (call with cap 0 to size). */
+BF6_API int32_t bf6_vehicle_motion_report(bf6_vehicle*, char* out, int32_t cap);
 /* Replace the ground under a running vehicle (world-space triangles, 9 floats each)
  * without touching its motion or graph state. Returns the triangle count added. Use
  * this, not close + open, when the ground is re-gathered as the vehicle travels. */
@@ -3508,7 +3523,7 @@ BF6_API int bf6_armory_category_bindings(
  * The four bars are attribute-delegate outputs and are intentionally absent
  * until those delegate expressions are decoded. */
 typedef struct {
-    int32_t damage;
+    int32_t damage;          /* -1 when the round's damage curve is not readable; the rest still is */
     int32_t rate_of_fire;
     int32_t magazine;
     /* What a shot does after it leaves the barrel. muzzle_speed is the forward lane
@@ -3517,6 +3532,18 @@ typedef struct {
      * ProjectileData's 0xd9d33d20, -9.81 on the 5.56 carbine round. 0 when absent. */
     float muzzle_speed;
     float gravity;
+    /* HOW THE TRIGGER WORKS, from the blueprint's fire logic beside the rate of fire:
+     * 0x16E6FA59 the primary mode, 0x9B956C3D the alternates the fire-mode switch
+     * cycles to. Values are mm.weaponfirelogictype.enum's: Single 0, BoltAction 1,
+     * Automatic 2, Burst 3, HoldAndRelease 4, Detonated 5 (M4A1 2 + [0], M1014 0,
+     * MRAD 1). fire_modes[0] is the primary; unused slots are -1. Appended fields. */
+    int32_t fire_mode_count;
+    int32_t fire_modes[4];
+    /* THE WEAPON'S SOUND SET: the firing config the blueprint imports, e.g.
+     * common/sound/weapons/handheld/m4a2/bf03_weapons_handheld_m4a2_firing_config_01
+     * (the M4A1 uses the m4a2 set, so a folder guessed from the item name is wrong).
+     * Its folder holds the weapon's own shot layers (add-close_...). "" when absent. */
+    char firing_config[192];
 } bf6_weapon_base_stats;
 
 /* Read <weapon>_wb plus its ProjectileData import at runtime. Returns 1 when

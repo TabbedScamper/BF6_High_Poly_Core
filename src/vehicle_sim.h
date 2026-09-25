@@ -28,6 +28,7 @@
 #include <map>
 #include <array>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,11 @@ public:
     /* The game clock the graphs read (0xE2EEC2BE), seconds. */
     void set_time(double t) { world_.set_time(t); }
     const std::string& report() const { return report_; }
+    /* THE MOTION SCOREBOARD for this vehicle, as JSON: the graphs, every public channel
+     * the graphs READ split by who supplies it (the host's set_*, a graph's own write,
+     * or nobody: the engine-native inputs still missing), part poses nobody supplied,
+     * and every bone channel the graphs bind with how far its pose moved since open. */
+    std::string motion_json() const;
     std::vector<std::string> channel_names() const;
     const expression::StateHost& state() const { return state_; }
     expression::StateHost& state_mut() { return state_; }
@@ -91,6 +97,10 @@ public:
      * that produced an unknown from known inputs (or was refused), or a slot
      * nothing wrote this tick. One line per culprit with its count. */
     std::string why(const std::string& channel) const;
+    /* Every record that writes the channel, with the records that fed it (sources). */
+    std::string writers(const std::string& channel, int depth = 10) const;
+    /* Every record naming the channel's pool entry, with the next `follow` bytes of records. */
+    std::string readers(const std::string& channel, int follow = 0x60) const;
     /* Every record, in every graph, naming a region-`region` operand in [lo, hi),
      * and whether this tick executed it (a trace row). */
     std::string touch(uint32_t region, uint32_t lo, uint32_t hi) const;
@@ -145,6 +155,12 @@ private:
     struct BoneIdentity { int32_t index = -1; std::string name; };
     std::map<uint32_t, BoneIdentity> bone_identity_;
     std::vector<PresentedBone> presented_bones_;
+    /* motion scoreboard (motion_json) */
+    std::set<std::string> host_set_;
+    std::map<uint32_t, std::string> bone_binds_;
+    std::vector<std::string> rig_names_;
+    struct MotionTrack { std::array<float, 16> first{}; float rot_deg = 0, move_m = 0; uint32_t writes = 0; };
+    std::map<uint32_t, MotionTrack> motion_;
     std::string wheel_err_;
     std::string report_;
 };

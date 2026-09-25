@@ -17,6 +17,7 @@
  * functions. Each function names its native and how exact it is. */
 #include "expression_vm.h"
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -62,9 +63,12 @@ public:
      * what native code writes back into the per-wheel state is the section's last. */
     const std::vector<float>& tyre_omegas() const { return tyre_omega_; }
     const std::vector<uint8_t>& tyre_contacts() const { return tyre_contact_; }
+    /* Per tyre-force call this tick, the contact position the call used (CT_POSITION). */
+    const std::vector<std::array<float, 3>>& tyre_positions() const { return tyre_pos_; }
     void clear_tick() {
         tyre_omega_.clear();
         tyre_contact_.clear();
+        tyre_pos_.clear();
         for (int i = 0; i < 3; ++i) { hull_dv_[i] = 0.0f; hull_dw_[i] = 0.0f; }
         hull_ran_ = false;
     }
@@ -139,6 +143,7 @@ private:
     bool inertia_set_ = false;
     float inertia_per_kg_[3] = {0, 0, 0};
     std::vector<float> tyre_omega_;
+    std::vector<std::array<float, 3>> tyre_pos_;
     std::vector<uint8_t> tyre_contact_;
     float hull_dv_[3] = {0, 0, 0}, hull_dw_[3] = {0, 0, 0};
     bool hull_ran_ = false;

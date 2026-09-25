@@ -1997,3 +1997,7 @@ target_include_directories(ex_vm_probe PRIVATE src include)
 add_executable(md_states_probe test/md_states_probe.cpp)
 target_link_libraries(md_states_probe PRIVATE bf6_core_static)
 target_include_directories(md_states_probe PRIVATE src include)
+
+add_executable(vehicle_motion_probe test/vehicle_motion_probe.cpp)
+target_link_libraries(vehicle_motion_probe PRIVATE bf6_core_static)
+target_include_directories(vehicle_motion_probe PRIVATE src include)

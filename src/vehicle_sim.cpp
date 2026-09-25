@@ -1144,6 +1144,15 @@ void VehicleSim::publish_bones() {
         const float dx = m[12] - t.first[12], dy = m[13] - t.first[13], dz = m[14] - t.first[14];
         t.rot_deg = std::max(t.rot_deg, deg);
         t.move_m = std::max(t.move_m, std::sqrt(dx * dx + dy * dy + dz * dz));
+        /* A SPRING COMPRESSES BY SCALE: the largest relative change of a basis row's
+         * length (a coil spring or a damper stretched along its axis) */
+        for (int i = 0; i < 3; ++i) {
+            const float* a = t.first.data() + i * 4;
+            const float* b = m + i * 4;
+            const float la = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+            const float lb = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+            if (la > 1e-6f) t.scale = std::max(t.scale, std::fabs(lb - la) / la);
+        }
     }
 }
 
@@ -1210,12 +1219,13 @@ std::string VehicleSim::motion_json() const {
     for (const auto& kv : bone_binds_) {
         const auto id = bone_identity_.find(kv.first);
         const auto mt = motion_.find(kv.first);
-        char b[160];
-        std::snprintf(b, sizeof b, ",\"rig_index\":%d,\"writes\":%u,\"rot_deg\":%.3f,\"move_m\":%.4f}",
+        char b[200];
+        std::snprintf(b, sizeof b, ",\"rig_index\":%d,\"writes\":%u,\"rot_deg\":%.3f,\"move_m\":%.4f,\"scale\":%.4f}",
                       id == bone_identity_.end() ? -1 : id->second.index,
                       mt == motion_.end() ? 0u : mt->second.writes,
                       mt == motion_.end() ? 0.0f : mt->second.rot_deg,
-                      mt == motion_.end() ? 0.0f : mt->second.move_m);
+                      mt == motion_.end() ? 0.0f : mt->second.move_m,
+                      mt == motion_.end() ? 0.0f : mt->second.scale);
         o += (first ? "{" : ",{");
         o += "\"channel\":" + esc(kv.second) + ",\"bone\":" +
              esc(id == bone_identity_.end() ? std::string() : id->second.name) + b;

@@ -288,6 +288,13 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
         out.output_width = 0;
         return true;
     }
+    /* THE WIDE STATE OPERATORS (see invoke) */
+    if (key == 0x660CE2B2u) { out.input_widths = {16}; out.output_width = 16; return true; }
+    if (key == 0xFB6D0653u || key == 0x2CEC6A0Fu) {
+        if (!allow_writes_) return false;
+        out.input_widths = {16, 16}; out.output_width = 0; return true;
+    }
+    if (key == 0x9224E470u || key == 0x5109DFFCu) { out.input_widths = {16}; out.output_width = 0; return true; }
     if (key == kWriteFloatQ || key == kWriteBool || key == kWriteU32) {
         if (!allow_writes_) return false;
         /* TWO OPERANDS, MEASURED. The engine table gives these arity 1, which was
@@ -910,6 +917,52 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out.bytes.resize(8);
         std::memcpy(out.bytes.data(), &second, 4);       /* output 1 (primary) */
         std::memcpy(out.bytes.data() + 4, &absent, 4);   /* output 0 */
+        return true;
+    }
+    /* THE WIDE STATE OPERATORS, the rest of the state family at 0x142BB8xxx (the scalar
+     * reads and writes above are its members):
+     *   0x660CE2B2  FUN_142BB8DB0: read a Vec3 state - 12 bytes, the fourth lane zero
+     *   0xFB6D0653  FUN_142BB8E10: write a Vec3 state (12 bytes) and mark it present
+     *   0x2CEC6A0F  FUN_142BB8E70: write a 16-byte state and mark it present
+     *   0x9224E470 / 0x5109DFFC  FUN_142BB8D40: resolve the state's address, nothing more
+     * Kept in the 260-byte cells' map by the same cell key, so a Vec3 written by one
+     * record is what a later record reads. An unwritten state reads zero, as an
+     * unwritten scalar state does. */
+    if (key == 0x660CE2B2u) {
+        if (args.empty() || !args[0].known) return false;
+        served_[key] += 1;
+        take_descriptor(args[0]);
+        const auto it = wide_cells_.find(cell_key(args[0].as_u32()));
+        out = Value{};
+        out.bytes.assign(16, 0);
+        if (it != wide_cells_.end()) std::memcpy(out.bytes.data(), it->second.data(), std::min<size_t>(12, it->second.size()));
+        out.known = true;
+        return true;
+    }
+    if (key == 0xFB6D0653u || key == 0x2CEC6A0Fu) {
+        if (args.size() != 2 || !args[0].known) return false;
+        served_[key] += 1;
+        take_descriptor(args[0]);
+        const uint64_t k = cell_key(args[0].as_u32());
+        const size_t n = key == 0xFB6D0653u ? 12 : 16;
+        if (!args[1].known || args[1].bytes.size() < n) {
+            wide_cells_.erase(k);   /* an unknown value is stored as absent, as for scalars */
+        } else {
+            std::vector<uint8_t> v(16, 0);
+            std::memcpy(v.data(), args[1].bytes.data(), n);
+            wide_cells_[k] = v;
+        }
+        ++writes_;
+        out = Value{};
+        out.known = true;
+        return true;
+    }
+    if (key == 0x9224E470u || key == 0x5109DFFCu) {
+        if (args.empty() || !args[0].known) return false;
+        served_[key] += 1;
+        take_descriptor(args[0]);
+        out = Value{};
+        out.known = true;
         return true;
     }
     if (key == 0x91C21F3Cu) {

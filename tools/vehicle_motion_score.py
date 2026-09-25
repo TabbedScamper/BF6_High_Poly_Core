@@ -64,20 +64,29 @@ def run(veh, out_dir):
         return veh, {"error": "probe wrote nothing (%s): %s" % (e, (r.stderr or r.stdout)[-300:])}
 
 
+SOCKET = re.compile(r"^Attach |Locator|(^|[ _])(Muzzle[ _])?FX$|^AITrajectory$|External Force$")
+
+
 def score(veh, data):
     rep = data.get("report")
     if not rep:
         return {"veh": veh, "error": data.get("error", "no report")}
     inputs_ok = sorted(rep["host_set"])
     inputs_missing = sorted(rep["unsupplied"])
-    bones_ok, bones_still, bones_unmapped = [], [], []
+    bones_ok, bones_still, bones_unmapped, sockets = [], [], [], []
     bound_rig = set()
     for b in rep["bones"]:
+        # SOCKETS: attachment points, locators and effect points no graph ever writes
+        # (Attach Vehicle Root, Attach HardPoint, Muzzle_FX...). They carry other things;
+        # they have no motion of their own, so they are listed, not scored.
+        if b.get("writes", 0) == 0 and SOCKET.search(b["channel"]):
+            sockets.append(b["channel"])
+            continue
         if b["rig_index"] < 0:
             bones_unmapped.append(b["channel"])
             continue
         bound_rig.add(b["bone"])
-        (bones_ok if (b["rot_deg"] > 0.05 or b["move_m"] > 1e-4) else bones_still).append(b["bone"])
+        (bones_ok if (b["rot_deg"] > 0.05 or b["move_m"] > 1e-4 or b.get("scale", 0) > 1e-3) else bones_still).append(b["bone"])
     orphans = sorted(n for n in rep["rig"]
                      if MOVING.search(n) and not STATIC.search(n) and n not in bound_rig)
     # CARRIED: an orphan rigidly attached under a bone that moved (a rotor blade under
@@ -103,6 +112,7 @@ def score(veh, data):
             "inputs_ok": inputs_ok, "inputs_missing": inputs_missing,
             "bones_ok": sorted(bones_ok), "bones_still": sorted(bones_still),
             "bones_unmapped": sorted(bones_unmapped), "orphans": orphans, "carried": sorted(carried),
+            "sockets": sorted(sockets),
             "parts_unsupplied": rep["parts_unsupplied"], "solved": solved, "total": total}
 
 
@@ -121,18 +131,19 @@ def main():
     total = sum(r.get("total", 0) for r in rows)
     lines = ["# Vehicle motion scoreboard", "",
              "**%d / %d motion pieces solved** across %d vehicles "
-             "(inputs supplied + bones that move, over inputs + bound bones + orphan parts)." %
+             "(inputs supplied + bones that move, over inputs + bound bones + orphan parts; "
+             "sockets, attachment points no graph moves, are listed but not scored)." %
              (solved, total, len(rows)), "",
-             "| Vehicle | Solved | Inputs ok/missing | Bones moved/still/unmapped | Carried | Orphan parts |",
-             "|---|---|---|---|---|---|"]
+             "| Vehicle | Solved | Inputs ok/missing | Bones moved/still/unmapped | Carried | Orphan parts | Sockets |",
+             "|---|---|---|---|---|---|---|"]
     for r in rows:
         if "error" in r:
             lines.append("| %s | refused | %s | | |" % (r["veh"], r["error"][:80].replace("|", "/")))
             continue
-        lines.append("| %s | %d/%d | %d/%d | %d/%d/%d | %d | %d |" % (
+        lines.append("| %s | %d/%d | %d/%d | %d/%d/%d | %d | %d | %d |" % (
             r["veh"], r["solved"], r["total"], len(r["inputs_ok"]), len(r["inputs_missing"]),
             len(r["bones_ok"]), len(r["bones_still"]), len(r["bones_unmapped"]), len(r["carried"]),
-            len(r["orphans"])))
+            len(r["orphans"]), len(r["sockets"])))
     lines += ["", "## Unsolved, per vehicle", ""]
     for r in rows:
         if "error" in r:

@@ -196,7 +196,7 @@ private:
     std::map<uint32_t, std::string> bone_binds_;
     std::vector<std::string> rig_names_;
     std::vector<int32_t> rig_parents_;
-    struct MotionTrack { std::array<float, 16> first{}; float rot_deg = 0, move_m = 0; uint32_t writes = 0; };
+    struct MotionTrack { std::array<float, 16> first{}; float rot_deg = 0, move_m = 0, scale = 0; uint32_t writes = 0; };
     std::map<uint32_t, MotionTrack> motion_;
     std::string wheel_err_;
     std::string report_;

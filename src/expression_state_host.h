@@ -211,6 +211,16 @@ public:
     void map_skeleton_bone(uint32_t channel_hash, int32_t index);
     /* Write a bone's local pose and recompose its subtree (the setter's commit). */
     void commit_local(int32_t index, const float local[16]);
+    void record_bone_write(uint32_t channel_hash, const float local[16]) {
+        std::vector<uint8_t>& w = bone_writes_[channel_hash];
+        w.resize(64);
+        std::memcpy(w.data(), local, 64);
+    }
+    bool rest_local(int32_t index, float out[16]) const {
+        if (index < 0 || (size_t)index >= skeleton_poses_.size()) return false;
+        std::memcpy(out, skeleton_poses_[(size_t)index].rest_local.data(), 64);
+        return true;
+    }
     void begin_bone_tick();
     const std::map<uint32_t, std::vector<uint8_t>>& bone_writes() const {
         return bone_writes_;

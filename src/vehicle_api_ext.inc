@@ -13,6 +13,7 @@
 
 #include "vehicle_sim.h"
 #include "vehicle_dynamics.h"
+#include "ant_graph.h"
 
 struct bf6_vehicle_collision_point { float p[3]; };
 
@@ -34,6 +35,17 @@ struct bf6_vehicle {
      * `in`, because the Godot binding only guarantees six and would read past its buffer. */
     float cyclic_pitch = 0.0f, cyclic_roll = 0.0f;
     float aim_yaw = 0.0f, aim_pitch = 0.0f;   /* bf6_vehicle_set_aim */
+    /* THE VEHICLE'S ANIMATION CLIP LAYERS (see bf6__open_clip_layers): a clip scrubbed
+     * by a phase channel the graphs write, its DOFs on the bones their channels map to. */
+    struct ClipLayer {
+        std::string phase;                 /* e.g. Anim.LandingGear.Float */
+        bf6_anim_clip* clip = nullptr;
+        int frames = 0;
+        struct Dof { int channel; int component; uint32_t bone_channel; };
+        std::vector<Dof> dofs;
+    };
+    std::vector<ClipLayer> clip_layers;
+    bf6_ctx* ctx = nullptr;
     float rws_yaw[4] = {}, rws_pitch[4] = {}; /* bf6_vehicle_set_rws_aim */
     bool boost = false;
     double time = 0.0;
@@ -48,6 +60,63 @@ namespace {
 /* The tracer is handed the VEHICLE, not its scene, and reads the scene on every ray:
  * bf6_vehicle_set_ground swaps the scene underneath a running vehicle, and a
  * pointer captured at open would keep tracing the freed one. */
+/* Every import path an EBX partition names, across all its instances. */
+std::vector<std::string> bf6__ebx_import_paths(bf6_ctx* c, const std::string& name) {
+    std::vector<std::string> out;
+    std::string err;
+    std::vector<uint8_t> raw = c->src.get_ebx(name, err);
+    if (raw.empty()) return out;
+    bf6::Ebx e(*c->types);
+    e.set_guid_index(&c->src.partition_index());
+    if (!e.parse(std::move(raw), err)) return out;
+    std::function<void(const bf6::EbxValue&, int)> walk = [&](const bf6::EbxValue& v, int depth) {
+        if (depth > 16) return;
+        if (v.kind == bf6::EbxValue::Kind::ImportRef && !v.import_path.empty() &&
+            v.import_path != "<not indexed>") {
+            std::string p = v.import_path;
+            if (p.size() > 4 && p.compare(p.size() - 4, 4, ".ebx") == 0) p.resize(p.size() - 4);
+            out.push_back(p);
+        }
+        for (const auto& kv : v.fields) walk(kv.second, depth + 1);
+        for (const auto& it : v.items) walk(it, depth + 1);
+    };
+    for (size_t i = 0; i < e.instance_count(); ++i) walk(e.read_instance(i), 0);
+    return out;
+}
+
+/* PUBLIC CHANNEL IDS BY NAME. A channel's id is the one its public channel list
+ * declares (field 0xCDC6F6A3 beside its Name), not a hash of the name; an animation
+ * clip names its DOFs by channel name ("LeftRearWheel.q"), and the skeleton maps ids
+ * to bones. Built once per context from every *publicchannels / *channellist asset. */
+const std::map<std::string, uint32_t>& bf6__public_channel_ids(bf6_ctx* c) {
+    static std::map<bf6_ctx*, std::map<std::string, uint32_t>> cache;
+    auto found = cache.find(c);
+    if (found != cache.end()) return found->second;
+    std::map<std::string, uint32_t>& ids = cache[c];
+    for (const char* term : {"publicchannels", "channellist"}) {
+        const int n = bf6_list_ebx(c, term, nullptr, 0);
+        std::vector<bf6_asset> rows((size_t)std::max(n, 0));
+        const int got = n > 0 ? std::clamp(bf6_list_ebx(c, term, rows.data(), n), 0, n) : 0;
+        for (int i = 0; i < got; ++i) {
+            if (!rows[(size_t)i].name) continue;
+            std::string err;
+            std::vector<uint8_t> raw = c->src.get_ebx(rows[(size_t)i].name, err);
+            if (raw.empty()) continue;
+            bf6::Ebx e(*c->types);
+            if (!e.parse(std::move(raw), err)) continue;
+            for (size_t k = 0; k < e.instance_count(); ++k) {
+                const bf6::EbxValue v = e.read_instance(k);
+                const bf6::EbxValue* id = v.field(0xCDC6F6A3u);
+                const bf6::EbxValue* nm = v.field(0x0C59FA06u);
+                if (!id || !nm || nm->kind != bf6::EbxValue::Kind::Str || nm->s.empty()) continue;
+                const uint32_t idv = id->kind == bf6::EbxValue::Kind::Uint ? (uint32_t)id->u : (uint32_t)id->i;
+                ids.emplace(nm->s, idv);
+            }
+        }
+    }
+    return ids;
+}
+
 int bf6__vehicle_trace(void* user, const double* from, const double* to, double* hit, double* normal) {
     const bf6_vehicle* vv = (const bf6_vehicle*)user;
     bf6_ray_scene* s = vv ? vv->scene : nullptr;
@@ -393,6 +462,24 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * turret and gunner parts. Every graph directly in the vehicle's folder is hosted,
      * except the damage-shader ones, which write material parameters, not bones.
      * Ability graphs live in subfolders and are not presentation. */
+    /* AN EMPLACEMENT'S CONTROLLERS. With no drivetrain, what aims a Phalanx or an SSM
+     * battery is its own simex_controller_* / simex_*_aiming graphs; they come first,
+     * as a simex would. BF6_NO_CONTROLLERS leaves them out, to compare. */
+    if (presentation_only && !std::getenv("BF6_NO_CONTROLLERS")) {
+        const std::string pre = gdir + "/simex_";
+        const int n = bf6_list_res(c, pre.c_str(), nullptr, 0);
+        std::vector<bf6_asset> rows((size_t)std::max(n, 0));
+        const int got = n > 0 ? std::clamp(bf6_list_res(c, pre.c_str(), rows.data(), n), 0, n) : 0;
+        std::vector<std::string> ctl;
+        for (int i = 0; i < got; ++i) {
+            const std::string name = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+            if (name.compare(0, pre.size(), pre) != 0 || name.find('/', pre.size()) != std::string::npos) continue;
+            if (name.find("audio") != std::string::npos) continue;
+            if (std::find(ctl.begin(), ctl.end(), name) == ctl.end()) ctl.push_back(name);
+        }
+        std::sort(ctl.begin(), ctl.end());
+        graphs.insert(graphs.begin(), ctl.begin(), ctl.end());
+    }
     for (const std::string& pre : {gdir + "/presex_", gdir + "/expressions/presex_",
                                    root + "drone/" + gveh + "/expressions/presex_"}) {
         const int n = bf6_list_res(c, pre.c_str(), nullptr, 0);
@@ -455,6 +542,95 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         }
         std::sort(subs.begin(), subs.end());
         for (const std::string& sub : subs) v->sim.add_skeleton(c, sub);
+    }
+    /* THE VEHICLE'S OWN ANIMATION LAYER. A few vehicles animate parts with clips, not
+     * graphs: the F-14's landing gear, gear doors and lower arms, the F/A-18's gear
+     * and hatches. Their top layer (mm.vehicle.top.<class>.<vehicle>.mmlayer) imports
+     * phase controllers (.pc), each scrubbing a clip picked per vehicle by its .ec by
+     * a game state (mm.vehicle.<part>.timescale.float) - and the vehicle's graphs write
+     * that phase as Anim.<Part>.Float (LandingGear, LeftRightDoors, Hatches: both
+     * sides name the same parts). The clip's DOFs are channel names, mapped to ids by
+     * the public channel lists and to bones by the skeleton.
+     * TWO CHOICES MADE BY NAME, stated: the .ec picks by the vehicle-name enum, whose
+     * value for this vehicle is not read, so the clip whose path names this vehicle
+     * (veh_<vehicle>_) is taken; and the rig is the shared airplane rig
+     * (vehicle_airplane_common_01), the one whose DOF sets these clips bind through. */
+    v->ctx = c;
+    if (!std::getenv("BF6_NO_CLIP_LAYERS") && cls == "airplane") {
+        const char* rig = "animations/kingston/global/rigging/vehicle_airplane_common_01.rig";
+        const std::string key = "." + veh + ".mmlayer";
+        const int n = bf6_list_ebx(c, "mm.vehicle.top.", nullptr, 0);
+        std::vector<bf6_asset> rows((size_t)std::max(n, 0));
+        const int got = n > 0 ? std::clamp(bf6_list_ebx(c, "mm.vehicle.top.", rows.data(), n), 0, n) : 0;
+        const std::vector<std::string> channels = v->sim.channel_names();
+        const auto& ids = bf6__public_channel_ids(c);
+        for (int i = 0; i < got; ++i) {
+            const std::string layer = rows[(size_t)i].name ? rows[(size_t)i].name : "";
+            if (layer.size() < key.size() || layer.compare(layer.size() - key.size(), key.size(), key) != 0) continue;
+            if (std::getenv("BF6_CLIP_DEBUG"))
+                for (const std::string& p : bf6__ebx_import_paths(c, layer))
+                    std::fprintf(stderr, "layer %s imports %s\n", layer.c_str(), p.c_str());
+            for (const std::string& pc : bf6__ebx_import_paths(c, layer)) {
+                if (pc.size() < 3 || pc.compare(pc.size() - 3, 3, ".pc") != 0) continue;
+                std::string ec, state;
+                for (const std::string& p : bf6__ebx_import_paths(c, pc)) {
+                    if (p.size() >= 3 && p.compare(p.size() - 3, 3, ".ec") == 0) ec = p;
+                    if (p.find(".timescale.float") != std::string::npos) state = p;
+                }
+                if (ec.empty() || state.empty()) continue;
+                /* the part: mm.vehicle.<part>.timescale.float -> Anim.<Part>.Float */
+                const size_t a = state.find("mm.vehicle."), b = state.find(".timescale");
+                if (a == std::string::npos || b == std::string::npos || b <= a + 11) continue;
+                const std::string part = state.substr(a + 11, b - a - 11);
+                std::string phase;
+                for (const std::string& ch : channels) {
+                    std::string low = ch;
+                    for (char& x : low) x = (char)std::tolower((unsigned char)x);
+                    if (low.rfind("anim.", 0) != 0 || low.size() < 11 || low.compare(low.size() - 6, 6, ".float") != 0) continue;
+                    const std::string mid = low.substr(5, low.size() - 11);
+                    if (mid == part || mid + "s" == part) { phase = ch; break; }
+                }
+                if (phase.empty()) continue;
+                std::string clip;
+                for (const std::string& p : bf6__ebx_import_paths(c, ec))
+                    if (p.find("veh_" + veh + "_") != std::string::npos) { clip = p; break; }
+                if (clip.empty()) continue;
+                bf6_anim_binding_stats st{};
+                const int nb = bf6_anim_bindings(c, clip.c_str(), rig, ske.c_str(), nullptr, 0, &st);
+                if (nb < 1) continue;
+                std::vector<bf6_anim_binding> bind((size_t)nb);
+                bf6_anim_bindings(c, clip.c_str(), rig, ske.c_str(), bind.data(), nb, &st);
+                bf6_vehicle::ClipLayer L;
+                L.phase = phase;
+                L.clip = bf6_anim_clip_open(c, clip.c_str());
+                if (!L.clip) continue;
+                L.frames = L.clip->key_time_count;
+                for (const auto& x : bind) {
+                    if (x.component != BF6_ANIM_DOF_QUATERNION && x.component != BF6_ANIM_DOF_VECTOR3) continue;
+                    if (x.channel < 0 || x.channel >= L.clip->channel_count) continue;
+                    std::string dof = x.dof_name;
+                    const size_t dot = dof.rfind('.');
+                    if (dot != std::string::npos) dof = dof.substr(0, dot);
+                    const auto id = ids.find(dof);
+                    if (std::getenv("BF6_CLIP_DEBUG"))
+                        std::fprintf(stderr, "  dof %s id %s%08X maps %d\n", dof.c_str(),
+                                     id == ids.end() ? "none " : "", id == ids.end() ? 0u : id->second,
+                                     id == ids.end() ? 0 : (int)v->sim.maps_bone(id->second));
+                    /* The skeleton keys bones by the id the GRAPHS bind a channel under,
+                     * which is not the public list's id for the same name (Hatch1:
+                     * 0xEE8DA98B bound, 0xC00C0E2B listed). A DOF no graph binds has
+                     * no bone to land on here. */
+                    uint32_t bone_channel = 0;
+                    if (!v->sim.bone_channel_named(dof, bone_channel) || !v->sim.maps_bone(bone_channel)) continue;
+                    L.dofs.push_back({x.channel, x.component, bone_channel});
+                }
+                if (std::getenv("BF6_VEHICLE_GRAPHS"))
+                    std::fprintf(stderr, "clip layer %s <- %s, %zu of %d DOFs on bones\n",
+                                 clip.c_str(), phase.c_str(), L.dofs.size(), nb);
+                if (L.dofs.empty()) { bf6_free(c, L.clip); continue; }
+                v->clip_layers.push_back(std::move(L));
+            }
+        }
     }
     /* WHAT THE ENGINE BINDS AT LOAD. A graph's curves are in its EBX, not in its
      * expression blob, and the graph's own typed slot groups say which slot takes
@@ -751,6 +927,43 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         s.set_vec3("LinearAcceleration", d.last_accel, 0);
     }
     s.tick();
+    /* THE CLIP LAYERS, after the graphs have written this tick's phases: each clip at
+     * phase x its last frame, each DOF over its bone's rest pose (rotation and/or
+     * translation), then the bones are published again with these poses in them. */
+    if (!v->clip_layers.empty()) {
+        std::map<uint32_t, std::pair<const float*, const float*>> pose;   /* quat, translation */
+        std::vector<std::vector<float>> samples;
+        samples.reserve(v->clip_layers.size());
+        for (const auto& layer : v->clip_layers) {
+            bool known = false;
+            float phase = s.get_float(layer.phase, &known);
+            if (!known || !layer.clip || layer.frames < 1) continue;
+            phase = std::max(0.0f, std::min(1.0f, phase));
+            samples.emplace_back((size_t)layer.clip->channel_count * 4, 0.0f);
+            std::vector<float>& buf = samples.back();
+            if (!bf6_anim_clip_sample_time(v->ctx, layer.clip, phase * (float)(layer.frames - 1), 0, buf.data()))
+                continue;
+            for (const auto& d : layer.dofs) {
+                const float* p = buf.data() + (size_t)d.channel * 4;
+                if (d.component == BF6_ANIM_DOF_QUATERNION) pose[d.bone_channel].first = p;
+                else pose[d.bone_channel].second = p;
+            }
+        }
+        for (const auto& kv : pose) {
+            float local[16];
+            if (!s.bone_rest_local(kv.first, local)) continue;
+            if (kv.second.first) {
+                float m9[9];
+                bf6ant::rows_from_quat(kv.second.first, m9);
+                for (int r = 0; r < 3; ++r)
+                    for (int col = 0; col < 3; ++col) local[r * 4 + col] = m9[r * 3 + col];
+            }
+            if (kv.second.second)
+                for (int col = 0; col < 3; ++col) local[12 + col] = kv.second.second[col];
+            s.write_bone_local(kv.first, local);
+        }
+        s.publish_bones();
+    }
     if (graph_physics) {
         float la[3], aa[3];
         const bool kl = s.get_vec3("LinearAcceleration", la, 0);
@@ -993,6 +1206,8 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
 
 void bf6_vehicle_close(bf6_vehicle* v) {
     if (!v) return;
+    for (auto& layer : v->clip_layers)
+        if (layer.clip && v->ctx) bf6_free(v->ctx, layer.clip);
     if (v->scene) bf6_ray_scene_free(v->scene);
     delete v;
 }

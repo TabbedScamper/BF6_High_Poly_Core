@@ -51,6 +51,17 @@ public:
      * rig's, its channels mapped where the base rig does not already take them. Its root
      * stays a root; what the graphs write there are local poses. Returns bones added. */
     int add_skeleton(bf6_ctx* ctx, const std::string& skeleton);
+    /* Poses from outside the graphs (animation clip layers), after tick(): write, then
+     * publish_bones() again so they are presented and tracked. */
+    bool write_bone_local(uint32_t channel_hash, const float local[16]);
+    bool bone_rest_local(uint32_t channel_hash, float out[16]) const;
+    bool maps_bone(uint32_t channel_hash) const;
+    /* the bone channel a graph binds under this name (kind-1 binding), for clip DOFs */
+    bool bone_channel_named(const std::string& name, uint32_t& hash) const {
+        for (const auto& kv : bone_binds_) if (kv.second == name) { hash = kv.first; return true; }
+        return false;
+    }
+    void publish_bones();
 
     /* Inputs by public-channel NAME (any channel any loaded graph binds). */
     bool set_float(const std::string& channel, float v, uint32_t mode = 0);

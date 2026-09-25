@@ -1041,6 +1041,31 @@ void VehicleSim::tick() {
                 report_ += line;
             }
     }
+    publish_bones();
+}
+
+/* Write a bone's local pose from outside the graphs (an animation clip layer): the
+ * skeleton, the subtree and the tick's bone writes, as a graph's SetPartTransform. */
+bool VehicleSim::write_bone_local(uint32_t channel_hash, const float local[16]) {
+    const auto identity = bone_identity_.find(channel_hash);
+    if (identity == bone_identity_.end()) return false;
+    state_.commit_local(identity->second.index, local);
+    state_.record_bone_write(channel_hash, local);
+    return true;
+}
+
+bool VehicleSim::bone_rest_local(uint32_t channel_hash, float out[16]) const {
+    const auto identity = bone_identity_.find(channel_hash);
+    if (identity == bone_identity_.end()) return false;
+    return state_.rest_local(identity->second.index, out);
+}
+
+bool VehicleSim::maps_bone(uint32_t channel_hash) const {
+    return bone_identity_.count(channel_hash) != 0;
+}
+
+/* The tick's bone writes as presented bones, and the motion scoreboard's tracking. */
+void VehicleSim::publish_bones() {
     presented_bones_.clear();
     for (const auto& written : state_.bone_writes()) {
         const auto identity = bone_identity_.find(written.first);

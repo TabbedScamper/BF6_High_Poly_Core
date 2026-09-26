@@ -209,7 +209,7 @@ const std::map<std::string, uint32_t>& bf6__public_channel_ids(bf6_ctx* c) {
     return ids;
 }
 
-/* ---- FAKEHINGE, transcribed from the natives (Codex study, corpus 6a1c1b):
+/* ---- FAKEHINGE, transcribed from the natives (decompile corpus 6a1c1b):
  *   FUN_142b69620  per-frame motion history: the driven bone's origin velocity and its
  *                  change since the last frame (dv), then the integrator (virtual +0x70)
  *   FUN_142b67fa0  the integrator (same math as FUN_144ed12e0): gravity along the swing

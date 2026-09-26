@@ -741,3 +741,47 @@ extern "C" BF6_API int64_t bf6_meshset_surfaces(const uint8_t* res, int64_t res_
         return -1;
     }
 }
+
+#include "meshset.h"
+
+/* THE BONE EACH VERTEX RIDES (see bf6_core.h). A vehicle body is a skinned MeshSet
+ * whose skin indices are skeleton bones directly - measured on the quad's body:
+ * Chassis 8454 vertices, Handlebars 4244, every control arm, damper and tie rod its
+ * own - so the vehicle graphs' bone poses move it once it is skinned to the rig. */
+extern "C" BF6_API int64_t bf6_meshset_vertex_bones(const uint8_t* res, int64_t res_len, int lod,
+    const uint8_t* chunk, int64_t chunk_len, float** out)
+{
+    if (!out) return -1;
+    *out = nullptr;
+    try {
+        std::string err;
+        bf6::MeshSet ms = bf6::meshset_parse(res, (size_t)res_len, err);
+        if (ms.lods.empty() || lod < 0 || lod >= (int)ms.lods.size()) return -1;
+        const auto secs = bf6::meshset_read_lod(ms, lod, chunk, (size_t)chunk_len, err);
+        std::vector<float> o;
+        for (const auto& s : secs) {
+            const size_t vc = s.positions.size() / 3;
+            const bool skinned = s.influences > 0 && s.skin_bones.size() >= vc * (size_t)s.influences &&
+                                 s.skin_weights.size() >= vc * (size_t)s.influences;
+            for (size_t v = 0; v < vc; ++v) {
+                float bone = -1.0f, best = -1.0f;
+                if (skinned)
+                    for (int k = 0; k < s.influences; ++k) {
+                        const float wgt = s.skin_weights[v * (size_t)s.influences + (size_t)k];
+                        if (wgt > best) { best = wgt; bone = (float)s.skin_bones[v * (size_t)s.influences + (size_t)k]; }
+                    }
+                o.push_back(s.positions[v * 3]);
+                o.push_back(s.positions[v * 3 + 1]);
+                o.push_back(s.positions[v * 3 + 2]);
+                o.push_back(bone);
+            }
+        }
+        float* blob = (float*)std::malloc(o.size() * sizeof(float) + 4);
+        if (!blob) return -1;
+        std::memcpy(blob, o.data(), o.size() * sizeof(float));
+        *out = blob;
+        return (int64_t)(o.size() / 4);
+    } catch (...) {
+        return -1;
+    }
+}

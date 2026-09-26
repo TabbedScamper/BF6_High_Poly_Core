@@ -90,6 +90,14 @@ BF6_API int bf6_decode_vertex_attribute(const uint8_t* data, int64_t data_bytes,
 BF6_API int64_t bf6_meshset_sections(const uint8_t* res, int64_t res_len, int lod,
     const uint8_t* chunk, int64_t chunk_len, int flags, uint8_t** out);
 
+/* THE BONE EACH VERTEX RIDES, for skinning a vehicle body to its rig. Every vertex
+ * of LOD `lod`, in section order: x, y, z (the reader's positions) and the skeleton
+ * bone of its heaviest skin lane (-1 where the section is not skinned). *out is a
+ * float array (free with bf6_blob_free on its bytes); returns the vertex count, or
+ * -1. A caller matches its own mesh's vertices to these by position. */
+BF6_API int64_t bf6_meshset_vertex_bones(const uint8_t* res, int64_t res_len, int lod,
+    const uint8_t* chunk, int64_t chunk_len, float** out);
+
 /* MERGED SURFACES from the same sections: one surface per shader state key, or
  * per canonical colour where a palette split applies; triangles whose first
  * vertex's destruction part is in `hidden` are dropped; an attribute is kept only

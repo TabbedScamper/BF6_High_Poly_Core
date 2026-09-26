@@ -1,4 +1,5 @@
 #include "vehicle_sim.h"
+#include "env_cache.h"
 #include <chrono>
 
 #include "expression_registry.h"
@@ -82,7 +83,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             if (!required) continue;
             err = name + ": " + why; return false;
         }
-        g->inst.trace_records = std::getenv("BF6_NO_TRACE") == nullptr;
+        g->inst.trace_records = bf6_env("BF6_NO_TRACE") == nullptr;
 
         /* Each relocated pool pointer that lands on a printable run is an asset
          * reference the loader resolves: "[[guid/guid|Path/To/Expression]]". The
@@ -126,7 +127,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
              * engine writes at load, and what it holds. A pool word nobody patches keeps
              * its on-disk placeholder, usually zero, and an unpatched zero is
              * indistinguishable from an authored zero without asking this question. */
-            if (const char* at = std::getenv("BF6_POOL_AT")) {
+            if (const char* at = bf6_env("BF6_POOL_AT")) {
                 const uint32_t want = (uint32_t)std::strtoul(at, nullptr, 16);
                 bool found = false;
                 for (int i = 0; i < nv && i < 4096; ++i)
@@ -192,12 +193,12 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                     const bool presentation = name.find("/presex_") != std::string::npos;
                     std::string path = base + "#" + std::to_string(rank);
                     if (presentation && frame_ids_presentation_.count(path) &&
-                        !std::getenv("BF6_PRESEX_SHARE_FRAMES"))
+                        !bf6_env("BF6_PRESEX_SHARE_FRAMES"))
                         path += "@" + name;
                     const auto known = frame_ids_.find(path);
                     if (known != frame_ids_.end()) {
                         id = known->second;
-                        if (std::getenv("BF6_FRAME_IDS"))
+                        if (bf6_env("BF6_FRAME_IDS"))
                             std::fprintf(stderr, "frame %04X shared by %s: %s (own offset %X)\n", id,
                                          name.substr(name.rfind('/') + 1).c_str(), path.c_str(), rl.target);
                     } else {
@@ -251,7 +252,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
         {
             const auto t0 = std::chrono::steady_clock::now();
             expression::resolve_named_operators(exe, keys, names, scan_why);
-            if (std::getenv("BF6_OPEN_TIMING"))
+            if (bf6_env("BF6_OPEN_TIMING"))
                 std::fprintf(stderr, "  resolve_named_operators %s: %.1f ms (%zu keys)\n",
                              name.substr(name.rfind('/') + 1).c_str(),
                              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
@@ -264,7 +265,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                 std::vector<expression::NamedBuiltin> rows;
                 std::string berr;
                 expression::read_named_builtins(exe, rows, berr);
-                if (std::getenv("BF6_GRAPH_DEBUG"))
+                if (bf6_env("BF6_GRAPH_DEBUG"))
                     std::fprintf(stderr, "named builtins: %zu%s%s\n", rows.size(),
                                  berr.empty() ? "" : " - ", berr.c_str());
                 it = cache.emplace(exe, std::move(rows)).first;
@@ -286,7 +287,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             g->pure.add(row.key, row.name);
             physics_.add(row.key, row.name);
         }
-        if (std::getenv("BF6_GRAPH_DEBUG")) {
+        if (bf6_env("BF6_GRAPH_DEBUG")) {
             std::fprintf(stderr, "graph %s (%zu record(s))%s\n", name.c_str(),
                          g->graph.records.size(), required ? "" : " [sub-expression]");
             for (const auto& b : g->binds)
@@ -485,7 +486,7 @@ std::string VehicleSim::sources(uint32_t offset, int max_depth) const {
                 }
                 if (w < 0) continue;
                 if (tr[(size_t)w].record_offset == roff) continue;   /* its own output */
-                if (std::getenv("BF6_SRC_VALUES")) {
+                if (bf6_env("BF6_SRC_VALUES")) {
                     float fv; std::memcpy(&fv, &tr[(size_t)w].bits, 4);
                     char vb[96];
                     std::snprintf(vb, sizeof vb, "%*s  = slot 0x%X: %g (0x%08X)\n", (depth + 1) * 2, "", op.offset, fv, tr[(size_t)w].bits);
@@ -753,9 +754,9 @@ void VehicleSim::tick() {
     state_.begin_bone_tick();
     for (auto& g : graphs_) {
         g->inst.trace.clear();
-        if (std::getenv("BF6_FRAME_LEAK") && state_.frame_depth())
+        if (bf6_env("BF6_FRAME_LEAK") && state_.frame_depth())
             std::fprintf(stderr, "frame stack depth %d leaked into %s\n", state_.frame_depth(), g->name.c_str());
-        if (!std::getenv("BF6_KEEP_FRAMES")) state_.reset_frames();
+        if (!bf6_env("BF6_KEEP_FRAMES")) state_.reset_frames();
         state_.set_owner(g->owner);
         expression::ChainHost chain;
         chain.add(&g->builtins);
@@ -765,7 +766,22 @@ void VehicleSim::tick() {
         chain.add(&world_);
         chain.add(&physics_);
         chain.add(&state_);
+        const auto eval_t0 = std::chrono::steady_clock::now();
         const auto r = expression::evaluate(g->graph, &g->inst, {}, &chain);
+        /* BF6_GRAPH_TIMING=<ticks>: each graph's mean evaluation time over that many
+         * ticks, then once more per period - which graphs a slow step is paying for */
+        if (const char* gt = bf6_env("BF6_GRAPH_TIMING")) {
+            static std::map<std::string, double> acc;
+            static int ticks_seen = 0;
+            acc[g->name] += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - eval_t0).count();
+            if (g.get() == graphs_.back().get() && ++ticks_seen % std::max(1, std::atoi(gt)) == 0) {
+                std::vector<std::pair<double, std::string>> rows;
+                for (const auto& kv : acc) rows.push_back({kv.second / ticks_seen, kv.first});
+                std::sort(rows.rbegin(), rows.rend());
+                for (const auto& row : rows)
+                    std::fprintf(stderr, "graph %9.1f us  %s\n", row.first, row.second.substr(row.second.rfind('/') + 1).c_str());
+            }
+        }
         /* THE HOST PLAYS THE NATIVE SIDE. A derived graph republishes native part state
          * (an aircraft's control-surface part becomes Flap_Elevator, its gear wheels the
          * wheel speeds); where this host supplies such a channel itself, the channel is
@@ -796,8 +812,8 @@ void VehicleSim::tick() {
         }
         /* BF6_SLOT_WATCH=hex,hex: every write this run to those slots of the
          * drivetrain graph, with the value and the writing record. */
-        if (const char* at = std::getenv("BF6_RAN_AT"))
-            if (g->name.find(std::getenv("BF6_RAN_GRAPH") ? std::getenv("BF6_RAN_GRAPH") : "simex") != std::string::npos) {
+        if (const char* at = bf6_env("BF6_RAN_AT"))
+            if (g->name.find(bf6_env("BF6_RAN_GRAPH") ? bf6_env("BF6_RAN_GRAPH") : "simex") != std::string::npos) {
                 static int ticks = 0;
                 if (++ticks == std::atoi(at)) {
                     std::set<uint32_t> ran;
@@ -822,7 +838,7 @@ void VehicleSim::tick() {
          * number you can see in the output but cannot place. An operator that writes
          * nothing does not appear, so a force that is missing and a force that is
          * cancelled look different here, which is the whole point. */
-        if (const char* at = std::getenv("BF6_TRACE_AT")) {
+        if (const char* at = bf6_env("BF6_TRACE_AT")) {
             /* Counted PER GRAPH: a vehicle runs several, so a single counter would
              * land the dump on whichever graph happened to be that many calls in. */
             static std::map<std::string, int> ticks;
@@ -882,7 +898,7 @@ void VehicleSim::tick() {
          * because the frame in a cell key is a small runtime id and not the struct's
          * HashName, so the way to find out is to seed one at a time and measure. Value
          * defaults to 1. */
-        if (const char* sc = std::getenv("BF6_SEED_CELL"))
+        if (const char* sc = bf6_env("BF6_SEED_CELL"))
             for (const char* p = sc; *p;) {
                 char* e = nullptr;
                 const unsigned long long k = std::strtoull(p, &e, 16);
@@ -894,7 +910,7 @@ void VehicleSim::tick() {
             }
         /* BF6_LIST_CELLS=1: every unseeded cell this tick, as a key the sweep can feed
          * back to BF6_SEED_CELL. */
-        if (std::getenv("BF6_LIST_CELLS"))
+        if (bf6_env("BF6_LIST_CELLS"))
             for (const auto& fr : state_.unseeded_frame_reads())
                 std::fprintf(stderr, "cell %016llX frame %06X path %08X kind %u field %u\n",
                              (unsigned long long)fr.key, fr.frame, fr.path, fr.kind, fr.field);
@@ -910,7 +926,7 @@ void VehicleSim::tick() {
          * own delta when it was tracking a channel, and a wing axis deduced from the one
          * surface that happened to be a rudder. Identity is in the trace; matching values
          * was never necessary. One command now does the whole walk. */
-        if (const char* want = std::getenv("BF6_WHY")) {
+        if (const char* want = bf6_env("BF6_WHY")) {
             static std::map<std::string, int> ticks;
             const int tick = ++ticks[g->name];
             char* end = nullptr;
@@ -991,7 +1007,7 @@ void VehicleSim::tick() {
          * are not harmless: an unseeded read returns ZERO, and an airplane graph tests
          * one of these against zero and takes it as the wheel brake being applied,
          * which pins four aircraft to a standstill. */
-        if (std::getenv("BF6_UNSEEDED_REPORT")) {
+        if (bf6_env("BF6_UNSEEDED_REPORT")) {
             const auto& u = state_.unseeded_frame_reads();
             std::map<uint64_t, expression::StateHost::FrameRead> once;
             for (const auto& fr : u) once.emplace(fr.key, fr);
@@ -1004,7 +1020,7 @@ void VehicleSim::tick() {
                                  kv.second.path, kv.second.kind, kv.second.field);
             }
         }
-        if (const char* watch = std::getenv("BF6_SLOT_WATCH"))
+        if (const char* watch = bf6_env("BF6_SLOT_WATCH"))
             if (g->name.find("simex") != std::string::npos) {
                 static int calls = 0;
                 if (++calls % 60 == 0)
@@ -1058,7 +1074,7 @@ void VehicleSim::tick() {
         /* BF6_REFUSED_DETAIL=1: every refused call with its record and which inputs were
          * unknown. The VM always wrote this diagnostic and nothing ever printed it, so a
          * refusal could only be located by walking the graph by hand. */
-        if (std::getenv("BF6_REFUSED_DETAIL"))
+        if (bf6_env("BF6_REFUSED_DETAIL"))
             for (const auto& d : r.diagnostics)
                 if (d.rfind("host invoke failed", 0) == 0 || d.rfind("unresolved at record", 0) == 0) report_ += "  " + d + "\n";
         for (const auto& d : r.diagnostics)

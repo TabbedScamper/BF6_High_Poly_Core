@@ -1,4 +1,5 @@
 #include "expression_vm.h"
+#include "env_cache.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -46,7 +47,7 @@ struct Slots {
      * climb a long way (the f22 from 17.5 m to 489 m while keeping 51 m/s) but does NOT
      * fix the ah64e, and raising five aircraft on a wing with no stall curve is not a
      * change worth blessing while it cannot be judged. */
-    bool zero_untouched_bools = std::getenv("BF6_ZERO_UNTOUCHED_BOOLS") != nullptr;
+    bool zero_untouched_bools = bf6_env("BF6_ZERO_UNTOUCHED_BOOLS") != nullptr;
     /* BF6_ZERO_UNTOUCHED_WIDE=1: the same credit for WIDE reads, EXCEPT inside a slot the
      * graph declares in its typed groups. Crediting every untouched wide byte took the f16
      * from 67 m/s to 0.12 m/s while making the boat move for the first time, so something
@@ -54,7 +55,7 @@ struct Slots {
      * unknown are exactly the ones the ENGINE fills at load - which the graph itself lists
      * as typed slot values and which this VM never seeds - and every other untouched
      * accumulator really is the fresh buffer's zero. */
-    bool zero_untouched_wide = std::getenv("BF6_ZERO_UNTOUCHED_WIDE") != nullptr;
+    bool zero_untouched_wide = bf6_env("BF6_ZERO_UNTOUCHED_WIDE") != nullptr;
     /* BF6_ZERO_WIDE_RANGE=<lo hex>:<hi hex>: restrict that credit to one byte range, so the
      * slots the aircraft need left unknown can be found by BISECTION rather than argued.
      * Guessing which reads matter has already been wrong once here (the typed groups). */
@@ -153,7 +154,7 @@ struct Slots {
         if (!width || offset > bytes.size() || width > bytes.size() - offset ||
             value.bytes.size() < width) return false;
         {
-            static const char* watch = std::getenv("BF6_SLOT_WATCH");
+            static const char* watch = bf6_env("BF6_SLOT_WATCH");
             if (watch) {
                 const uint32_t lo = (uint32_t)std::strtoul(watch, nullptr, 0);
                 if (offset < lo + 40 && offset + width > lo) {
@@ -644,7 +645,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
     /* BF6_PERSIST_SLOTS=1 restores the slot file as the previous tick left it, which is
      * what the engine does - its state block lives across frames. Off by default until
      * the fleet says it is safe. */
-    const bool persist_slots = std::getenv("BF6_PERSIST_SLOTS") != nullptr;
+    const bool persist_slots = bf6_env("BF6_PERSIST_SLOTS") != nullptr;
     if (persist_slots && instance && instance->slot_bytes_prev.size() == slots.bytes.size()) {
         slots.bytes = instance->slot_bytes_prev;
         slots.initialized = instance->slot_init_prev;
@@ -770,7 +771,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
      * reflection gives one, bounded by the next written slot exactly as the typed copy is,
      * and 16 bytes when neither is known. Over-marking only keeps a byte unknown, which is
      * the old behaviour, so erring wide here is the safe direction. */
-    if (const char* r = std::getenv("BF6_ZERO_WIDE_RANGE")) {
+    if (const char* r = bf6_env("BF6_ZERO_WIDE_RANGE")) {
         char* e = nullptr;
         slots.zero_wide_lo = (uint32_t)std::strtoul(r, &e, 16);
         if (e && *e == ':') slots.zero_wide_hi = (uint32_t)std::strtoul(e + 1, nullptr, 16);
@@ -828,12 +829,12 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
          * over-cover, but it covers seventeen times the widest ordinary output and left
          * nearly the whole slot file "writable", which defeats the known-zero rule that
          * depends on a byte lying OUTSIDE every span. Counted lists keep 272 above. */
-        const uint32_t kSpan = std::getenv("BF6_WIDE_SPAN") ? 272u : 64u;
+        const uint32_t kSpan = bf6_env("BF6_WIDE_SPAN") ? 272u : 64u;
         /* BF6_WRITABLE_AT=<hex byte>: which record and operand claim that byte as
          * possibly-written. A byte inside any claim cannot be credited with the buffer's
          * zero, so it reads UNKNOWN, and for a one-byte branch condition that means the
          * evaluator guesses. Knowing WHICH claim covers it beats guessing span sizes. */
-        static const char* const want_w = std::getenv("BF6_WRITABLE_AT");
+        static const char* const want_w = bf6_env("BF6_WRITABLE_AT");
         const uint32_t want_byte = want_w ? (uint32_t)std::strtoul(want_w, nullptr, 16) : 0xFFFFFFFFu;
         auto cover = [&](uint32_t off, uint32_t w) {
             if (want_w && want_byte >= off && want_byte < off + w)
@@ -931,7 +932,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
              * it was known, and which arm ran. The mirror/primary selection for a wheel
              * is one of these, so a wheel on the wrong side of the aircraft is visible
              * here and nowhere else. */
-            if (std::getenv("BF6_COND_REPORT")) {
+            if (bf6_env("BF6_COND_REPORT")) {
                 char line[192];
                 std::snprintf(line, sizeof line,
                               "cond @%u (r%u+%u = 0x%x) %s%u -> %s @%u",
@@ -950,7 +951,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
              * from an authored zero - so which arm is right cannot be settled by reading
              * the flag. This makes the alternative measurable. */
             bool flip = false;
-            if (const char* fl = std::getenv("BF6_COND_FLIP"))
+            if (const char* fl = bf6_env("BF6_COND_FLIP"))
                 for (const char* p = fl; *p;) {
                     char* e = nullptr;
                     const unsigned long v = std::strtoul(p, &e, 16);
@@ -971,7 +972,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                  * guesses five branches a tick and two of them precede every suspension
                  * block it runs. */
                 bool take = false;
-                if (const char* want = std::getenv("BF6_GUESS_TAKE"))
+                if (const char* want = bf6_env("BF6_GUESS_TAKE"))
                     for (const char* p = want; *p;) {
                         char* e = nullptr;
                         const unsigned long r = std::strtoul(p, &e, 16);
@@ -1023,7 +1024,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 last_written.tainted = true;
                 take = true;
             }
-            if (std::getenv("BF6_COND_REPORT"))
+            if (bf6_env("BF6_COND_REPORT"))
                 std::fprintf(stderr, "call @%u -> @%u  one-shot (r%u+0x%x) %s%u  %s\n",
                              record.offset, target, flag.region, flag.offset,
                              f.known ? "" : "UNKNOWN ",
@@ -1068,7 +1069,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 } else {
                     slots.bind_state[k] = 2;
                 }
-                if (std::getenv("BF6_MOVE_DEBUG"))
+                if (bf6_env("BF6_MOVE_DEBUG"))
                     std::fprintf(stderr, "bind r%zu <- r%u+%u: state %d target r%u+%u\n",
                                  k + 3, r.region, r.offset, (int)slots.bind_state[k],
                                  slots.bind_target[k].region, slots.bind_target[k].offset);
@@ -1161,7 +1162,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                  * FLAG never changed, not that the value was miscomputed. Printing the
                  * condition beside both candidate sources is the only way to tell
                  * those apart. */
-                if (const char* want = std::getenv("BF6_SELECT_DEBUG")) {
+                if (const char* want = bf6_env("BF6_SELECT_DEBUG")) {
                     const uint32_t s = (uint32_t)std::strtoul(want, nullptr, 16);
                     if (s == dst.offset) {
                         float got = 0.0f;
@@ -1248,7 +1249,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                  * width is the field's: the gap to the next field of the enclosing
                  * type. Only an exact field boundary qualifies.
                  * BF6_FIELD_COPY_OFF=1 restores the old behaviour for A/B. */
-                static const bool field_copy_off = std::getenv("BF6_FIELD_COPY_OFF") != nullptr;
+                static const bool field_copy_off = bf6_env("BF6_FIELD_COPY_OFF") != nullptr;
                 if (!width && ty == slot_type.end() && !field_copy_off && !slot_type.empty()) {
                     auto enc = slot_type.upper_bound(output->offset);
                     if (enc != slot_type.begin()) {
@@ -1267,7 +1268,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                         }
                     }
                 }
-                if (std::getenv("BF6_MOVE_DEBUG")) {
+                if (bf6_env("BF6_MOVE_DEBUG")) {
                     std::fprintf(stderr, "typed copy @%u src r%u+%u -> slot 0x%X: type %08X width %u\n",
                                  record.offset, record.operands.front().region,
                                  record.operands.front().offset, output->offset,
@@ -1301,7 +1302,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                  * A destination stuck at one value is either a source stuck at that
                  * value or a move reading the wrong place, and only the source's slot
                  * tells those apart. */
-                if (const char* want = std::getenv("BF6_MOVE_FROM")) {
+                if (const char* want = bf6_env("BF6_MOVE_FROM")) {
                     const uint32_t s = (uint32_t)std::strtoul(want, nullptr, 16);
                     if (s == output->offset) {
                         float g = 0.0f;
@@ -1471,7 +1472,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 /* BF6_UNRES_CONSTS=<hex key>: the constant-pool words of each unresolved
                  * call of that key (FFFFFFFF where an operand is not a constant) - what an
                  * undescribed operator was asked, before a host exists to log it. */
-                if (const char* want = std::getenv("BF6_UNRES_CONSTS"))
+                if (const char* want = bf6_env("BF6_UNRES_CONSTS"))
                     if ((uint32_t)std::strtoul(want, nullptr, 16) == record.operator_key) {
                         std::fprintf(stderr, "unres %08X rec 0x%X consts", record.operator_key, record.offset);
                         for (uint32_t v : call_consts) std::fprintf(stderr, " %08X", v);
@@ -1585,7 +1586,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                      * the flyer60. The native dereferences the handle only, so a window
                      * with a known seeded handle (0xC0DE / 0xC0DF tag) is known; the rest
                      * reads zero, which the operator's inline fallback ignores. */
-                    if (record.operator_key == 0x9AFB0561u && !std::getenv("BF6_CURVE_WINDOW_OFF"))
+                    if (record.operator_key == 0x9AFB0561u && !bf6_env("BF6_CURVE_WINDOW_OFF"))
                         for (Value& a : args) {
                             if (a.known || a.bytes.size() != 40 || a.known_bytes.size() != 40) continue;
                             bool head = true;
@@ -1605,7 +1606,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                  * the slot is one NO record writes. A state input on such a slot reads
                  * a known zero for ever, which looks exactly like a physical result
                  * (a wheel that never turns) rather than a wiring fault. */
-                if (const char* want = std::getenv("BF6_OP_INPUTS")) {
+                if (const char* want = bf6_env("BF6_OP_INPUTS")) {
                     const uint32_t k = (uint32_t)std::strtoul(want, nullptr, 16);
                     if (k == record.operator_key) {
                         std::fprintf(stderr, "op %08X rec 0x%X inputs:", k, record.offset);
@@ -1641,7 +1642,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                         std::fprintf(stderr, "\n");
                     }
                 }
-                if (record.operator_key == 0x9afb0561u && std::getenv("BF6_MOVE_DEBUG")) {
+                if (record.operator_key == 0x9afb0561u && bf6_env("BF6_MOVE_DEBUG")) {
                     std::fprintf(stderr, "curve call @%u:", record.offset);
                     for (size_t i = 0; i < call.inputs.size(); ++i)
                         std::fprintf(stderr, " r%u+%u(%u)", call.inputs[i]->region,
@@ -1653,7 +1654,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
                 if (host->invoke(record.operator_key, args, value)) {
                     /* THE FIRST NON-FINITE ANSWER is the one worth seeing: everything
                      * after it is downstream of the same mistake. */
-                    if (std::getenv("BF6_NAN_DEBUG") && value.known &&
+                    if (bf6_env("BF6_NAN_DEBUG") && value.known &&
                         value.bytes.size() >= 4) {
                         for (size_t w = 0; w + 4 <= value.bytes.size(); w += 4) {
                             float f = 0.0f;
@@ -1789,7 +1790,7 @@ Evaluation evaluate(const Graph& graph, Instance* instance,
              * graph is one linear program whose wheel sections precede the rotor, so
              * ending early silently drops everything after the loop. This separates "the
              * graph stopped" from "the guard stopped it". */
-            static const bool loop_after_guess = std::getenv("BF6_LOOP_AFTER_GUESS") != nullptr;
+            static const bool loop_after_guess = bf6_env("BF6_LOOP_AFTER_GUESS") != nullptr;
             loop_ok = ++n <= kMaxLoop &&
                       (loop_after_guess || fg == first_guess.end() ||
                        result.guessed_branches == fg->second);

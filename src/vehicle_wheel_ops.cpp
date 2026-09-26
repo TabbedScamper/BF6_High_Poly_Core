@@ -1,4 +1,5 @@
 #include "vehicle_wheel_ops.h"
+#include "env_cache.h"
 
 #include <cmath>
 #include <array>
@@ -658,7 +659,7 @@ void WheelOps::cast_wheel_ray(const float at[3], float radius, float spring,
     wf(out, 0x30, 1.469367e-39f);
     wf(out, 0x34, 9.18341e-41f);
     ++rays_;
-    if (std::getenv("BF6_RAY_DEBUG"))
+    if (bf6_env("BF6_RAY_DEBUG"))
         std::fprintf(stderr, "ray local (%.2f %.2f %.2f) -> (%.2f %.2f %.2f) world y %.2f -> %.2f "
                      "(body y %.2f radius %.2f attach %.2f spring %.2f extra %.2f)\n",
                      from_l[0], from_l[1], from_l[2], to_l[0], to_l[1], to_l[2], from[1], to[1],
@@ -1021,7 +1022,7 @@ bool WheelOps::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
     if (key == kStructBuild) {
         /* The second constant is the field count, and the layout is looked up by it. */
         const BuilderLayout* b = consts.size() >= 2 ? builder_for(consts[1]) : nullptr;
-        if (std::getenv("BF6_BUILD_DEBUG")) {
+        if (bf6_env("BF6_BUILD_DEBUG")) {
             std::fprintf(stderr, "struct build describe_call: %zu const(s)", consts.size());
             for (uint32_t c : consts) std::fprintf(stderr, " %u", c);
             std::fprintf(stderr, " -> layout %s\n", b ? "found" : "none");
@@ -1118,7 +1119,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         wf(out.bytes, 8, d_f);
         wf(out.bytes, 12, k_r);
         out.known = true;
-        if (std::getenv("BF6_BIKE_DEBUG"))
+        if (bf6_env("BF6_BIKE_DEBUG"))
             std::fprintf(stderr, "bike springs: K %g/%g  D %g/%g\n", k_f, k_r, d_f, d_r);
         return true;
     }
@@ -1137,7 +1138,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             return invoke(key, b, out);
         }
     }
-    static const bool susp_strict = std::getenv("BF6_SUSP_TAIL_STRICT") != nullptr;
+    static const bool susp_strict = bf6_env("BF6_SUSP_TAIL_STRICT") != nullptr;
     if ((key == kSuspension || key == kTrackSuspension) && !susp_strict &&
         a.size() > 6 && !a[6].known &&
         a[6].bytes.size() >= 0x54 && a[6].known_bytes.size() >= 0x54) {
@@ -1272,13 +1273,13 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             for (size_t k = 0; k < nn; ++k)
                 if (nb[k].in == i && !bytes_known(a[i], nb[k].off, nb[k].len)) {
                     ok = false;
-                    if (std::getenv("BF6_WHEEL_DEBUG"))
+                    if (bf6_env("BF6_WHEEL_DEBUG"))
                         std::fprintf(stderr, "  input %zu misses bytes +0x%X..+0x%X (known_bytes %zu)\n",
                                      i, nb[k].off, nb[k].off + nb[k].len - 1, a[i].known_bytes.size());
                 }
         }
         if (!ok) {
-            if (std::getenv("BF6_WHEEL_DEBUG"))
+            if (bf6_env("BF6_WHEEL_DEBUG"))
                 std::fprintf(stderr, "wheel op %08X refused: input %zu unknown (%zu bytes)\n", key, i, a[i].bytes.size());
             return false;
         }
@@ -1313,7 +1314,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     };
     for (const auto& m : kMinIn)
         if (m.key == key && a.size() < m.min_in) {
-            if (std::getenv("BF6_WHEEL_DEBUG"))
+            if (bf6_env("BF6_WHEEL_DEBUG"))
                 std::fprintf(stderr, "wheel op %08X refused: %zu inputs, needs %zu\n", key, a.size(), m.min_in);
             return false;
         }
@@ -1380,7 +1381,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         const Value& cfg = a[4];
         if (cfg.bytes.size() < 0x78) return false;
         auto c = [&](uint32_t at) { return rf(cfg, at); };
-        const bool dbg = std::getenv("BF6_WING_DEBUG") != nullptr;
+        const bool dbg = bf6_env("BF6_WING_DEBUG") != nullptr;
         if (dbg) {
             std::fprintf(stderr, "wingcfg:");
             for (uint32_t at = 0; at < 0x78; at += 4) std::fprintf(stderr, " %02X=%g", at, c(at));
@@ -1681,14 +1682,14 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
         out.known = true;
-        if (std::getenv("BF6_ROTOR_DEBUG"))
+        if (bf6_env("BF6_ROTOR_DEBUG"))
             std::fprintf(stderr,
                          "tail: rpm %g curve %g thr %g spd %g adv %g gmin %g gain %g F %g"
                          " dir (%.3f %.3f %.3f) -> dw %.3f %.3f %.3f\n",
                          rf(a[1], 0), curve, thr, spd, adv, gmin, c(0x8C), F,
                          dir[0], dir[1], dir[2], (s.w[0] - before.w[0]) / dt,
                          (s.w[1] - before.w[1]) / dt, (s.w[2] - before.w[2]) / dt);
-        if (std::getenv("BF6_TAILCFG_DEBUG")) {
+        if (bf6_env("BF6_TAILCFG_DEBUG")) {
             std::fprintf(stderr, "tailcfg size %zu nonzero:", cfg.bytes.size());
             for (uint32_t at = 0; at + 4 <= (uint32_t)cfg.bytes.size(); at += 4)
                 if (c(at) != 0.0f) std::fprintf(stderr, " %X=%g", at, c(at));
@@ -1783,7 +1784,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
              * the torque an off-axis nozzle makes. Diagnostic only: it answers whether
              * a plane that will not accelerate is being held by its own thrust torque,
              * without changing what ships. */
-            const bool at_com = std::getenv("BF6_JET_AT_COM") != nullptr;
+            const bool at_com = bf6_env("BF6_JET_AT_COM") != nullptr;
             for (int i = 0; i < 3; ++i) {
                 r.f[i] = dir[i] * thrust * dt * force_scale;
                 r.p[i] = at_com ? body_.com[i] : rf(a[5], 4 * i) + c(4 * (uint32_t)i);
@@ -1795,7 +1796,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(4 * i), (s.w[i] - before.w[i]) / dt);
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(16 + 4 * i), (s.v[i] - before.v[i]) / dt);
         out.known = true;
-        if (std::getenv("BF6_JET_DEBUG"))
+        if (bf6_env("BF6_JET_DEBUG"))
             std::fprintf(stderr,
                          "jet: mode %u vectoring %u throttle %g rpm %g curve %g scale %g"
                          " datum %g alt %g fade %g thrust %g dir (%g %g %g) -> dv %.2f %.2f %.2f"
@@ -1874,7 +1875,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * the ratio now comes from the game. BF6_ROTOR_CALIBRATED=1 restores the old
          * behaviour for comparison. */
         const float gain_total = c(0x9C) + c(0xA8);
-        const bool calibrated = std::getenv("BF6_ROTOR_CALIBRATED") != nullptr;
+        const bool calibrated = bf6_env("BF6_ROTOR_CALIBRATED") != nullptr;
         const float power = !calibrated ? 9.81f
                           : (gain_total > 1e-6f ? 9.82f / gain_total : 0.0f);
         /* THE SIGN, settled by measurement. The kernel negates its base magnitude,
@@ -1960,21 +1961,21 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * terms that make it. A vertical force directly above the CoM makes no moment, so
          * only these offsets pitch or roll the aircraft, and the question that matters is
          * whether the constant part is the airspeed curve or simply where the CoM is. */
-        if (std::getenv("BF6_ROTOR_TRIM"))
+        if (bf6_env("BF6_ROTOR_TRIM"))
             std::fprintf(stderr, "rotortrim com (%.3f %.3f %.3f) off (%.4f %.4f %.4f)"
                                  " fv4 %g fv4*0.005 %.4f cyclicz %.4f auth2 %g\n",
                          body_.com[0], body_.com[1], body_.com[2],
                          point[0] - body_.com[0], point[1] - body_.com[1],
                          point[2] - body_.com[2], fv4, fv4 * 0.005f,
                          auth2 * pitch * c(0xA0), auth2);
-        if (std::getenv("BF6_ROTOR_CFG"))
+        if (bf6_env("BF6_ROTOR_CFG"))
             std::fprintf(stderr, "rotorcfg 9C=%g A8=%g 7C=%g 94=%g 98=%g A4=%g A0=%g 80=%g"
                                  " 84=%g AC=%u mass=%g gmod=%g base=%g\n",
                          c(0x9C), c(0xA8), c(0x7C), c(0x94), c(0x98), c(0xA4), c(0xA0),
                          c(0x80), c(0x84),
                          cfg.bytes.size() > 0xAC ? (unsigned)cfg.bytes[0xAC] : 0u,
                          body_.mass, gmod, base);
-        if (std::getenv("BF6_ROTOR_DEBUG"))
+        if (bf6_env("BF6_ROTOR_DEBUG"))
             std::fprintf(stderr, "rotor: throttle %g pitch %g roll %g point (%.2f %.2f %.2f)"
                                  " -> dv %.2f %.2f %.2f dw %.2f %.2f %.2f\n",
                          throttle, pitch, roll, point[0], point[1], point[2],
@@ -2013,10 +2014,10 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             std::memcpy(out.bytes.data() + at, src.bytes.data(), w);
             if (!src.known) out.known = false;
         }
-        if (std::getenv("BF6_BUILD_DEBUG"))
+        if (bf6_env("BF6_BUILD_DEBUG"))
             std::fprintf(stderr, "struct build: %zu field(s) into %u bytes, known %d\n",
                          b->offsets.size(), b->size, (int)out.known);
-        if (std::getenv("BF6_BUILD_DUMP")) {
+        if (bf6_env("BF6_BUILD_DUMP")) {
             std::fprintf(stderr, "built struct:");
             for (size_t o = 0; o + 4 <= out.bytes.size(); o += 4) {
                 float f = 0.0f;
@@ -2079,12 +2080,12 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         /* WHICH OUTPUT REACHES WHICH CHANNEL, measured rather than argued: with
          * BF6_DAMP_PROBE each output carries a distinct marker, and whichever channel
          * the host reads it out of is the one the graph sums it into. */
-        if (std::getenv("BF6_DAMP_PROBE")) {
+        if (bf6_env("BF6_DAMP_PROBE")) {
             const float mark[8] = {11.f, 12.f, 13.f, 0.f, 21.f, 22.f, 23.f, 0.f};
             std::memcpy(out.bytes.data(), mark, 32);
         }
         out.known = true;
-        if (std::getenv("BF6_WHEEL_DEBUG")) {
+        if (bf6_env("BF6_WHEEL_DEBUG")) {
             auto o = [&](uint32_t at) {
                 float f = 0.0f;
                 std::memcpy(&f, out.bytes.data() + at, 4);
@@ -2235,7 +2236,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * here and the reconstruction is checked against the one number that can
          * falsify it - a floating hull displaces its own mass. */
         const uint32_t stern_rows = ru(H, 7 * 4) ? ru(H, 7 * 4) : 1u;
-        if (std::getenv("BF6_HULL_DESC")) {
+        if (bf6_env("BF6_HULL_DESC")) {
             std::fprintf(stderr, "hull desc:");
             for (int i = 0; i < 12; ++i) std::fprintf(stderr, " [%d]=%g", i, rf(H, (uint32_t)(4 * i)));
             std::fprintf(stderr, "\n");
@@ -2446,7 +2447,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         wf(out.bytes, 16, wet_norm > 0.0f ? wet_sum / wet_norm : 0.0f);
         for (int i = 0; i < 4; ++i) wf(out.bytes, (uint32_t)(20 + 4 * i), (s.v[i] - before.v[i]) / dt);
         out.known = true;
-        if (std::getenv("BF6_HULL_DEBUG")) {
+        if (bf6_env("BF6_HULL_DEBUG")) {
             /* THE ONE NUMBER THAT SAYS WHETHER THE SURFACE IS RIGHT. Buoyancy is
              * rho g V, so the upward acceleration times the mass, over rho g, is the
              * volume of water this surface claims to displace - and a floating hull
@@ -2478,7 +2479,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * here. The decompiler reassociates that arm's arithmetic, and a curve
          * evaluated from a misread expression is a wrong number with no symptom, so
          * it is refused and says so under BF6_CURVE_DEBUG instead. */
-        const bool dbg = std::getenv("BF6_CURVE_DEBUG") != nullptr;
+        const bool dbg = bf6_env("BF6_CURVE_DEBUG") != nullptr;
         auto no = [&](const char* why) {
             if (dbg) std::fprintf(stderr, "curve refused: %s\n", why);
             return false;
@@ -2516,7 +2517,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
              * must return its own y at its own x - t is 0 or 1 there, where a Bezier meets
              * its end points exactly - so a misread control point or a wrong segment shows
              * up here as a mismatch instead of as a quietly wrong force. Once per curve. */
-            if (std::getenv("BF6_CURVE_SELFTEST")) {
+            if (bf6_env("BF6_CURVE_SELFTEST")) {
                 static std::set<size_t> checked;
                 if (checked.insert(idx).second) {
                     int bad = 0;
@@ -2607,7 +2608,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 }
             }
         }
-        if (std::getenv("BF6_CURVE_DEBUG"))
+        if (bf6_env("BF6_CURVE_DEBUG"))
             std::fprintf(stderr, "curve at pool 0x%X: %u keys, x %g -> %s%g\n", at, count, x,
                          served ? "" : "REFUSED (cubic) ", y);
         if (!served) return false;
@@ -2693,7 +2694,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             if (g == 2) break;
             std::memcpy(out.bytes.data() + w, group.data() + at + 0x44, 4); w += 4;
         }
-        if (std::getenv("BF6_TRACK_DEBUG"))
+        if (bf6_env("BF6_TRACK_DEBUG"))
             std::fprintf(stderr, "track share: %u of 3 touching, %u road wheels, share %.1f, "
                          "omega in %.3f %.3f %.3f\n", n_touch, wheels, share,
                          rf(a[2], 0), rf(a[kIn + 2], 0), rf(a[2 * kIn + 2], 0));
@@ -2782,7 +2783,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             std::memcpy(out.bytes.data() + 36, raw + (size_t)best * 0x40, 0x40);
         else
             wf(out.bytes, 36 + CT_NORMAL + 4, 1.0f);   /* no contact: normal straight up */
-        if (std::getenv("BF6_SUSP_DEBUG"))
+        if (bf6_env("BF6_SUSP_DEBUG"))
             std::fprintf(stderr, "track susp: %u contacts, best %d, force %.1f, dv %.3f %.3f %.3f\n",
                          count, best, report, (s.v[0] - before.v[0]) / dt,
                          (s.v[1] - before.v[1]) / dt, (s.v[2] - before.v[2]) / dt);
@@ -2901,7 +2902,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             cast_wheel_ray(at, rf(W, WC_RADIUS), spring, attach, extra, one);
             std::memcpy(all.data() + (size_t)i * 0x40, one.data(), 0x40);
         }
-        if (std::getenv("BF6_TRACK_DEBUG")) {
+        if (bf6_env("BF6_TRACK_DEBUG")) {
             int hits = 0;
             for (uint32_t i = 0; i < count; ++i) hits += all[(size_t)i * 0x40 + CT_HASCONTACT] != 0;
             std::fprintf(stderr, "track sampler: %u contacts, %d in contact, mirror %+.0f\n",
@@ -2925,7 +2926,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                (inv != 0.0f && body_.mass != 0.0f) ? 1.0f / (inv * body_.mass) : 0.0f);
         }
         out.known = true;
-        if (std::getenv("BF6_INERTIA_DEBUG"))
+        if (bf6_env("BF6_INERTIA_DEBUG"))
             std::fprintf(stderr, "getinertia: (%g %g %g)\n", rf(out, 0), rf(out, 4), rf(out, 8));
         return true;
     }
@@ -2948,7 +2949,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         /* FUN_1443E3740 -> FUN_1435D0F80: move the body's centre of mass */
         for (int i = 0; i < 3; ++i) body_.com[i] = rf(a[0], 4 * i);
         com_set_ = true;
-        if (std::getenv("BF6_COM_DEBUG"))
+        if (bf6_env("BF6_COM_DEBUG"))
             std::fprintf(stderr, "setcom call: (%g %g %g)\n", body_.com[0], body_.com[1], body_.com[2]);
         out.bytes.clear();
         out.known = true;
@@ -3130,7 +3131,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (finite3(r.f) && finite3(r.p)) recs.push_back(r);
         /* Every force the graph applies, in the body frame, so a thrust pointing
          * across the hull instead of along it is visible rather than inferred. */
-        if (std::getenv("BF6_FORCE_DEBUG") && dt > 0.0f)
+        if (bf6_env("BF6_FORCE_DEBUG") && dt > 0.0f)
             std::fprintf(stderr, "force: (%9.1f %9.1f %9.1f) N at (%5.2f %5.2f %5.2f)\n",
                          r.f[0] / dt, r.f[1] / dt, r.f[2] / dt, r.p[0], r.p[1], r.p[2]);
         apply_all(s, recs);
@@ -3189,7 +3190,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * mass the way a car's four corners do, and the operator has no torque clamp, so
          * a lateral gear offset is an uncancelled roll. This measures whether that is
          * what rolls a helicopter over, WITHOUT inventing gear geometry to do it. */
-        const bool susp_at_com = std::getenv("BF6_SUSP_AT_COM") != nullptr;
+        const bool susp_at_com = bf6_env("BF6_SUSP_AT_COM") != nullptr;
         /* BF6_SUSP_NO_A2=1 drops operand 2 from the application point. THE REASON TO
          * DOUBT IT: 8C83D835 is NOT in the executable's reflected registry, so unlike the
          * jet, both rotors, the wing, the damping and the hull, this operator has no
@@ -3200,7 +3201,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * and two zeros rather than the three positions a gear layout would have, and the
          * stiff spring sits on the SINGLETON while the soft pair share theirs - inverted
          * from a tricycle gear, where the mains carry the weight. */
-        const bool no_a2 = std::getenv("BF6_SUSP_NO_A2") != nullptr;
+        const bool no_a2 = bf6_env("BF6_SUSP_NO_A2") != nullptr;
         /* A VALUE SWEEP OVER THE GEAR'S LATERAL GEOMETRY, so what the arm should be can be
          * measured rather than argued. As read, an ah64e's three gears sit at lateral +1,
          * +0 and -0: a mirrored pair whose magnitude is zero, and one lone main. The pair's
@@ -3217,7 +3218,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * InitialPosition is an INFERENCE from a study whose byte offsets were wrong for
          * the tail rotor, so before concluding that a gear's track is missing from the
          * data it is worth looking at every field for one that carries it. */
-        if (std::getenv("BF6_SUSP_CFG_DEBUG")) {
+        if (bf6_env("BF6_SUSP_CFG_DEBUG")) {
             std::fprintf(stderr, "suspcfg %zu bytes:", W.bytes.size());
             for (uint32_t at = 0; at + 4 <= (uint32_t)W.bytes.size() && at < 0x70; at += 4) {
                 const float f = rf(W, at);
@@ -3225,9 +3226,9 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             }
             std::fprintf(stderr, "\n");
         }
-        static const char* const trk = std::getenv("BF6_GEAR_TRACK");
+        static const char* const trk = bf6_env("BF6_GEAR_TRACK");
         const float track = trk ? (float)std::atof(trk) : 0.0f;
-        const bool tail_zero = std::getenv("BF6_GEAR_TAIL_ZERO") != nullptr;
+        const bool tail_zero = bf6_env("BF6_GEAR_TAIL_ZERO") != nullptr;
         for (int i = 0; i < 4; ++i) {
             float pt = susp_at_com ? body_.com[i]
                        : (no_a2 ? rf(PB, base + 4 * i)
@@ -3248,7 +3249,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (finite3(r2.f) && finite3(r2.p)) recs.push_back(r2);
         if (0.0f < rf(SC, SC_ANTIROLL) && finite3(r3.f) && finite3(r3.p)) recs.push_back(r3);
         apply_all(s, recs);
-        if (std::getenv("BF6_SUSP_DEBUG"))
+        if (bf6_env("BF6_SUSP_DEBUG"))
             std::fprintf(stderr, "susp contact %d P.y %.3f K %.1f D %.1f L %.3f top %.3f W.y %.3f R %.3f -> c %.3f spring %.1f damper %.1f ar %.1f\n",
                          (int)contact, rf(C, CT_POSITION + 4), K, D, rf(SC, SC_TRAVEL), rf(SC, SC_TOP_MOUNT),
                          rf(W, 4), rf(W, WC_RADIUS), compr, spring, damper, ar);
@@ -3268,7 +3269,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
     /* BF6_NO_WHEEL_BRAKE=1 forces the brake operand to zero. DIAGNOSTIC ONLY: the
      * aircraft graphs hand this operator brake = 1 on every gear even when the host
      * sends no brake at all, so this measures what that costs them. */
-    const float brake = std::getenv("BF6_NO_WHEEL_BRAKE") ? 0.0f : rf(a[2], 0);
+    const float brake = bf6_env("BF6_NO_WHEEL_BRAKE") ? 0.0f : rf(a[2], 0);
     const Value& C = a[4];
     const Value& W = a[12];
     /* an unwritten flag byte is "no contact" (see kTyre) */
@@ -3362,7 +3363,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * a plane's gear is turned by the ground and by nothing else. A driven wheel
          * is unaffected while its own torque keeps it past the rolling speed, which
          * is why cars never showed this. */
-        if (std::getenv("BF6_TYRE_REACTION")) {   /* off: see the note above */
+        if (bf6_env("BF6_TYRE_REACTION")) {   /* off: see the note above */
             const float radius = rf(W, WC_RADIUS), inertia = rf(W, WC_INERTIA);
             if (radius != 0.0f && inertia != 0.0f) {
                 const float reaction = f_long * radius * rf(W, WC_FRICTION) * -0.0625f;
@@ -3372,7 +3373,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
                 sl.omega = (reaction * dt) / inertia + sl.omega;
                 const bool snapped = sgn(sl.omega - rolling) != was;
                 if (snapped) sl.omega = rolling;
-                if (std::getenv("BF6_TYRE_REACTION_DEBUG"))
+                if (bf6_env("BF6_TYRE_REACTION_DEBUG"))
                     std::fprintf(stderr,
                                  "tyre: r %g mu(0x10) %g I %g f_long %g torque %g"
                                  " v_long %g rolling %g omega %g -> %g%s\n",
@@ -3395,7 +3396,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
             r2.f[i] = dt * (0.0f - st.lat_axis[i]) * f_lat * force_scale;
             r2.p[i] = P[i] + H[i];
         }
-        if (std::getenv("BF6_TYRE_LEVER"))
+        if (bf6_env("BF6_TYRE_LEVER"))
             std::fprintf(stderr, "tyre lever: P (%.3f %.3f %.3f) H (%.3f %.3f %.3f) LH (%.3f %.3f %.3f)"
                          " com (%.3f %.3f %.3f) f_lat %.1f lat_axis (%.3f %.3f %.3f)"
                          " cvel (%.3f %.3f %.3f) w (%.4f %.4f %.4f) slip %.4f\n",
@@ -3418,7 +3419,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         if (-0.0f < std::fabs(om)) s_after = om < 0.0f ? -1.0f : 1.0f;
         if (s_after != s_before) sl.omega = roll;
     }
-    if (std::getenv("BF6_TYRE_DEBUG"))
+    if (bf6_env("BF6_TYRE_DEBUG"))
         std::fprintf(stderr, "tyre contact %d torque %.1f brake %.2f steer %.3f w_in %.3f w_out %.3f load %.1f "
                      "status %d ratio %.3f angle %.3f Flong %.1f Flat %.1f vlong %.3f at (%.2f %.2f)\n",
                      (int)contact, torque, brake, steer, rf(a[6], 0), sl.omega, st.load, sl.status, slip_ratio,
@@ -3451,7 +3452,7 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
      * outputs alone cannot say why a wheel brakes - a brake the graph applied, a drive
      * torque that never arrives and a contact that is not there all look the same from
      * outside. */
-    if (std::getenv("BF6_TYRE_IN_DEBUG"))
+    if (bf6_env("BF6_TYRE_IN_DEBUG"))
         std::fprintf(stderr,
                      "tyre: omega IN %.6g USED %.6g OUT %.6g | contact %d brake %g"
                      " torque %g r %.6g v_long %.6g rolling %.6g | slip %.6g f_long %g\n",

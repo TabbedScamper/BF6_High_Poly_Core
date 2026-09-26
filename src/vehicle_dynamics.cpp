@@ -1,4 +1,5 @@
 #include "vehicle_dynamics.h"
+#include "env_cache.h"
 
 #include <cmath>
 #include <cstdio>
@@ -53,7 +54,7 @@ void VehicleDynamics::root_rows(float out[16]) const {
      * rows and columns are swapped is one way a feedback sign inverts. The cars and tanks
      * are the control: they work, so if transposing breaks them this convention is right
      * and the sign error is elsewhere. Diagnostic only. */
-    if (std::getenv("BF6_ROOT_TRANSPOSE"))
+    if (bf6_env("BF6_ROOT_TRANSPOSE"))
         for (int i = 0; i < 3; ++i)
             for (int j = i + 1; j < 3; ++j) {
                 const float t = out[i * 4 + j];

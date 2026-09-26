@@ -1,3 +1,4 @@
+#include "env_cache.h"
 /* ------------------------------------------------ Drivable vehicles (C ABI)
  *
  * bf6_vehicle_open / _step / _set_pose / _close run a vehicle's OWN expression
@@ -426,7 +427,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * vehicle entry is paying for */
     const auto open_t0 = std::chrono::steady_clock::now();
     auto stage = [&](const char* what) {
-        if (!std::getenv("BF6_OPEN_TIMING")) return;
+        if (!bf6_env("BF6_OPEN_TIMING")) return;
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - open_t0).count();
         std::fprintf(stderr, "open %8.1f ms  %s\n", ms, what);
     };
@@ -514,7 +515,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * motion): graphs that derive channels from the drivetrain's for the presentation to
      * read, so they run after the simex and before the presex. BF6_NO_DERIVED leaves
      * them out, to compare. */
-    if (!std::getenv("BF6_NO_DERIVED")) {
+    if (!bf6_env("BF6_NO_DERIVED")) {
         const std::string pre = gdir + "/derivedex_";
         const int n = bf6_list_res(c, pre.c_str(), nullptr, 0);
         std::vector<bf6_asset> rows((size_t)std::max(n, 0));
@@ -555,7 +556,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
     /* AN EMPLACEMENT'S CONTROLLERS. With no drivetrain, what aims a Phalanx or an SSM
      * battery is its own simex_controller_* / simex_*_aiming graphs; they come first,
      * as a simex would. BF6_NO_CONTROLLERS leaves them out, to compare. */
-    if (presentation_only && !std::getenv("BF6_NO_CONTROLLERS")) {
+    if (presentation_only && !bf6_env("BF6_NO_CONTROLLERS")) {
         const std::string pre = gdir + "/simex_";
         const int n = bf6_list_res(c, pre.c_str(), nullptr, 0);
         std::vector<bf6_asset> rows((size_t)std::max(n, 0));
@@ -601,7 +602,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * graphs with the derived ones, the rest with the presentation. Audio graphs are
      * left out, as for the controllers. BF6_NO_FEATURE_GRAPHS leaves all of them out. */
     std::vector<std::string> feature_graphs;
-    if (!std::getenv("BF6_NO_FEATURE_GRAPHS")) {
+    if (!bf6_env("BF6_NO_FEATURE_GRAPHS")) {
         std::string terr;
         if (ensure_types(c, terr) && c->types) {
             std::vector<std::string> found;
@@ -645,7 +646,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
     stage("feature graphs found");
     /* BF6_SKIP_GRAPHS=<substr>[,<substr>...]: leave matching graphs out, to test what one
      * graph contributes (a diagnostic, never a default). */
-    if (const char* sk = std::getenv("BF6_SKIP_GRAPHS")) {
+    if (const char* sk = bf6_env("BF6_SKIP_GRAPHS")) {
         std::vector<std::string> subs;
         for (std::string t = sk; !t.empty();) {
             const size_t comma = t.find(',');
@@ -658,7 +659,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         }), graphs.end());
     }
     if (graphs.empty()) return fail("no drivetrain or presentation graph: " + sim_a);
-    if (std::getenv("BF6_VEHICLE_GRAPHS"))
+    if (bf6_env("BF6_VEHICLE_GRAPHS"))
         for (const std::string& g : graphs) std::fprintf(stderr, "vehicle graph %s\n", g.c_str());
     const std::string ske = dir + "/art/ske_veh_" + cls + "_" + veh + "_base";
     std::string e;
@@ -671,7 +672,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
     /* THE SUB-SKELETONS: a tank's tracks, the Bradley's TOW launcher, a boat's mounts.
      * Their channels (Track_Joint_*, TOW_Mount) are bound by the graphs and had nowhere
      * to land. Cinematic and first-person rigs are not the vehicle's. */
-    if (!std::getenv("BF6_NO_SUBSKELETONS")) {
+    if (!bf6_env("BF6_NO_SUBSKELETONS")) {
         const std::string pre = dir + "/art/ske_veh_" + cls + "_" + veh + "_";
         const int n = bf6_list_ebx(c, pre.c_str(), nullptr, 0);
         std::vector<bf6_asset> rows((size_t)std::max(n, 0));
@@ -704,7 +705,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * weight). Per bone the engine sorts its entries by weight and takes the first at or
      * above a requested weight (FUN_140e10510); the requested weight is not read here, so
      * the lowest entry is taken. The data is laid out by the type's reflected layout. */
-    if (!std::getenv("BF6_NO_FAKEHINGE")) {
+    if (!bf6_env("BF6_NO_FAKEHINGE")) {
         std::string err;
         std::vector<uint8_t> raw = c->src.get_ebx(ske, err);
         bf6::Ebx e(*c->types);
@@ -734,9 +735,9 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
                 for (const auto& b : bits) { float f; std::memcpy(&f, &b.second, 4); h.d[b.first] = f; }
                 v->hinges.push_back(std::move(h));
             }
-            if (std::getenv("BF6_VEHICLE_GRAPHS"))
+            if (bf6_env("BF6_VEHICLE_GRAPHS"))
                 std::fprintf(stderr, "fakehinges: %zu bones\n", v->hinges.size());
-            if (std::getenv("BF6_HINGE_DEBUG") && !v->hinges.empty())
+            if (bf6_env("BF6_HINGE_DEBUG") && !v->hinges.empty())
                 for (const auto& kv : v->hinges.front().d)
                     std::fprintf(stderr, "  hinge0 +0x%X = %g\n", kv.first, kv.second);
         }
@@ -830,13 +831,13 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
                     break;
                 }
             }
-        if (std::getenv("BF6_WEAPON_DEBUG"))
+        if (bf6_env("BF6_WEAPON_DEBUG"))
             for (const auto& w : v->weapons)
                 std::fprintf(stderr, "weapon \"%s\": %d x %d rounds, %.3f s between shots, reload %.2f s (+%.2f s empty)\n",
                              w.name.c_str(), w.capacity, w.magazines, w.interval, w.reload, w.extra);
     }
     stage("weapons");
-    if (!std::getenv("BF6_NO_CLIP_LAYERS") && cls == "airplane") {
+    if (!bf6_env("BF6_NO_CLIP_LAYERS") && cls == "airplane") {
         const char* rig = "animations/kingston/global/rigging/vehicle_airplane_common_01.rig";
         const std::string key = "." + veh + ".mmlayer";
         const int n = bf6_list_ebx(c, "mm.vehicle.top.", nullptr, 0);
@@ -847,7 +848,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         for (int i = 0; i < got; ++i) {
             const std::string layer = rows[(size_t)i].name ? rows[(size_t)i].name : "";
             if (layer.size() < key.size() || layer.compare(layer.size() - key.size(), key.size(), key) != 0) continue;
-            if (std::getenv("BF6_CLIP_DEBUG"))
+            if (bf6_env("BF6_CLIP_DEBUG"))
                 for (const std::string& p : bf6__ebx_import_paths(c, layer))
                     std::fprintf(stderr, "layer %s imports %s\n", layer.c_str(), p.c_str());
             for (const std::string& pc : bf6__ebx_import_paths(c, layer)) {
@@ -892,7 +893,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
                     const size_t dot = dof.rfind('.');
                     if (dot != std::string::npos) dof = dof.substr(0, dot);
                     const auto id = ids.find(dof);
-                    if (std::getenv("BF6_CLIP_DEBUG"))
+                    if (bf6_env("BF6_CLIP_DEBUG"))
                         std::fprintf(stderr, "  dof %s id %s%08X maps %d\n", dof.c_str(),
                                      id == ids.end() ? "none " : "", id == ids.end() ? 0u : id->second,
                                      id == ids.end() ? 0 : (int)v->sim.maps_bone(id->second));
@@ -904,7 +905,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
                     if (!v->sim.bone_channel_named(dof, bone_channel) || !v->sim.maps_bone(bone_channel)) continue;
                     L.dofs.push_back({x.channel, x.component, bone_channel});
                 }
-                if (std::getenv("BF6_VEHICLE_GRAPHS"))
+                if (bf6_env("BF6_VEHICLE_GRAPHS"))
                     std::fprintf(stderr, "clip layer %s <- %s, %zu of %d DOFs on bones\n",
                                  clip.c_str(), phase.c_str(), L.dofs.size(), nb);
                 if (L.dofs.empty()) { bf6_free(c, L.clip); continue; }
@@ -931,7 +932,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * span of its bones along each axis is the vehicle's own length, width and
      * height. Printed rather than assumed, because the hull surface this library
      * builds picks an axis for the description's "length". */
-    if (sk && std::getenv("BF6_RIG_SPAN")) {
+    if (sk && bf6_env("BF6_RIG_SPAN")) {
         float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
         for (int b = 0; b < sk->bone_count; ++b)
             for (int i = 0; i < 3; ++i) {
@@ -951,7 +952,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * skeleton at all - still drives. The locators are only the stand-in dynamics'
      * mounts, so refuse only there. */
     if (found != 4) {
-        if (std::getenv("BF6_STANDIN_PHYSICS")) {
+        if (bf6_env("BF6_STANDIN_PHYSICS")) {
             bf6_ray_scene_free(v->scene);
             return fail("vehicle rig has no four loc_Wheel_* locators (stand-in physics needs them)");
         }
@@ -960,7 +961,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
     bf6__vehicle_blueprint(c, dir + "/vb_veh_" + cls + "_" + veh, v->dyn.p);
     bf6__vehicle_physics(c, dir, cls, veh, v.get());
     v->dyn.init();
-    if (std::getenv("BF6_DYN_DEBUG")) std::fprintf(stderr, "%s", v->dyn.describe_params().c_str());
+    if (bf6_env("BF6_DYN_DEBUG")) std::fprintf(stderr, "%s", v->dyn.describe_params().c_str());
     return v.release();
 }
 
@@ -1088,7 +1089,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * as throttle and W as brake - W then brakes to a stop and the graph selects
      * forward, which clears the byte. The swap is the native input layer's, applied
      * here from the byte's last value (our reading, stated). BF6_NO_PEDAL_SWAP for A/B. */
-    const bool reversing = v->sim.reverse_mode() == 1 && !std::getenv("BF6_NO_PEDAL_SWAP");
+    const bool reversing = v->sim.reverse_mode() == 1 && !bf6_env("BF6_NO_PEDAL_SWAP");
     float throttle = in[0], brake = in[1];
     if (reversing) { throttle = in[1]; brake = in[0]; }
     const float steer = in[2], dt = in[4] > 0 ? in[4] : 1.0f / 60.0f;
@@ -1121,7 +1122,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             if (s.channel_hash("TeamId", th)) driver.ints[th] = v->team;
         }
         /* BF6_NO_DRIVER: an empty vehicle, to check the queries find the driver */
-        const bool seated = v->seat_occupied[0] && !std::getenv("BF6_NO_DRIVER");
+        const bool seated = v->seat_occupied[0] && !bf6_env("BF6_NO_DRIVER");
         s.state_mut().set_characters(seated ? std::vector<bf6::expression::StateHost::Character>{driver}
                                             : std::vector<bf6::expression::StateHost::Character>{});
         /* the seats: the driver in seat 0 when seated; other seats have no one to fill
@@ -1185,13 +1186,13 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * inside the graph's Autopilot struct, not a channel. Measured, the flag changes nothing
      * to six decimal places on all five helicopters. It is kept only because its return now
      * says so out loud rather than failing silently. */
-    if (std::getenv("BF6_HAS_PILOT") && !s.set_bool("HasPilot", true))
+    if (bf6_env("BF6_HAS_PILOT") && !s.set_bool("HasPilot", true))
         std::fprintf(stderr, "BF6_HAS_PILOT: no channel named HasPilot; it is a state cell, "
                              "so this flag does nothing\n");
     /* BF6_LIST_CHANNELS=1: every channel name the graph binds, which is the only set
      * set_float and set_bool can reach. Guessing a name here silently does nothing, so the
      * list has to be printable. */
-    if (std::getenv("BF6_LIST_CHANNELS") && v->time < 0.02) {
+    if (bf6_env("BF6_LIST_CHANNELS") && v->time < 0.02) {
         const std::map<uint32_t, std::string> ch = s.channel_name_map();
         std::fprintf(stderr, "bound channels (%zu):\n", ch.size());
         for (const auto& kv : ch) std::fprintf(stderr, "  %08X %s\n", kv.first, kv.second.c_str());
@@ -1222,7 +1223,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     s.set_root(rows);
     const char* wch[4] = {"AngularVelocity_Wheel_FL", "AngularVelocity_Wheel_FR",
                           "AngularVelocity_Wheel_RL", "AngularVelocity_Wheel_RR"};
-    static const bool graph_wheels = std::getenv("BF6_STANDIN_PHYSICS") == nullptr;   /* the car's own graph physics; BF6_STANDIN_PHYSICS for the old stand-in */
+    static const bool graph_wheels = bf6_env("BF6_STANDIN_PHYSICS") == nullptr;   /* the car's own graph physics; BF6_STANDIN_PHYSICS for the old stand-in */
     /* In graph physics the graph owns the wheel speed (its tyre and spin functions
      * update it and it persists it in replicated state); feeding the stand-in
      * dynamics' spin back in would overwrite it. */
@@ -1321,7 +1322,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * velocity changes into LinearAcceleration / AngularAcceleration; this side
      * only integrates them. The default; BF6_STANDIN_PHYSICS selects the old stand-in
      * tyre/suspension model. */
-    static const bool graph_physics = std::getenv("BF6_STANDIN_PHYSICS") == nullptr;   /* the car's own graph physics; BF6_STANDIN_PHYSICS for the old stand-in */
+    static const bool graph_physics = bf6_env("BF6_STANDIN_PHYSICS") == nullptr;   /* the car's own graph physics; BF6_STANDIN_PHYSICS for the old stand-in */
     if (graph_physics) {
         bf6::expression::WheelBody b;
         float qi[4] = {-d.quat[0], -d.quat[1], -d.quat[2], d.quat[3]};
@@ -1478,12 +1479,12 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         float la[3], aa[3];
         const bool kl = s.get_vec3("LinearAcceleration", la, 0);
         const bool ka = s.get_vec3("AngularAcceleration", aa, 0);
-        if (std::getenv("BF6_ACCEL_DEBUG") && v->time < 0.02)
+        if (bf6_env("BF6_ACCEL_DEBUG") && v->time < 0.02)
             std::fprintf(stderr, "channels: LinearAcceleration (%g %g %g) known %d, "
                                  "AngularAcceleration (%g %g %g) known %d\n",
                          la[0], la[1], la[2], (int)kl, aa[0], aa[1], aa[2], (int)ka);
-        if (const char* recs = std::getenv("BF6_GRAPH_REC"))
-            if (std::fabs(v->time - (std::getenv("BF6_GRAPH_REC_T") ? std::atof(std::getenv("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
+        if (const char* recs = bf6_env("BF6_GRAPH_REC"))
+            if (std::fabs(v->time - (bf6_env("BF6_GRAPH_REC_T") ? std::atof(bf6_env("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
                 for (const char* p = recs; *p;) {
                     char* end = nullptr;
                     const unsigned long r = std::strtoul(p, &end, 16);
@@ -1493,7 +1494,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                 }
         /* BF6_POOL_DUMP=<graph name>:<hex>[,<hex>...]: the on-disk pool words (8 bytes)
          * at those offsets and the loader's patch, once */
-        if (const char* pd = std::getenv("BF6_POOL_DUMP"))
+        if (const char* pd = bf6_env("BF6_POOL_DUMP"))
             if (v->time < 0.02) {
                 const std::string spec = pd;
                 const size_t colon = spec.rfind(':');
@@ -1515,7 +1516,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                 }
             }
         /* BF6_LIST_RECS=<graph substr>:<lo hex>-<hi hex>: the records in that range, once */
-        if (const char* ls = std::getenv("BF6_LIST_RECS"))
+        if (const char* ls = bf6_env("BF6_LIST_RECS"))
             if (v->time < 0.02) {
                 char gname[128] = {};
                 unsigned lo = 0, hi = 0;
@@ -1523,19 +1524,19 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                     std::fprintf(stderr, "%s", s.list(gname, lo, hi).c_str());
             }
         /* BF6_CHANNEL_USE=<name>: once, every record that names that channel and what follows */
-        if (const char* cu = std::getenv("BF6_CHANNEL_USE"))
+        if (const char* cu = bf6_env("BF6_CHANNEL_USE"))
             if (v->time < 0.02) std::fprintf(stderr, "%s", s.readers(cu).c_str());
         /* BF6_CHANNEL_SRC=<name>: at BF6_GRAPH_REC_T, who writes that channel and from what */
-        if (const char* ch = std::getenv("BF6_CHANNEL_SRC"))
-            if (std::fabs(v->time - (std::getenv("BF6_GRAPH_REC_T") ? std::atof(std::getenv("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
+        if (const char* ch = bf6_env("BF6_CHANNEL_SRC"))
+            if (std::fabs(v->time - (bf6_env("BF6_GRAPH_REC_T") ? std::atof(bf6_env("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
                 std::fprintf(stderr, "%s", s.writers(ch).c_str());
-        if (const char* src = std::getenv("BF6_GRAPH_SRC"))
-            if (std::fabs(v->time - (std::getenv("BF6_GRAPH_REC_T") ? std::atof(std::getenv("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
+        if (const char* src = bf6_env("BF6_GRAPH_SRC"))
+            if (std::fabs(v->time - (bf6_env("BF6_GRAPH_REC_T") ? std::atof(bf6_env("BF6_GRAPH_REC_T")) : 2.0)) < 0.009)
                 std::fprintf(stderr, "%s", s.sources((uint32_t)std::strtoul(src, nullptr, 16)).c_str());
-        if (std::getenv("BF6_GRAPH_PHYSICS_REPORT") && (v->time < 0.02 || std::fabs(v->time - std::atof(std::getenv("BF6_GRAPH_PHYSICS_REPORT"))) < 0.009))
+        if (bf6_env("BF6_GRAPH_PHYSICS_REPORT") && (v->time < 0.02 || std::fabs(v->time - std::atof(bf6_env("BF6_GRAPH_PHYSICS_REPORT"))) < 0.009))
             std::fprintf(stderr, "%s%s%s", s.report().c_str(), s.why("LinearAcceleration").c_str(),
                          s.why("AngularAcceleration").c_str());
-        if (std::getenv("BF6_GRAPH_PHYSICS_CH") && v->time < 0.02)
+        if (bf6_env("BF6_GRAPH_PHYSICS_CH") && v->time < 0.02)
             for (const auto& kv : s.state().channels())
                 if ((uint32_t)kv.first == 0x4381D143u || (uint32_t)kv.first == 0x1FC6ADB7u) {
                     float f[4] = {0, 0, 0, 0};
@@ -1543,7 +1544,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                     std::fprintf(stderr, "channel %08X mode %u bytes %zu = %g %g %g %g\n", (uint32_t)kv.first,
                                  (uint32_t)(kv.first >> 32), kv.second.size(), f[0], f[1], f[2], f[3]);
                 }
-        if (std::getenv("BF6_GRAPH_PHYSICS_DEBUG"))
+        if (bf6_env("BF6_GRAPH_PHYSICS_DEBUG"))
             std::fprintf(stderr, "t %.3f lin %d (%.3f %.3f %.3f) ang %d (%.3f %.3f %.3f) rays %d/%d tyres %zu\n",
                          v->time, kl, la[0], la[1], la[2], ka, aa[0], aa[1], aa[2],
                          s.wheel_ops().ray_hits(), s.wheel_ops().rays(), s.wheel_ops().tyre_omegas().size());
@@ -1561,7 +1562,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                 d.omega[w] = om[i];
                 s.state_mut().set_wheel_state(w, om[i], ct[i] != 0);
             }
-            if (std::getenv("BF6_FRAME_READS"))
+            if (bf6_env("BF6_FRAME_READS"))
                 for (const auto& r : s.state().unseeded_frame_reads())
                     std::fprintf(stderr, "unseeded frame read: frame %08X path %08X kind %u field %u\n",
                                  r.frame, r.path, r.kind, r.field);
@@ -1588,7 +1589,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                     uint32_t bits = 0;
                     std::memcpy(&bits, &om[i], 4);
                     s.state_mut().set_frame_cell(part_frames[t], 0xFFFFFFFFu, 0, 3, bits);
-                    if (std::getenv("BF6_FRAME_READS"))
+                    if (bf6_env("BF6_FRAME_READS"))
                         std::fprintf(stderr, "  seeded frame %08X field 3 with %g\n",
                                      part_frames[t], om[i]);
                 }
@@ -1639,7 +1640,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                         }
                     }
                     for (const auto& kv : acc) v->wheel_spin[kv.first] = kv.second.first / (float)kv.second.second;
-                    if (std::getenv("BF6_WHEEL_MAP") && v->time > 1.0 && v->time < 1.02)
+                    if (bf6_env("BF6_WHEEL_MAP") && v->time > 1.0 && v->time < 1.02)
                         for (size_t i = 0; i < loc.size(); ++i)
                             std::fprintf(stderr, "tyre %zu at body (%.2f %.2f %.2f) omega %.2f\n",
                                          i, loc[i][0], loc[i][1], loc[i][2], tom[i]);
@@ -1648,15 +1649,15 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         }
         if (s.wheel_ops().com_set()) {
             v->graph_com_written = true;
-            if (std::getenv("BF6_COM_DEBUG"))
+            if (bf6_env("BF6_COM_DEBUG"))
                 std::fprintf(stderr, "com: host (%g %g %g) -> graph (%g %g %g)\n",
                              d.p.com[0], d.p.com[1], d.p.com[2], s.wheel_ops().body().com[0],
                              s.wheel_ops().body().com[1], s.wheel_ops().body().com[2]);
             for (int i = 0; i < 3; ++i) d.p.com[i] = s.wheel_ops().body().com[i];
         }
         s.wheel_ops().clear_com_set();
-        if (s.wheel_ops().inertia_set() && !std::getenv("BF6_NO_GRAPH_INERTIA")) {
-            if (std::getenv("BF6_INERTIA_DEBUG"))
+        if (s.wheel_ops().inertia_set() && !bf6_env("BF6_NO_GRAPH_INERTIA")) {
+            if (bf6_env("BF6_INERTIA_DEBUG"))
                 std::fprintf(stderr, "inertia per kg: host (%g %g %g) -> graph (%g %g %g)\n",
                              d.p.inertia_per_kg[0], d.p.inertia_per_kg[1], d.p.inertia_per_kg[2],
                              s.wheel_ops().inertia_per_kg()[0], s.wheel_ops().inertia_per_kg()[1],
@@ -1677,7 +1678,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
             }
         }
         s.wheel_ops().clear_inertia_set();
-        d.integrate_body_accel(dt, la, aa, std::getenv("BF6_GRAPH_GRAVITY") != nullptr);
+        d.integrate_body_accel(dt, la, aa, bf6_env("BF6_GRAPH_GRAVITY") != nullptr);
         if (v->chassis_contact) bf6__collide_vehicle(v, dt);
         /* Keep the established extra linear hull delta (it supplies the calibrated
          * drag path), but not the angular delta: the graph already adds the hull

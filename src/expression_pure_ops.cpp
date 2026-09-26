@@ -1,4 +1,5 @@
 #include "expression_pure_ops.h"
+#include "env_cache.h"
 
 #include <immintrin.h>
 #include <cmath>
@@ -388,7 +389,7 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
      * (0x02C66B00) whose IsActive the VM guessed true - a "vehicle disabled" effect that
      * also zeroes the throttle. With that query answered (FUN_141727850's own miss path),
      * every jet takes off under this rule, and the boat drives. */
-    static const bool relax_float3 = std::getenv("BF6_FLOAT3_STRICT") == nullptr;
+    static const bool relax_float3 = bf6_env("BF6_FLOAT3_STRICT") == nullptr;
     const bool all_float3 = relax_float3 && (n == "AddFloat3" || n == "SubtractFloat3" ||
                             n == "AbsoluteFloat3" || n == "AverageFloat3" ||
                             n == "DistanceFloat3" || n == "DotFloat3" ||
@@ -403,11 +404,11 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
      * which one changes a vehicle can be found by bisection. Diagnostic. */
     bool relax = all_float3;
     if (relax)
-        if (const char* only = std::getenv("BF6_FLOAT3_ONLY"))
+        if (const char* only = bf6_env("BF6_FLOAT3_ONLY"))
             relax = std::string(",") .append(only).append(",").find("," + n + ",") != std::string::npos;
     /* BF6_FLOAT3_RECS=<rec>[,<rec>]: and only at these record offsets (decimal). */
     if (relax)
-        if (const char* recs = std::getenv("BF6_FLOAT3_RECS"))
+        if (const char* recs = bf6_env("BF6_FLOAT3_RECS"))
             relax = std::string(",").append(recs).append(",").find("," + std::to_string(cur_record_) + ",") != std::string::npos;
     for (const Value& v : a) {
         if (v.known) continue;
@@ -639,7 +640,7 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         const float o0 = f32(a[3]), o1 = f32(a[4]);
         if (i1 == i0) return false;
         out = put_f32(o0 + (v - i0) * (o1 - o0) / (i1 - i0));
-        if (std::getenv("BF6_RANGE_DEBUG"))
+        if (bf6_env("BF6_RANGE_DEBUG"))
             std::fprintf(stderr, "RangeChange(%g, %g..%g -> %g..%g) = %g\n",
                          v, i0, i1, o0, o1, f32(out));
         return true;
@@ -699,7 +700,7 @@ bool PureOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
          * an aircraft at rest - relative wind exactly zero - lose every wing's angle
          * of attack and with it the whole AngularAcceleration channel.
          * BF6_NORMALIZE_REFUSE_ZERO=1 restores the old refusal for A/B. */
-        static const bool refuse_zero = std::getenv("BF6_NORMALIZE_REFUSE_ZERO") != nullptr;
+        static const bool refuse_zero = bf6_env("BF6_NORMALIZE_REFUSE_ZERO") != nullptr;
         const float eps = 1.19209290e-7f;
         if (std::fabs(u[0]) <= eps && std::fabs(u[1]) <= eps && std::fabs(u[2]) <= eps) {
             if (refuse_zero) return false;
@@ -1185,7 +1186,7 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
     for (size_t i = 0; i < args.size(); ++i) {
         if (sig.input_widths[i] == 0) continue;   /* a width-0 input is one the native never reads */
         if (args[i].bytes.size() < sig.input_widths[i]) {
-            if (std::getenv("BF6_RECOV_DEBUG"))
+            if (bf6_env("BF6_RECOV_DEBUG"))
                 std::fprintf(stderr, "recovered op %08X refused: input %zu is %zu bytes, wants %u\n",
                              key, i, args[i].bytes.size(), sig.input_widths[i]);
             return false;
@@ -1216,7 +1217,7 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
             for (uint32_t b = 0; b < 16; ++b) ok = ok && args[i].known_bytes[b] != 0;
             if (ok) continue;
         }
-        if (std::getenv("BF6_RECOV_DEBUG")) {
+        if (bf6_env("BF6_RECOV_DEBUG")) {
             size_t known = 0;
             for (uint8_t b : args[i].known_bytes) known += b != 0;
             float first = 0.0f;
@@ -1422,7 +1423,7 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
          * 71.4 and 10, which with an inertia of 1 removes 10.4 rad/s of wheel spin per
          * tick and pins that wheel's omega at zero for ever. This measures whether
          * that is what holds the aircraft on the runway. */
-        if (std::getenv("BF6_WHEELSPIN_NO_RES")) res = 0.0f;
+        if (bf6_env("BF6_WHEELSPIN_NO_RES")) res = 0.0f;
         float d = std::fabs(res) * dt;
         d = d / inertia;
         float y = aw - d;
@@ -1500,7 +1501,7 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
         float p5 = f[4];
         const float p6 = f[5], p8 = f[7], p9 = f[8];
         const float lo = tbl[0], hi = tbl[4];
-        if (std::getenv("BF6_REV_DEBUG"))
+        if (bf6_env("BF6_REV_DEBUG"))
             std::fprintf(stderr, "revlimit dt %g rpm %g thr %g engaged %d speed %g p6 %g load %g ratio %g | tbl %g %g %g %g %g %g\n",
                          p1, p2, p3, p4, p5, p6, p8, p9, tbl[0], tbl[1], tbl[2], tbl[3], tbl[4], tbl[5]);
         float target;

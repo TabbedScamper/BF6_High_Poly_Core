@@ -1,4 +1,5 @@
 #include "expression_state_host.h"
+#include "env_cache.h"
 #include "soldier_fields.h"
 
 #include <algorithm>
@@ -144,7 +145,7 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
         odd_reads_.push_back(r);
     }
     const auto it = cells_.find(cell_key(path));
-    if (std::getenv("BF6_CELL_DEBUG"))
+    if (bf6_env("BF6_CELL_DEBUG"))
         std::fprintf(stderr, "cell read rec 0x%X key 0x%016llX %s depth %zu bound %08X %08X %08X %08X kind %u field %u\n",
                      cur_record_,
                      (unsigned long long)cell_key(path), it != cells_.end() ? "hit" : "MISS", frames_.size(),
@@ -162,7 +163,7 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
         const uint8_t cls = (uint8_t)(path & 0xFFu);
         if (w < 8) {
             if (wheel_class_[w] == 0xFF) wheel_class_[w] = cls;
-            if (std::getenv("BF6_CELL_DEBUG"))
+            if (bf6_env("BF6_CELL_DEBUG"))
                 std::fprintf(stderr, "  wheel-state gate: w %u cls %02X stored %02X known %d spin %g\n",
                              w, cls, wheel_class_[w], (int)wheel_known_[w],
                              *(const float*)&wheel_spin_[w]);
@@ -193,13 +194,13 @@ bool StateHost::read_cell(uint32_t path, uint32_t& out) {
          * this returns decides whether an aircraft can roll at all. A car never binds
          * these paths (its descriptor is the all-ones sentinel) and reaches brake = 0
          * by another route, so this measures the aircraft path without touching cars. */
-        if (std::getenv("BF6_UNSEEDED_ONE")) { out = 1; return true; }
+        if (bf6_env("BF6_UNSEEDED_ONE")) { out = 1; return true; }
         /* BF6_UNSEEDED_BOUND_ONE=1 narrows that to the reads whose path names a
          * PARTICULAR part - low byte not the all-ones sentinel - at field 0, which is
          * exactly the shape the aircraft brake test uses (paths FFFFFF00, FFFFFF03,
          * FFFFFF04 at frame 001479 on an f22). A car's equivalent reads carry the
          * unbound FFFFFFFF, so they are untouched by this. */
-        if (std::getenv("BF6_UNSEEDED_BOUND_ONE") && cur_field_ == 0 &&
+        if (bf6_env("BF6_UNSEEDED_BOUND_ONE") && cur_field_ == 0 &&
             (path & 0xFFu) != 0xFFu) { out = 1; return true; }
     }
     out = 0;
@@ -233,7 +234,7 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
         out.output_width = 260;
         return true;
     }
-    if (key == 0xC8364385u && !std::getenv("BF6_NO_ENTITY_INDEX")) {   /* the entity index, zero inputs (see invoke) */
+    if (key == 0xC8364385u && !bf6_env("BF6_NO_ENTITY_INDEX")) {   /* the entity index, zero inputs (see invoke) */
         out.input_widths = {};
         out.output_width = 4;
         return true;
@@ -818,10 +819,10 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
              * as exactly (0,0,0) that way: 17.7 of gear torque, then a refused wing,
              * then zero. The channel now stays UNKNOWN until the
              * next known write. BF6_CHANNEL_LAUNDER=1 restores the old erase, for A/B. */
-            static const bool honest = std::getenv("BF6_CHANNEL_LAUNDER") == nullptr;
+            static const bool honest = bf6_env("BF6_CHANNEL_LAUNDER") == nullptr;
             /* BF6_CHANNEL_TRACE=<hex hash>: every write of that channel, all lanes, in
              * order - the accumulation chain of a force channel one step at a time. */
-            if (const char* tr = std::getenv("BF6_CHANNEL_TRACE"))
+            if (const char* tr = bf6_env("BF6_CHANNEL_TRACE"))
                 if ((uint32_t)ck == (uint32_t)std::strtoul(tr, nullptr, 16)) {
                     float f[3] = {0, 0, 0};
                     if (v.bytes.size() == 1)
@@ -1139,7 +1140,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         std::memcpy(written.data(), local, 64);
         return true;
     }
-    if (key == kNamedHandle && std::getenv("BF6_NAMED_HANDLE_DEBUG")) {
+    if (key == kNamedHandle && bf6_env("BF6_NAMED_HANDLE_DEBUG")) {
         std::fprintf(stderr, "named handle: %zu arg(s)", args.size());
         for (const auto& a : args) std::fprintf(stderr, " %s%08X", a.known ? "" : "?", a.as_u32());
         std::fprintf(stderr, ", %zu published\n", named_transforms_.size());
@@ -1168,7 +1169,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
              * keeps its last pose. Still recorded, so the gap stays visible. */
             unsupplied_transforms_[name] += 1;
             out.bytes.assign(64, 0);
-            static const bool old_identity = std::getenv("BF6_NAMED_IDENTITY") != nullptr;
+            static const bool old_identity = bf6_env("BF6_NAMED_IDENTITY") != nullptr;
             if (old_identity) {                          /* the old rule, to compare */
                 const float one = 1.0f;
                 std::memcpy(out.bytes.data() + 0,  &one, 4);
@@ -1255,7 +1256,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
             seen.arg[i] = p;
         }
         frames_.push_back(f);
-        if (std::getenv("BF6_CELL_DEBUG"))
+        if (bf6_env("BF6_CELL_DEBUG"))
             std::fprintf(stderr, "push depth %zu  %08X %08X %08X %08X\n", frames_.size(),
                          f.bound[0], f.bound[1], f.bound[2], f.bound[3]);
         if (trace_frames_ && pushes_seen_.size() < 4000)
@@ -1287,7 +1288,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         uint32_t raw = 0;
         take_descriptor(args[0]);
         read_cell(args[0].as_u32(), raw);
-        if (std::getenv("BF6_CELL_DEBUG") && args[0].bytes.size() >= 16) {
+        if (bf6_env("BF6_CELL_DEBUG") && args[0].bytes.size() >= 16) {
             uint32_t d[4];
             std::memcpy(d, args[0].bytes.data(), 16);
             float fv; std::memcpy(&fv, &raw, 4);
@@ -1322,7 +1323,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         const uint32_t dest = args[0].as_u32();
         if (!args[1].known) { cells_.erase(cell_key(dest)); out = Value{}; return true; }
         cells_[cell_key(dest)] = args[1].as_u32();
-        if (std::getenv("BF6_CELL_DEBUG"))
+        if (bf6_env("BF6_CELL_DEBUG"))
             std::fprintf(stderr, "cell write rec 0x%X op %08X key 0x%016llX value 0x%08X depth %zu bound3 %08X kind %u field %u path %08X\n",
                          cur_record_, key, (unsigned long long)cell_key(dest), args[1].as_u32(),
                          frames_.size(), frames_.empty() ? 0u : frames_.back().bound[3],
@@ -1938,7 +1939,7 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
          * across the 118 soldier graphs, all 93 calls: (0xF263DF78, descriptor, value) -
          * the same collection key and the same (u16 id, flags, lane) descriptor the
          * readers take, then a 1-byte bool or a 4-byte float/int. No output. */
-        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        if (!bf6::SoldierFields::get().loaded() && !bf6_env("BF6_LOG_FIELD_IDS")) return false;
         out.input_widths = {4, 4, key == kStoreBool ? 1u : 4u};
         out.output_width = 0;
         return true;
@@ -1979,14 +1980,14 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
     case kClampStoreInt:
     case kClampStoreFloat:
         /* Six operands here; describe_call also admits the five-operand form. */
-        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        if (!bf6::SoldierFields::get().loaded() && !bf6_env("BF6_LOG_FIELD_IDS")) return false;
         out.input_widths = {4, 4, 4, 4, 4, 4};
         out.output_width = 0;
         return true;
     case kFieldXform:
         /* (0xF263DF78, descriptor, space mode) -> LinearTransform. Native 1443290E0 via
          * FUN_141320DA0; all 29 calls measured with this shape. */
-        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        if (!bf6::SoldierFields::get().loaded() && !bf6_env("BF6_LOG_FIELD_IDS")) return false;
         out.input_widths = {4, 4, 4};
         out.output_width = 64;
         return true;
@@ -1996,7 +1997,7 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
         /* Served from the soldier field table (soldier_fields.h) once it is loaded;
          * without it these are not described at all, as before. BF6_LOG_FIELD_IDS
          * describes them anyway so the descriptors can be logged. */
-        if (!bf6::SoldierFields::get().loaded() && !std::getenv("BF6_LOG_FIELD_IDS")) return false;
+        if (!bf6::SoldierFields::get().loaded() && !bf6_env("BF6_LOG_FIELD_IDS")) return false;
         out.input_widths = key == kFieldVec ? std::vector<uint32_t>{4, 4, 4} : std::vector<uint32_t>{4, 4};
         out.output_width = key == kFieldVec ? 16u : 4u;
         return true;
@@ -2087,7 +2088,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         return true;
     }
     if (key == kClampStoreInt || key == kClampStoreFloat) {
-        if (std::getenv("BF6_LOG_FIELD_IDS")) {
+        if (bf6_env("BF6_LOG_FIELD_IDS")) {
             std::string hex;
             for (size_t a = 0; a < args.size(); ++a) {
                 hex += a ? " | " : "";
@@ -2203,7 +2204,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
     }
     if (key == kIsLocalSoldier) {
         served_[key] += 1;
-        out = Value::from_bool(std::getenv("BF6_REMOTE_SOLDIER") == nullptr);
+        out = Value::from_bool(bf6_env("BF6_REMOTE_SOLDIER") == nullptr);
         return true;
     }
     if (key == kIntFieldIs) {
@@ -2236,7 +2237,7 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         return true;
     }
     if (key == kStoreBool || key == kStoreFloat || key == kStoreInt || key == kFieldXform) {
-        if (std::getenv("BF6_LOG_FIELD_IDS")) {
+        if (bf6_env("BF6_LOG_FIELD_IDS")) {
             std::string hex;
             for (size_t a = 0; a < args.size(); ++a) {
                 hex += a ? " | " : "";
@@ -2301,11 +2302,11 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         return true;
     }
     if (key == kFieldFloat || key == kFieldInt || key == kFieldVec ||
-        (key == kSettingBool && std::getenv("BF6_LOG_FIELD_IDS"))) {
+        (key == kSettingBool && bf6_env("BF6_LOG_FIELD_IDS"))) {
         /* BF6_LOG_FIELD_IDS: which soldier field each descriptor names, as (reader, id,
          * lane) - to test whether the u16 id is the field's index in its type's list in
          * common/gameplay/soldier/soldiermotionmachine. */
-        if (std::getenv("BF6_LOG_FIELD_IDS") && args.size() >= 2 && args[1].known &&
+        if (bf6_env("BF6_LOG_FIELD_IDS") && args.size() >= 2 && args[1].known &&
             args[1].bytes.size() >= 4) {
             /* Operand 1 is the descriptor (u16 id, flags byte, lane byte). */
             uint16_t id = 0; uint8_t lane = args[1].bytes[3];

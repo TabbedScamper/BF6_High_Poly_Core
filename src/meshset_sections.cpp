@@ -744,6 +744,52 @@ extern "C" BF6_API int64_t bf6_meshset_surfaces(const uint8_t* res, int64_t res_
 
 #include "meshset.h"
 
+// Ours: a fixed 28-float transport record: position, normal, UV0, eight bone
+// indices, eight weights and four low-to-high 16-bit state-key limbs.
+// Values and influence counts come from the MeshSet.
+// Keep the dominant-bone API unchanged for damage classification and old clients.
+extern "C" BF6_API int64_t bf6_meshset_vertex_skin(const uint8_t* res, int64_t res_len, int lod,
+    const uint8_t* chunk, int64_t chunk_len, float** out)
+{
+    if (!out) return -1;
+    *out = nullptr;
+    try {
+        std::string err;
+        const auto ms = bf6::meshset_parse(res, (size_t)res_len, err);
+        if (lod < 0 || lod >= (int)ms.lods.size()) return -1;
+        const auto secs = bf6::meshset_read_lod(ms, lod, chunk, (size_t)chunk_len, err);
+        std::vector<float> values;
+        for (const auto& s : secs) {
+            const size_t count = s.positions.size() / 3;
+            if (s.influences > 8) return -1;
+            const bool skin = s.influences > 0 &&
+                s.skin_bones.size() >= count * s.influences &&
+                s.skin_weights.size() >= count * s.influences;
+            for (size_t v = 0; v < count; ++v) {
+                float row[28] = {};
+                for (int k = 0; k < 3; ++k) {
+                    row[k] = s.positions[v * 3 + k];
+                    if (s.normals.size() >= count * 3) row[3 + k] = s.normals[v * 3 + k];
+                }
+                if (s.uv0.size() >= count * 2) {
+                    row[6] = s.uv0[v * 2]; row[7] = s.uv0[v * 2 + 1];
+                }
+                if (skin) for (int k = 0; k < s.influences; ++k) {
+                    row[8 + k] = (float)s.skin_bones[v * s.influences + k];
+                    row[16 + k] = s.skin_weights[v * s.influences + k];
+                }
+                for (int k = 0; k < 4; ++k) row[24 + k] = (float)((s.state_key >> (k * 16)) & 0xffffu);
+                values.insert(values.end(), row, row + 28);
+            }
+        }
+        float* blob = (float*)std::malloc(values.size() * sizeof(float) + 4);
+        if (!blob) return -1;
+        std::memcpy(blob, values.data(), values.size() * sizeof(float));
+        *out = blob;
+        return (int64_t)(values.size() / 28);
+    } catch (...) { return -1; }
+}
+
 /* THE BONE EACH VERTEX RIDES (see bf6_core.h). A vehicle body is a skinned MeshSet
  * whose skin indices are skeleton bones directly - measured on the quad's body:
  * Chassis 8454 vertices, Handlebars 4244, every control arm, damper and tie rod its

@@ -20,5 +20,10 @@ int bf6_soldier_fields_load(bf6_ctx* c)
 
 void bf6_soldier_field_set(const char* name, const float* v, int32_t n)
 {
-    if (name && v && n > 0) bf6::SoldierFields::get().set_live(name, v, (int)n);
+    if (!name || !v || n <= 0) return;
+    auto& fields = bf6::SoldierFields::get();
+    const auto* field = fields.by_name(name);
+    if (field && field->kind == bf6::SoldierFields::kXform) {
+        if (n == 16) fields.set_live_xform(name, v);
+    } else fields.set_live(name, v, (int)n);
 }

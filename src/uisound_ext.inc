@@ -173,7 +173,8 @@ UiSoundIndex& uis_index(bf6_ctx* c)
  * route is chosen from what the mount says it is, so a tool never has to know
  * whether it is holding a config partition or a wave resource. */
 bf6::ui_runtime::InstalledSoundResult uis_read_any(
-    bf6_ctx* c, const std::string& path, uint32_t variation, bool metadata_only)
+    bf6_ctx* c, const std::string& path, uint32_t variation, bool metadata_only,
+    bool loop_only = false)
 {
     bf6_asset res{};
     if (bf6_list_res(c, path.c_str(), &res, 1) == 1 && res.name &&
@@ -181,12 +182,14 @@ bf6::ui_runtime::InstalledSoundResult uis_read_any(
         bf6::ui_runtime::InstalledSoundRequest request;
         request.wave_asset = path;
         request.variation_index = variation;
+        request.loop_only = loop_only;
         request.metadata_only = metadata_only;
         return bf6::ui_runtime::ReadInstalledSoundWave(c, request);
     }
     bf6::ui_runtime::InstalledSoundConfigRequest request;
     request.config_asset = path;
     request.variation_index = variation;
+    request.loop_only = loop_only;
     request.metadata_only = metadata_only;
     return bf6::ui_runtime::ReadInstalledSoundConfig(c, request);
 }
@@ -282,6 +285,22 @@ int bf6_ui_sound_style(bf6_ctx* c, bf6_ui_sound_event* out, int out_max)
         out[i].event    = uis_keep(rows[size_t(i)].first);
         out[i].ebx_path = uis_keep(rows[size_t(i)].second);
     }
+    return write;
+}
+
+int bf6_ui_sound_decode_loop(bf6_ctx* c, const char* ebx_path, int variation_index,
+                        int16_t* out_pcm16, int max_samples,
+                        int* out_channels, int* out_rate)
+{
+    if (!c || !ebx_path || !*ebx_path || variation_index < 0) return -1;
+    const bool sizing = (out_pcm16 == nullptr || max_samples <= 0);
+    const auto read = uis_read_any(c, ebx_path, uint32_t(variation_index), sizing, true);
+    if (!read.ok()) return -1;
+    if (out_channels) *out_channels = read.wave.channels;
+    if (out_rate) *out_rate = int(read.wave.sample_rate);
+    if (sizing) return int(size_t(read.wave.sample_count) * size_t(read.wave.channels));
+    const int write = (std::min)(int(read.wave.pcm.size()), max_samples);
+    std::memcpy(out_pcm16, read.wave.pcm.data(), size_t(write) * sizeof(int16_t));
     return write;
 }
 

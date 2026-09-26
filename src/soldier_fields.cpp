@@ -97,15 +97,19 @@ bool SoldierFields::load(Source& src, TypeDb& types, std::string& err)
                 if (number(kv.second, d)) f.def[0] = (float)d;
             }
         }
-        /* A vector's default is not a scalar field; read (x, y, z) from any three-float
-         * struct on the instance, else leave it zero. */
+        /* Only DefaultValue is a vector default. The earlier shape-based scan read
+         * the replication flags {true,false,2} as LinearVelocity (1,0,2).
+         * Verified in soldiermotionmachine: DefaultValue 42C8B257 contains the
+         * x/y/z fields 3901DB14/42FC0F5E/32A99B9C, all zero for LinearVelocity. */
         if (kind == kVec)
             for (const auto& kv : v.fields)
-                if (kv.second.kind == EbxValue::Kind::Struct && kv.second.fields.size() >= 3) {
-                    double c[3];
-                    bool ok = true;
-                    for (int j = 0; j < 3 && ok; ++j) ok = number(kv.second.fields[(size_t)j].second, c[j]);
-                    if (ok) { for (int j = 0; j < 3; ++j) f.def[j] = (float)c[j]; break; }
+                if (kv.first == kDefault && kv.second.kind == EbxValue::Kind::Struct) {
+                    const uint32_t xyz[] = {0x3901db14u, 0x42fc0f5eu, 0x32a99b9cu};
+                    for (const auto& component : kv.second.fields)
+                        for (int j = 0; j < 3; ++j) {
+                            double d = 0;
+                            if (component.first == xyz[j] && number(component.second, d)) f.def[j] = (float)d;
+                        }
                 }
         if (id < 0.0 || f.name.empty()) continue;
         f.space_ref = any_descriptor_set(v, 0);
@@ -164,6 +168,7 @@ void SoldierFields::set_live_xform(const std::string& name, const float m[16])
     std::array<float, 16> a{};
     for (int j = 0; j < 16; ++j) a[(size_t)j] = m[j];
     xform_live_[name] = a;
+    unknown_.erase(name);
 }
 
 bool SoldierFields::get_by_name(const std::string& name, float out[4]) const
@@ -179,6 +184,7 @@ void SoldierFields::set_live(const std::string& name, const float* v, int n)
     std::array<float, 4> a{0, 0, 0, 0};
     for (int j = 0; j < n && j < 4; ++j) a[(size_t)j] = v[j];
     live_[name] = a;
+    unknown_.erase(name);
 }
 
 }  // namespace bf6

@@ -20,10 +20,9 @@ const uint32_t kSuspension = 0x8C83D835u;  /* thunk 147EE35E0 -> FUN_1443ED130 *
 const uint32_t kContactForce = 0x602F941Du; /* thunk 147EE4A40 -> FUN_1443F4840 */
 const uint32_t kGravity   = 0x43223158u;   /* thunk 147EE21A0 -> FUN_1443E7F40 */
 const uint32_t kGetCom    = 0x75311A22u;   /* thunk 147EDF970 -> FUN_1443E37D0 */
-/* MotionMachine() -> Vec3, reflected, no name recovered. The dirt bike reads it, adds
- * (0.25, 0.17, 0.26) when a rider condition holds, and hands the sum to SetInertia
- * (0x00945C6D) - so it is the matching GETTER: the inertia per kg the body carries
- * (FUN_1443E3BA0 reads the stored reciprocal and inverts it back). */
+/* Base inertia per kg: descriptor 14AEE3938 +0x38 is 1443E3C80, whose
+ * component virtual +0x1E8 (140DDD960) copies the opening cache at +0x1A0.
+ * 1443E3BA0 is the separate CURRENT-body getter, key 7D5AFD1A. */
 const uint32_t kGetInertia = 0xEF8DF681u;
 const uint32_t kSetCom    = 0x71C3128Fu;   /* thunk 147EDF890 -> FUN_1443E3740 */
 /* MotionMachine(Inertia), reflected void(Vec3 Inertia). The graph hands it the
@@ -2919,12 +2918,11 @@ bool WheelOps::invoke(uint32_t key, const std::vector<Value>& a, Value& out) {
         return true;
     }
     if (key == kGetInertia) {
+        /* Rider additions are relative to the component cache every step. The
+         * setter must not change this value or the rider accumulates each tick. */
         out.bytes.assign(16, 0);
-        for (int i = 0; i < 3; ++i) {
-            const float inv = body_.inv_inertia[i];
-            wf(out.bytes, 4 * (uint32_t)i,
-               (inv != 0.0f && body_.mass != 0.0f) ? 1.0f / (inv * body_.mass) : 0.0f);
-        }
+        for (int i = 0; i < 3; ++i)
+            wf(out.bytes, 4 * (uint32_t)i, body_.base_inertia_per_kg[i]);
         out.known = true;
         if (bf6_env("BF6_INERTIA_DEBUG"))
             std::fprintf(stderr, "getinertia: (%g %g %g)\n", rf(out, 0), rf(out, 4), rf(out, 8));

@@ -64,6 +64,7 @@ set(BF6_SOURCES
     src/vehicle_wheel_ops.cpp
     src/expression_pure_ops.cpp
     src/ex_vm.cpp
+    src/renderbone_sim.cpp
     src/cache/cache_store.cpp
     src/cache/pack.cpp
     src/cache/progress.cpp

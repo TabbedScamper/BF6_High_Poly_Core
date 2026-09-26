@@ -29,6 +29,8 @@ struct WheelBody {
     float v[4] = {0, 0, 0, 0};        // chassis linear velocity, local, m/s
     float w[4] = {0, 0, 0, 0};        // chassis angular velocity, local, rad/s
     float com[4] = {0, 0, 0, 0};      // centre of mass, local, m
+    /* 140DDD960: component +0x1A0, captured before graph writes. Native fallback is one. */
+    float base_inertia_per_kg[3] = {1, 1, 1};
     float mass = 0.0f;                // kg
     float inv_inertia[4] = {0, 0, 0, 0}; // diagonal, local, 1/(kg m^2)
     float gravity[4] = {0, -9.81f, 0, 0};

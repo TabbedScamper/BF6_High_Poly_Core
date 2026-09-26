@@ -1750,6 +1750,50 @@ struct TagSet {
     }
 };
 
+/* TaggingControllerAsset, default child timing. FUN_140836290 reads the child
+ * at asset +0x38; FUN_1408369e0 updates it, copies its clock, then evaluates the
+ * tag collection. The rider's hand correction uses this form (no timing
+ * override, duration -1). Expression tags remain explicitly unsupported by
+ * TagSet; this wrapper must not be described as a procedural IK solver. */
+struct TaggingCtrl : Ctrl {
+    std::unique_ptr<Ctrl> child;
+    TagSet tags;
+    void init(Runtime& rt, const Obj* a) {
+        asset = a;
+        child = rt.make(rt.g.resolve(a->f(0x7cdb5360u), a));
+        tags.build(rt, rt.g.resolve(a->f(0x70b22fd5u), a));
+        copy_timing();
+    }
+    void copy_timing() {
+        if (!child) return;
+        phase = child->phase; time = child->time; length = child->length;
+        remaining = child->remaining; phase_range = child->phase_range;
+        looping = child->looping; wrapped = child->wrapped;
+        tags.length = length; tags.looped = wrapped;
+    }
+    void update(Runtime& rt, float dt, Pose& out) override {
+        if (child) child->update(rt, dt, out);
+        else out = rt.bind;
+        copy_timing();
+        tags.evaluate(rt, time);
+    }
+    void set_time(Runtime& rt, float t) override {
+        if (child) child->set_time(rt, t);
+        copy_timing(); tags.jumped = true;
+    }
+    void set_phase(Runtime& rt, float p) override {
+        if (child) child->set_phase(rt, p);
+        copy_timing(); tags.jumped = true;
+    }
+    void restart(Runtime& rt) override {
+        tags.leave(rt);
+        if (child) child->restart(rt);
+        copy_timing(); tags.jumped = true;
+    }
+    bool is_additive() const override { return child && child->is_additive(); }
+    Ctrl* tag_leaf() override { return child ? child->tag_leaf() : nullptr; }
+};
+
 /* The node's child when the node is a transparent/exit node (kind 2): the
  * engine's TransparentController passes the PARENT's pose through. A root
  * state flow has no parent pose, so this outputs an all-invalid pose (a
@@ -3661,8 +3705,24 @@ struct PlaybackRateCtrl : Ctrl {
 };
 
 struct SeqFlowCtrl : Ctrl {
+    // FlowTrack tags use the actor clock: FUN_1409c5840 reads child +0x18/1c/20,
+    // then calls the shared tag evaluator. Previously only clip tags were queried,
+    // discarding the rider's authored exit windows on the FlowTrack itself.
+    struct TrackTags : Ctrl {
+        std::vector<const Obj*> branches;
+        TagSet tags;
+        void update(Runtime&, float, Pose&) override {}
+        void set_time(Runtime&, float t) override {
+            time = t; phase = length > 0.f ? t / length : 0.f;
+            remaining = std::fmax(length - t, 0.f);
+        }
+        void set_phase(Runtime& rt, float p) override { set_time(rt, p * length); }
+        Ctrl* tag_leaf() override { return this; }
+        const std::vector<const Obj*>* branch_tags() const override { return &branches; }
+    };
     struct State {
         std::unique_ptr<ActorCtrl> actor;
+        std::unique_ptr<TrackTags> track_tags;
         float start = 0.f;       /* where it lands once the states are laid end to end */
         float len = 0.f;         /* 0xed10e827 */
         bool hold = false;       /* 0x7e3f6d2e */
@@ -3724,6 +3784,16 @@ struct SeqFlowCtrl : Ctrl {
             S.actor->init(rt, rt.g.resolve(s->f(0x564beb5fu), s), a);
             if (S.actor->empty()) continue;
             if (S.len <= 0.f) S.len = S.actor->length;
+            S.track_tags = std::make_unique<TrackTags>();
+            S.track_tags->asset = s;
+            S.track_tags->length = S.actor->length;
+            const Obj* tagset = rt.g.resolve(s->f(0x70b22fd5u), s);
+            std::vector<const Obj*> all;
+            tag_set_tags(rt, tagset, all);
+            for (const Obj* t : all)
+                if (t->type == kT_BranchOutPointTag) S.track_tags->branches.push_back(t);
+            S.track_tags->tags.build(rt, tagset);
+            S.track_tags->tags.length = S.actor->length;
             S.start = at;
             at += S.len;
             states.push_back(std::move(S));
@@ -3747,6 +3817,8 @@ struct SeqFlowCtrl : Ctrl {
         const float local = std::fmin(time - cur->start, cur->len);
         cur->actor->set_time(rt, local);
         cur->actor->write(rt, out);
+        cur->track_tags->set_time(rt, local);
+        cur->track_tags->tags.evaluate(rt, local);
     }
     void set_time(Runtime& rt, float t) override {
         (void)rt;
@@ -3760,6 +3832,7 @@ struct SeqFlowCtrl : Ctrl {
         State* cur = &states.front();
         for (State& S : states)
             if (time >= S.start) cur = &S;
+        if (!cur->track_tags->branches.empty()) return cur->track_tags.get();
         return cur->actor->tag_leaf();
     }
 };
@@ -3871,6 +3944,12 @@ std::unique_ptr<Ctrl> Runtime::make(const Obj* a)
         /* The array on its own, used where a controller is expected: the same walk with
          * no signal, so its first item plays. */
         auto c = std::make_unique<SignalBlendArrayCtrl>();
+        c->init(*this, a);
+        return c;
+    }
+    if (a->type == "5e28f364-fdd7-2aa6-3bb9-3679f687c43d" &&
+        !has_nonnull(a->f(0xcab75ac1u)) && numv(a->f(0x255d846eu)) <= 0) {
+        auto c = std::make_unique<TaggingCtrl>();
         c->init(*this, a);
         return c;
     }

@@ -10,6 +10,8 @@
 
 namespace bf6 { namespace expression {
 
+#include "soldier_registry.inc"
+
 namespace {
 
 /* The state family. Key, arity and behaviour all from data/EngineNodes.tsv. */
@@ -217,6 +219,10 @@ bool StateHost::describe(uint32_t key, OperatorSignature& out) {
     if (key == 0x91C21F3Cu) { out.input_widths = {260, 4}; out.output_width = 260; return true; }
     /* THE VEHICLE WEAPON NODES (see invoke). The primary output is the node's LAST
      * output; the ones before it are extras, in order. */
+    if (key == 0x39497415u) {
+        out.input_widths = {4}; out.extra_output_widths = {1,1,1,1,1,4,1,1,1};
+        out.output_width = 1; return true;
+    }
     if (key == 0xB6EADEAEu) { out.input_widths = {4}; out.extra_output_widths = {4, 4, 4}; out.output_width = 4; return true; }
     if (key == 0xE973A99Cu) { out.input_widths = {4}; out.extra_output_widths = {1, 4}; out.output_width = 4; return true; }
     if (key == 0xC22CF89Cu) { out.input_widths = {4, 4}; out.extra_output_widths = {4}; out.output_width = 4; return true; }
@@ -854,7 +860,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         out.known = true;
         return true;
     }
-    /* THE SEAT / DOOR OPERATORS, from the natives (Codex study, corpus 6a1c1b):
+    /* THE SEAT / DOOR OPERATORS, from the natives (corpus 6a1c1b):
      *   0x91C21F3C  FUN_1475F9B20: from the vehicle in the input collection, the entry
      *               at the index (the vehicle's +0xD8 entry vector), its associated
      *               player's entity: a collection of zero or one id
@@ -873,7 +879,7 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         for (int i = 1; i <= 64; ++i) std::memcpy(b.data() + 4 * i, &none, 4);
         return b;
     };
-    /* THE VEHICLE WEAPON NODES, from the natives (Codex study, corpus 6a1c1b). The
+    /* THE VEHICLE WEAPON NODES, from the natives (corpus 6a1c1b). The
      * input is an ability CATEGORY id (the CV90 rocket pod asks for "Vehicle Secondary
      * Weapon", 0xBCAB1D17): the node finds the ability of that category on the vehicle
      * and reads its weapon's firing state. Server path; nothing equipped answers the
@@ -885,6 +891,21 @@ bool StateHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
      *   0xC22CF89C  FUN_14174E130: the ability's PlayerAbilityState and a second value
      *               only a BasicPlayerAbility gives. No ability system runs offline, so
      *               this answers the native's own "absent" sentinel, 7, and 0 (stated). */
+    if (key == 0x39497415u && args.size() == 1) {
+        /* FUN_14172B810: native output 9 is primary, then outputs 0..8.
+         * Widths: 1 + (1,1,1,1,1,4,1,1,1). The vehicle clock publishes
+         * the shot pulse by ability category in our reserved transport mode. */
+        if (!args[0].known) return false;
+        out.bytes.assign(13, 0);
+        const auto event = channels_.find((uint64_t(0xFFFFFFFEu) << 32) | args[0].as_u32());
+        if (event != channels_.end() && event->second.size() == 13)
+            out.bytes = event->second;
+        if (bf6_env("BF6_WEAPON_DEBUG") && out.bytes[1])
+            std::fprintf(stderr, "weapon shot event category %08X\n", args[0].as_u32());
+        out.known = true;
+        served_[key] += 1;
+        return true;
+    }
     if (key == 0xB6EADEAEu || key == 0xE973A99Cu) {
         if (args.empty() || !args[0].known) return false;
         served_[key] += 1;
@@ -1782,6 +1803,7 @@ const uint32_t kTweakInt   = 0x94A8B80Bu;
 const uint32_t kWaterHeight = 0xED79777Au;
 
 bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
+    if (soldier_registry_describe(key, out)) return true;
     out = OperatorSignature{};
     /* no-operand default; describe_call sizes each call to its own operands */
     if (is_debug_draw(key)) { out.output_width = 0; return true; }
@@ -2025,12 +2047,6 @@ bool WorldHost::describe(uint32_t key, OperatorSignature& out) {
                                    4, 4, 4, 4, 4, 4};
         out.output_width = 4;
         return true;
-    case kGameplayFlags:
-        /* One entity/id input; ten outputs, final bool is the VM primary. */
-        out.input_widths = {4};
-        out.extra_output_widths = {1, 1, 1, 1, 1, 4, 1, 1, 1};
-        out.output_width = 1;
-        return true;
     case kEntryState:
         /* (entity/slot, bool gate) -> (state int, ==0, ==1, ==2, ==3) */
         out.input_widths = {4, 1};
@@ -2068,6 +2084,12 @@ bool WorldHost::describe_call(uint32_t key, const std::vector<uint32_t>& consts,
 }
 
 bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out) {
+    OperatorSignature soldier_signature;
+    if (soldier_registry_describe(key, soldier_signature)) {
+        const bool ok = soldier_registry_invoke(key, args, out);
+        if (ok) served_[key] += 1;
+        return ok;
+    }
     if (key == kEmptyQuery) {
         served_[key] += 1;
         out = empty_set();
@@ -2265,7 +2287,13 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
             if (!args[2].known || args[2].bytes.size() < 4) return false;
             uint32_t mode = 0;
             std::memcpy(&mode, args[2].bytes.data(), 4);
-            if (!(mode == 0 || (mode == 2 && (flags & 6) == 0))) return false;
+            const bool raw = mode == 0 || (mode == 2 && (flags & 6) == 0);
+            /* FUN_144369A20 returns the stored transform unchanged in modes 1/2
+             * when both reference descriptors are absent. Scope this extension to
+             * the soldier; referenced spaces still need their real transforms. */
+            const auto* field = sf.find(bf6::SoldierFields::kXform, lane, id);
+            if (!raw && !(bf6::SoldierFields::evaluating() && field &&
+                          !field->space_ref && (mode == 1 || mode == 2))) return false;
             float m[16];
             if (id == 0xFFFFu) {
                 lt_identity(m);
@@ -2343,6 +2371,14 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         const bf6::SoldierFields::Field* f = bf6::SoldierFields::get().find(kind, lane, id);
         if (f) bf6::SoldierFields::get().mark_read(*f);
         if (!f || !bf6::SoldierFields::get().known(*f)) return false;
+        if (key == kFieldVec && bf6::SoldierFields::evaluating()) {
+            /* FUN_141320EC0 / 14436A9E0: never silently return raw coordinates
+             * for a reference-space read whose conversion is unavailable. */
+            if (args.size() < 3 || !args[2].known || args[2].bytes.size() < 4) return false;
+            const uint32_t mode = args[2].as_u32();
+            const bool raw = mode == 0 || (mode == 2 && (args[1].bytes[2] & 6) == 0);
+            if (!raw && (f->space_ref || (mode != 1 && mode != 2))) return false;
+        }
         float v[4];
         bf6::SoldierFields::get().value(*f, v);
         if (key == kFieldInt) out = Value::from_u32((uint32_t)(int32_t)v[0]);
@@ -2432,13 +2468,6 @@ bool WorldHost::invoke(uint32_t key, const std::vector<Value>& args, Value& out)
         const uint32_t status = 7, no_id = 0xFFFFFFFFu;
         std::memcpy(out.bytes.data() + 4, &status, 4);
         std::memcpy(out.bytes.data() + 12, &no_id, 4);
-        out.known = true;
-        served_[key] += 1;
-        return true;
-    }
-    if (key == kGameplayFlags && args.size() == 1) {
-        /* FUN_14172B810 clears all ten outputs before looking up the live object. */
-        out.bytes.assign(13, 0);         /* bool primary + nine extras */
         out.known = true;
         served_[key] += 1;
         return true;

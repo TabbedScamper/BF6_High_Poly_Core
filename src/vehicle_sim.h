@@ -50,7 +50,9 @@ public:
               std::string& err);
     /* A SUB-SKELETON (tracks, a launcher, a mount): its bones are appended after the
      * rig's, its channels mapped where the base rig does not already take them. Its root
-     * stays a root; what the graphs write there are local poses. Returns bones added. */
+     * stays a root; what the graphs write there are local poses. Track BoneIds with
+     * authored side selectors receive independent instances and qualified names.
+     * Returns bones added, including those instances. */
     int add_skeleton(bf6_ctx* ctx, const std::string& skeleton);
     /* Poses from outside the graphs (animation clip layers), after tick(): write, then
      * publish_bones() again so they are presented and tracked. */
@@ -175,6 +177,7 @@ private:
         expression::Graph graph;
         expression::Instance inst;
         std::vector<bf6_channel_binding> binds;
+        std::map<uint32_t, std::string> track_scopes; // pool offset -> authored side
         expression::NamedBuiltins builtins;
         expression::PureOps pure;
         std::map<uint32_t, std::string> names;
@@ -194,6 +197,7 @@ private:
     expression::WheelOps wheel_;
     struct BoneIdentity { int32_t index = -1; std::string name; };
     std::map<uint32_t, BoneIdentity> bone_identity_;
+    std::map<std::pair<std::string, uint32_t>, uint32_t> track_bone_keys_;
     std::vector<PresentedBone> presented_bones_;
     /* motion scoreboard (motion_json) */
     std::set<std::string> host_set_;

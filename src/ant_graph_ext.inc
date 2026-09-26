@@ -93,10 +93,10 @@ constexpr uint32_t kCmpInput  = 0x63545f5eu;   /* FloatComparison: float input *
 constexpr uint32_t kCmpInput2 = 0xea11b64au;   /* FloatComparison: second input (null in every sample seen) */
 constexpr uint32_t kCmpOp     = 0xf2ca26dbu;   /* GameStateCompareOp */
 constexpr uint32_t kCmpValue  = 0x8350c0b8u;   /* threshold */
-/* FloatBoolAsset: a float game state read AS a bool, by comparing it against a
- * threshold with the same GameStateCompareOp enum - confirmed by name in the
- * research data: 0 EqualTo, 1 NotEqualTo, 2 LessThan, 3 LessThanOrEqualTo,
- * 4 GreaterThan, 5 GreaterThanOrEqualTo.
+/* FloatBoolAsset uses EFloatOperationMode, NOT GameStateCompareOp.
+ * Installed exe reflection: field 0xee96d8a4 at +0x48 has enum GUID
+ * 66c89b03-b86d-baba-e737-b794938b09d6. Its enum records name
+ * 0 Equal, 1 NotEqual, 2 LessThan, 3 GreaterThan.
  *
  * These gate movement conditions all over the 1P graph and NONE of them could be
  * evaluated, which is a large part of why the graph answered almost no state:
@@ -122,7 +122,7 @@ constexpr uint32_t kBlInvert = 0x5ab403a2u;
 constexpr uint32_t kFbSource  = 0x4676ba2cu;   /* Source, the float state */
 constexpr uint32_t kFbSource2 = 0x26633407u;   /* a second source, null in every sample */
 constexpr uint32_t kFbValue   = 0x8cf424e7u;   /* the threshold */
-constexpr uint32_t kFbOp      = 0xee96d8a4u;   /* Operation, GameStateCompareOp */
+constexpr uint32_t kFbOp      = 0xee96d8a4u;   /* Operation, EFloatOperationMode */
 
 double num(const bf6::EbxValue* v)
 {
@@ -400,7 +400,10 @@ bool States::as_bool(Graph& g, const Obj* o, bool& ok)
         bool fok = false;
         const float x = as_float(g, g.resolve(o->f(kFbSource), o), fok);
         if (!fok) return false;
-        const bool r = compare_op((int)num(o->f(kFbOp)), x, (float)num(o->f(kFbValue)), ok);
+        const int op = (int)num(o->f(kFbOp));
+        // EFloatOperationMode has four members; only GreaterThan needs remapping.
+        const bool r = compare_op(op == 3 ? 4 : (op >= 0 && op < 3 ? op : -1),
+                                  x, (float)num(o->f(kFbValue)), ok);
         if (!ok) note_unknown(o);
         return r;
     }

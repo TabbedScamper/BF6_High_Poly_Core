@@ -48,6 +48,8 @@ public:
     };
 
     static SoldierFields& get();
+    /* Scoped by SoldierSim, never enabled by a vehicle evaluation. */
+    static bool& evaluating() { static thread_local bool active = false; return active; }
     /* Reads the table from the mounted install. Safe to call more than once. */
     bool load(Source& src, TypeDb& types, std::string& err);
     bool loaded() const { return loaded_; }
@@ -58,7 +60,7 @@ public:
      * authored default. `out` gets up to four lanes. */
     void value(const Field& f, float out[4]) const;
     void set_live(const std::string& name, const float* v, int n);
-    void clear_live() { live_.clear(); xform_live_.clear(); unknown_.clear(); reads_.clear(); stored_.clear(); }
+    void clear_live() { live_.clear(); xform_live_.clear(); unknown_.clear(); reads_.clear(); stored_.clear(); tick_stored_.clear(); }
     /* EVERY FIELD A GRAPH READ, recorded by the host's readers: with written() this is
      * what the graphs ask the walker for - a field read and never stored is an input. */
     void mark_read(const Field& f) const { reads_.insert(f.name); }
@@ -72,10 +74,12 @@ public:
     void set_live_xform(const std::string& name, const float m[16]);
     /* What a graph's STORE writes: the value lands on the field's live value, so later
      * graphs read it and the walker can read it back. */
-    void store(const Field& f, const float* v, int n) { set_live(f.name, v, n); unknown_.erase(f.name); stored_.insert(f.name); }
+    void store(const Field& f, const float* v, int n) { set_live(f.name, v, n); unknown_.erase(f.name); stored_.insert(f.name); tick_stored_.insert(f.name); }
     /* A store whose value is not known: later reads of the field must refuse, not fall
      * back to the default the store overwrote. */
-    void store_unknown(const Field& f) { unknown_.insert(f.name); stored_.insert(f.name); }
+    void store_unknown(const Field& f) { unknown_.insert(f.name); stored_.insert(f.name); tick_stored_.insert(f.name); }
+    void begin_tick() { tick_stored_.clear(); }
+    const std::set<std::string>& tick_stored() const { return tick_stored_; }
     bool known(const Field& f) const { return unknown_.count(f.name) == 0; }
     /* Every field a graph has stored (known or unknown value), for a caller that wants to
      * see what the graphs changed; the walker's own set_live values are not in it. */
@@ -107,6 +111,7 @@ private:
     std::set<std::string> unknown_;
     mutable std::set<std::string> reads_;
     std::set<std::string> stored_;
+    std::set<std::string> tick_stored_;
     std::map<uint32_t, const Field*> by_hash_;
 };
 

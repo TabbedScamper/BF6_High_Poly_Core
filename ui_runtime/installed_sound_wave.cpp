@@ -149,6 +149,8 @@ const Field* field(const Dataset& data, const char* name) {
     return it == data.fields.end() ? nullptr : &it->second;
 }
 
+#include "installed_sound_eal3.inc"
+
 std::string hex_guid(const uint8_t* p, bool canonical) {
     char text[33]{};
     if (canonical) {
@@ -344,6 +346,7 @@ InstalledSoundResult ReadInstalledSoundConfig(
     wave_request.metadata_only = request.metadata_only;
     wave_request.variation_index = request.variation_index;
     wave_request.variation_segment_index = request.variation_segment_index;
+    wave_request.loop_only = request.loop_only;
     result = ReadInstalledSoundWave(context, wave_request);
     result.controls.config_wave_imports = wave_count + asset_count;
     result.controls.config_haptic_imports =
@@ -442,7 +445,40 @@ InstalledSoundResult ReadInstalledSoundWave(
     const uint64_t chunk_index = memory & 1u ? memory >> 1 : stream >> 1;
     const uint64_t first = first_segments->values[vi];
     const uint64_t count = segment_counts->values[vi];
-    if (request.variation_segment_index >= count || first + request.variation_segment_index >= segments->count) {
+    uint64_t selected_segment = request.variation_segment_index;
+    if (request.loop_only) {
+        const Field* loop_first = field(*variations, "FirstLoopSegmentIndex");
+        const Field* loop_last = field(*variations, "LastLoopSegmentIndex");
+        if (!loop_first || !loop_last || loop_first->values[vi] > loop_last->values[vi] ||
+            loop_last->values[vi] >= count || count > 256) {
+            result.status = InstalledSoundStatus::SegmentOutOfRange;
+            result.error = "wave has no valid authored loop range";
+            return result;
+        }
+        if (loop_first->values[vi] != loop_last->values[vi]) {
+            InstalledSoundResult joined;
+            for (uint64_t index = loop_first->values[vi]; index <= loop_last->values[vi]; ++index) {
+                InstalledSoundRequest part = request;
+                part.loop_only = false;
+                part.variation_segment_index = uint32_t(index);
+                auto decoded = ReadInstalledSoundWave(context, part);
+                if (!decoded.ok()) return decoded;
+                if (index == loop_first->values[vi]) { joined = std::move(decoded); continue; }
+                if (joined.wave.channels != decoded.wave.channels ||
+                    joined.wave.sample_rate != decoded.wave.sample_rate ||
+                    uint64_t(joined.wave.sample_count) + decoded.wave.sample_count > 200000000) {
+                    joined.status = InstalledSoundStatus::MalformedBank;
+                    joined.error = "incompatible PCM segments in authored loop range";
+                    return joined;
+                }
+                joined.wave.sample_count += decoded.wave.sample_count;
+                joined.wave.pcm.insert(joined.wave.pcm.end(), decoded.wave.pcm.begin(), decoded.wave.pcm.end());
+            }
+            return joined;
+        }
+        selected_segment = loop_first->values[vi];
+    }
+    if (selected_segment >= count || first + selected_segment >= segments->count) {
         result.status = InstalledSoundStatus::SegmentOutOfRange;
         result.error = "segment index exceeds authored variation";
         return result;
@@ -482,7 +518,7 @@ InstalledSoundResult ReadInstalledSoundWave(
     result.controls.mutated_chunk_trials = 1;
     if (bf6_read_raw(context, BF6_RAW_CHUNK, mutated.c_str(), &control_raw) >= 0)
         result.controls.mutated_chunk_hits = 1;
-    const size_t si = size_t(first + request.variation_segment_index);
+    const size_t si = size_t(first + selected_segment);
     const size_t offset = size_t(sample_offsets->values[si] & ~uint64_t(3));
     result.wave.sample_offset = static_cast<uint64_t>(offset);
     uint32_t header = 0;
@@ -507,8 +543,12 @@ InstalledSoundResult ReadInstalledSoundWave(
         return result;
     }
     if (result.wave.codec == 0x16) {
+        if (decode_installed_eal3(chunk, offset, result.wave)) {
+            result.status = InstalledSoundStatus::Ok;
+            return result;
+        }
         result.status = InstalledSoundStatus::UnsupportedCodec;
-        result.error = "EA Layer3 sample reconstruction is not implemented";
+        result.error = "EA Layer3 codec helper missing or decode failed";
         return result;
     }
     if (!decode_sps(chunk, offset, result.wave) || result.wave.pcm.empty()) {

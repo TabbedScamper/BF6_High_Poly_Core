@@ -98,6 +98,12 @@ BF6_API int64_t bf6_meshset_sections(const uint8_t* res, int64_t res_len, int lo
 BF6_API int64_t bf6_meshset_vertex_bones(const uint8_t* res, int64_t res_len, int lod,
     const uint8_t* chunk, int64_t chunk_len, float** out);
 
+/* Full skin, 28 floats per vertex: position[3], normal[3], UV0[2], bones[8],
+ * weights[8], state-key 16-bit limbs[4] (low first). Unused lanes are zero.
+ * Returns vertex count or -1; bf6_blob_free. */
+BF6_API int64_t bf6_meshset_vertex_skin(const uint8_t* res, int64_t res_len, int lod,
+    const uint8_t* chunk, int64_t chunk_len, float** out);
+
 /* MERGED SURFACES from the same sections: one surface per shader state key, or
  * per canonical colour where a palette split applies; triangles whose first
  * vertex's destruction part is in `hidden` are dropped; an attribute is kept only
@@ -3298,6 +3304,10 @@ BF6_API int32_t bf6_vehicle_weapon_state(bf6_vehicle*, const char* category, int
  * the absolute local Frostbite LinearTransform: right/up/forward/translation
  * rows at float offsets 0/4/8/12. The name is the authored skeleton bone name. */
 BF6_API int32_t bf6_vehicle_bone_count(bf6_vehicle*);
+/* Read-only SP_TrackOffset output for an authored mesh-slot pool binding.
+ * Returns 1 when the last tick supplied a known finite value, otherwise 0. */
+BF6_API int32_t bf6_vehicle_track_offset(bf6_vehicle*, const char* graph_name,
+                                        uint32_t slot_offset, float* out);
 BF6_API int32_t bf6_vehicle_bone(bf6_vehicle*, int32_t index,
                                  char* name, int32_t name_capacity, float local16[16]);
 /* THE MOTION SCOREBOARD since open, as JSON: "graphs"; the public channels the graphs
@@ -6196,7 +6206,13 @@ BF6_API int bf6_ui_sound_style(bf6_ctx*, bf6_ui_sound_event* out, int out_max);
  * (frames * channels), or -1 if the sound could not be read. */
 BF6_API int bf6_ui_sound_decode(bf6_ctx*, const char* ebx_path, int variation_index,
                                 int16_t* out_pcm16, int max_samples,
-                                int* out_channels, int* out_rate);
+                        int* out_channels, int* out_rate);
+
+/* Same PCM contract, selecting the bank's authored loop segment range.
+ * Multiple loop segments are concatenated; missing ranges fail closed. */
+BF6_API int bf6_ui_sound_decode_loop(bf6_ctx*, const char* ebx_path, int variation_index,
+                        int16_t* out_pcm16, int max_samples,
+                        int* out_channels, int* out_rate);
 
 /* What an SFX_* Portal placeable plays.
  *
@@ -7337,6 +7353,24 @@ BF6_API int bf6_precache_layer_name(bf6_precache*, int index, char* out, int out
 /* Free anything this API returned (bf6_mesh*, bf6_terrain*, ...). The bf6_ctx*
  * itself is freed by bf6_close(), not this. */
 BF6_API void bf6_free(bf6_ctx*, void* handle);
+
+/* Read-only optics graph and exact material constants as JSON. The mesh,
+ * placing bundle and hexadecimal state key come from a loadout section.
+ * Empty mesh selects the weapon's iron-sight evidence. Returns JSON length,
+ * excluding NUL, or -1. No player state or installed data is changed. */
+BF6_API int64_t bf6_optics_read(bf6_ctx*, const char* item, const char* mesh,
+    const char* bundle, const char* state_key, char* out, int out_len);
+
+/* Stateful render-bone expression host. Open a mesh or RenderBonesData path.
+ * Input and output are row-vector affine matrices, 16 floats per bone, in
+ * world space. Outputs use RenderBonesData array order. Call close explicitly.
+ * Unsupported kernels/settings return -1 with a reason, never a guessed pose. */
+BF6_API uint64_t bf6_renderbone_sim_open(bf6_ctx*, const char* mesh_or_data);
+BF6_API int bf6_renderbone_sim_count(uint64_t handle);
+BF6_API int bf6_renderbone_sim_step(uint64_t handle, const float* world,
+    int bone_count, float dt_seconds, float* out, int capacity_floats);
+BF6_API const char* bf6_renderbone_sim_error(void);
+BF6_API void bf6_renderbone_sim_close(uint64_t handle);
 
 #ifdef __cplusplus
 }

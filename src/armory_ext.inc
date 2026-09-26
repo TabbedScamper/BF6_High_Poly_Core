@@ -3494,3 +3494,5 @@ int bf6_melee_ui_metadata_rows(
             out[i] = c->melee_ui_metadata[(size_t)i];
     return count;
 }
+
+#include "optics_ext.inc"

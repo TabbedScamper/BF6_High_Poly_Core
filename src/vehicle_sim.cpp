@@ -16,6 +16,7 @@
 #include <algorithm>
 
 extern "C" uint32_t bf6__type_field_offsets_by_hash(bf6_ctx*, uint32_t, uint32_t*, uint32_t);
+std::map<uint32_t, std::string> bf6__vehicle_track_scopes(bf6_ctx*, const std::string&);
 
 namespace bf6 {
 
@@ -59,6 +60,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
     graphs_.clear();
     channel_hash_.clear();
     bone_identity_.clear();
+    track_bone_keys_.clear();
     presented_bones_.clear();
     host_set_.clear();
     host_values_.clear();
@@ -149,6 +151,8 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
         const int nb = bf6_expression_channel_bindings(ctx, name.c_str(), g->binds.data(), 256);
         mark("channel bindings");
         g->binds.resize(nb > 0 ? (size_t)std::min(nb, 256) : 0u);
+        if (name.find("/presex_") != std::string::npos)
+            g->track_scopes = bf6__vehicle_track_scopes(ctx, name);
         for (const auto& b : g->binds) {
             if (b.region == 0) g->inst.pool_patches[b.pool_offset] = b.channel_hash;
             if (b.kind == 0) channel_hash_[b.channel_name] = b.channel_hash;
@@ -400,7 +404,66 @@ int VehicleSim::add_skeleton(bf6_ctx* ctx, const std::string& skeleton) {
         bone_identity_[hs[(size_t)i]] = BoneIdentity{offset + index,
             sk->bones[index].name ? sk->bones[index].name : ""};
     }
-    const int added = sk->bone_count;
+    // Preserve the unqualified rig for existing callers. Authored track selectors
+    // get independent instances, so the two writes to Track_Joint_* cannot alias.
+    std::set<std::string> sides;
+    for (const auto& g : graphs_) for (const auto& binding : g->binds) {
+        if (binding.kind != 1) continue;
+        const auto scope = g->track_scopes.find(binding.pool_offset);
+        if (scope == g->track_scopes.end()) continue;
+        for (int i = 0; i < nc && i < 1024; ++i)
+            if (hs[(size_t)i] == binding.channel_hash && bs[(size_t)i] >= 0 && bs[(size_t)i] < sk->bone_count &&
+                !track_bone_keys_.count({scope->second, binding.channel_hash})) sides.insert(scope->second);
+    }
+    for (const auto& side : sides) {
+        const int32_t start = (int32_t)rig_names_.size();
+        for (int32_t index = 0; index < sk->bone_count; ++index) {
+            const int32_t parent = sk->bones[index].parent < 0 ? -1 : start + sk->bones[index].parent;
+            rig_names_.push_back(side + "/" + (sk->bones[index].name ? sk->bones[index].name : ""));
+            rig_parents_.push_back(parent);
+            float local[16], model[16];
+            state_.rest_local(offset + index, local);
+            const float* m = sk->bones[index].model;
+            for (int row = 0; row < 4; ++row) {
+                for (int col = 0; col < 3; ++col) model[row * 4 + col] = m[row * 3 + col];
+                model[row * 4 + 3] = 0;
+            }
+            state_.set_skeleton_bone(start + index, parent, local, model);
+        }
+        for (int i = 0; i < nc && i < 1024; ++i) {
+            const int32_t index = bs[(size_t)i];
+            if (index < 0 || index >= sk->bone_count) continue;
+            const auto identity = std::make_pair(side, hs[(size_t)i]);
+            if (track_bone_keys_.count(identity)) continue;
+            // Ours: collision-checked internal handles; retail channel IDs stay intact.
+            uint32_t key = 0xFD000000u | (uint32_t)(start + index);
+            while (bone_identity_.count(key) || bone_binds_.count(key) ||
+                   std::any_of(channel_hash_.begin(), channel_hash_.end(),
+                       [&](const auto& ch) { return ch.second == key; })) ++key;
+            track_bone_keys_[identity] = key;
+            state_.map_skeleton_bone(key, start + index);
+            bone_identity_[key] = BoneIdentity{start + index, rig_names_[(size_t)(start + index)]};
+            if (bf6_env("BF6_TRACK_BINDINGS")) {
+                float pose[16] = {};
+                state_.current_local(start + index, pose);
+                std::fprintf(stderr, "track rest %s key %08X local %g %g %g %g\n",
+                    rig_names_[(size_t)(start + index)].c_str(), key, pose[0], pose[12], pose[13], pose[14]);
+            }
+        }
+    }
+    for (auto& g : graphs_) for (const auto& binding : g->binds) {
+        if (binding.kind != 1 || binding.region != 0) continue;
+        const auto scope = g->track_scopes.find(binding.pool_offset);
+        if (scope == g->track_scopes.end()) continue;
+        const auto key = track_bone_keys_.find({scope->second, binding.channel_hash});
+        if (key != track_bone_keys_.end()) {
+            g->inst.pool_patches[binding.pool_offset] = key->second;
+            if (bf6_env("BF6_TRACK_BINDINGS"))
+                std::fprintf(stderr, "track binding %s pool %u %s %s -> %08X\n", g->name.c_str(),
+                    binding.pool_offset, scope->second.c_str(), binding.channel_name, key->second);
+        }
+    }
+    const int added = (int)rig_names_.size() - offset;
     bf6_free(ctx, sk);
     return added;
 }

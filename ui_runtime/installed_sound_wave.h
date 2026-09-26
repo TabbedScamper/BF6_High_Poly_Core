@@ -33,6 +33,7 @@ struct InstalledSoundRequest {
     std::string wave_asset;
     uint32_t variation_index = 0;
     uint32_t variation_segment_index = 0;
+    bool loop_only = false; // Select the authored loop range, fail if absent.
     // Stop after the authored SPS header and its negative controls: codec,
     // channels, rate, sample and variation counts are filled; pcm stays empty.
     bool metadata_only = false;
@@ -44,6 +45,7 @@ struct InstalledSoundConfigRequest {
     std::string config_asset;
     uint32_t variation_index = 0;
     uint32_t variation_segment_index = 0;
+    bool loop_only = false;
     // Stop after the authored SPS header and its negative controls: codec,
     // channels, rate, sample and variation counts are filled; pcm stays empty.
     bool metadata_only = false;
@@ -84,8 +86,8 @@ struct InstalledSoundResult {
 };
 
 // Directly reads the selected bank, authored chunk GUID and SPS block from the
-// current mount. PCM16BE and XAS1 are decoded exactly. EA Layer3 remains an
-// explicit unsupported-codec boundary; compressed bytes are never called PCM.
+// current mount. PCM16BE and XAS1 decode in process. Windows EA Layer3 uses the
+// pinned vgmstream helper beside the core and validates its PCM format/length.
 InstalledSoundResult ReadInstalledSoundWave(
     bf6_ctx* context, const InstalledSoundRequest& request);
 

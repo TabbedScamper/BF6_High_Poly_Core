@@ -99,6 +99,7 @@ static bf6_soldier* bf6__soldier_open(bf6_ctx* c, const char* graphs_csv, const 
         return fail(e);
     }
     for (const std::string& g : s->graphs) bf6__seed_typed_values(c, g, s->sim);
+    bf6::SoldierFields::get().clear_live();
     return s.release();
 }
 
@@ -108,7 +109,11 @@ void bf6_soldier_tick(bf6_soldier* s, float dt) {
     if (!s) return;
     s->time += dt > 0.0f ? dt : 1.0f / 60.0f;
     s->sim.set_time(s->time);
+    const bool previous = bf6::SoldierFields::evaluating();
+    bf6::SoldierFields::evaluating() = std::getenv("BF6_SOLDIER_LEGACY_HOST") == nullptr;
+    bf6::SoldierFields::get().begin_tick();
     s->sim.tick();
+    bf6::SoldierFields::evaluating() = previous;
 }
 
 /* A field's current value by name: 1 known (out gets up to four lanes), 0 when the last
@@ -148,6 +153,7 @@ int32_t bf6_soldier_reads(char* buf, int32_t cap) {
 int32_t bf6_soldier_report(bf6_soldier* s, char* buf, int32_t cap) {
     if (!s) return 0;
     std::string r = s->sim.report();
+    for (const auto& name : bf6::SoldierFields::get().tick_stored()) r += "stored " + name + "\n";
     /* BF6_SOLDIER_LAYOUT=1: each graph's typed slot groups too - which slot holds which
      * reflected type, the way to confirm an operator's result type from data. */
     if (std::getenv("BF6_SOLDIER_LAYOUT")) r += "\n" + s->sim.instance_layout();

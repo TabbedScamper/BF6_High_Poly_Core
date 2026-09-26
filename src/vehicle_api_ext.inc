@@ -73,6 +73,7 @@ struct bf6_vehicle {
         float interval = 0.0f;                 /* 60 / rate of fire (FireLogic +0xB0) */
         float reload = 0.0f, extra = 0.0f;     /* reload time and the empty-magazine delay */
         int32_t loaded = 0, reserve = 0;
+        uint64_t shots = 0; /* ours: monotonic native-clock event sequence */
         bool reloading = false, trigger = false;
         float remaining = 0.0f, denom = 0.0f, cooldown = 0.0f;
     };
@@ -85,6 +86,9 @@ struct bf6_vehicle {
     std::vector<bf6_vehicle_collision_point> collision_points;
     bool physics_body_valid = false, chassis_contact = false, graph_com_written = false;
     float physics_mass = 0.0f, physics_com[3] = {}, physics_inertia_per_kg[3] = {};
+    /* The body's inertia before any graph adjusted it; see THE GRAPH ADDS TO THE BASE. */
+    bool base_inertia_known = false;
+    float base_inertia_per_kg[3] = {};
 };
 
 namespace {
@@ -115,6 +119,62 @@ std::vector<std::string> bf6__ebx_import_paths(bf6_ctx* c, const std::string& na
     for (size_t i = 0; i < e.instance_count(); ++i) walk(e.read_instance(i), 0);
     return out;
 }
+
+/* The skeleton selector of each track BoneId. Kept beside the context-owned
+ * EBX readers so VehicleSim reuses the mount and its existing type database. */
+} // namespace
+std::map<uint32_t, std::string> bf6__vehicle_track_scopes(bf6_ctx* c, const std::string& name) {
+    std::map<uint32_t, std::string> out;
+    std::string err;
+    if (!ensure_types(c, err)) return out;
+    auto raw = c->src.get_ebx(name, err);
+    if (raw.empty()) return out;
+    bf6::Ebx e(*c->types);
+    e.set_guid_index(&c->src.partition_index());
+    if (!e.parse(std::move(raw), err)) return out;
+    std::map<std::string, std::map<std::string, std::string>> cache;
+    std::function<void(const bf6::EbxValue&)> visit = [&](const bf6::EbxValue& v) {
+        const auto* bindings = v.field(0xc939b436u);
+        if (bindings) for (const auto& row : bindings->items) {
+            const auto* bone = row.field(0x8cf424e7u);
+            const auto* scope = bone ? bone->field(0xe77520d2u) : nullptr;
+            const auto* location = row.field(0xfc636c1fu);
+            const auto* region = location ? location->field(0xbdf81e34u) : nullptr;
+            const auto* offset = location ? location->field(0x4ff541e4u) : nullptr;
+            if (!scope || scope->kind != bf6::EbxValue::Kind::ImportRef || !region || !offset ||
+                (region->kind == bf6::EbxValue::Kind::Int ? region->i : region->u) != 0) continue;
+            std::string path = scope->import_path;
+            if (path.size() > 4 && path.compare(path.size() - 4, 4, ".ebx") == 0) path.resize(path.size() - 4);
+            if (!cache.count(path)) {
+                auto& names = cache[path];
+                auto bytes = c->src.get_ebx(path, err);
+                bf6::Ebx selector(*c->types);
+                if (!bytes.empty() && selector.parse(std::move(bytes), err))
+                    for (size_t j = 0; j < selector.instance_count(); ++j) {
+                        const auto rec = selector.read_instance(j);
+                        const auto* label = rec.field(0x0c59fa06u);
+                        if (label && label->kind == bf6::EbxValue::Kind::Str)
+                            names[selector.instance_guid(j)] = label->s;
+                    }
+            }
+            const auto found = cache[path].find(scope->import_instance);
+            if (bf6_env("BF6_TRACK_BINDINGS"))
+                std::fprintf(stderr, "track selector %s pool %llu %s #%s -> %s\n", name.c_str(),
+                    (unsigned long long)(offset->kind == bf6::EbxValue::Kind::Int ? offset->i : offset->u),
+                    path.c_str(), scope->import_instance.c_str(), found == cache[path].end() ? "unknown" : found->second.c_str());
+            if (found == cache[path].end()) continue;
+            // Ours: output namespace spelling shared with the addon's authored slots.
+            const std::string slot = found->second == "Track Left" ? "vehicle_track_left" :
+                                     found->second == "Track Right" ? "vehicle_track_right" : "";
+            if (!slot.empty()) out[(uint32_t)(offset->kind == bf6::EbxValue::Kind::Int ? offset->i : offset->u)] = slot;
+        }
+        for (const auto& kv : v.fields) visit(kv.second);
+        for (const auto& item : v.items) visit(item);
+    };
+    for (size_t i = 0; i < e.instance_count(); ++i) visit(e.read_instance(i));
+    return out;
+}
+namespace {
 
 /* PUBLIC CHANNEL IDS BY NAME. A channel's id is the one its public channel list
  * declares (field 0xCDC6F6A3 beside its Name), not a hash of the name; an animation
@@ -1056,6 +1116,22 @@ int32_t bf6_vehicle_weapon_state(bf6_vehicle* v, const char* category, int32_t o
     return 1;
 }
 
+/* Weapon rounds trace the same current triangle scene as vehicle collision. */
+extern "C" BF6_API int32_t bf6_vehicle_weapon_trace(bf6_vehicle* v, const float segment[6], float hit[7]) {
+    if (!v || !v->scene || !segment || !hit) return 0;
+    double from[3], to[3], result[7];
+    for (int i = 0; i < 3; ++i) { from[i] = segment[i]; to[i] = segment[i + 3]; }
+    if (bf6_ray_scene_trace(v->scene, from, to, result) < 0) return 0;
+    for (int i = 0; i < 7; ++i) hit[i] = (float)result[i];
+    return 1;
+}
+
+/* Kept here so adding the event bridge does not change the shared public header. */
+extern "C" BF6_API int64_t bf6_vehicle_weapon_shots(bf6_vehicle* v, const char* category) {
+    const auto* w = bf6__equipped(v, category, nullptr);
+    return w ? (int64_t)w->shots : -1;
+}
+
 void bf6_vehicle_set_team(bf6_vehicle* v, int32_t team) { if (v) v->team = team; }
 
 void bf6_vehicle_prewarm(bf6_ctx* c) {
@@ -1172,7 +1248,8 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         for (const auto& eq : v->equipped) {
             if (eq.second < 0 || (size_t)eq.second >= v->weapons.size()) continue;
             bf6_vehicle::Weapon& w = v->weapons[(size_t)eq.second];
-            w.cooldown = std::max(w.cooldown - dt, 0.0f);
+            const uint64_t before = w.shots;
+            w.cooldown -= dt;
             if (w.reloading) {
                 w.remaining = std::max(w.remaining - dt, 0.0f);
                 if (w.remaining <= 0.0f) {
@@ -1181,10 +1258,22 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
                     w.reserve -= take;
                     w.reloading = false;
                 }
-            } else if (w.trigger && w.cooldown <= 0.0f && (w.capacity < 1 || w.loaded > 0)) {
-                if (w.capacity > 0) --w.loaded;
-                w.cooldown = w.interval;
+            } else if (w.trigger && w.interval > 0.0f) {
+                while (w.cooldown <= 0.0f && (w.capacity < 1 || w.loaded > 0)) {
+                    if (w.capacity > 0) --w.loaded;
+                    ++w.shots;
+                    w.cooldown += w.interval;
+                }
             }
+            if (!w.trigger || w.reloading || (w.capacity > 0 && w.loaded == 0))
+                w.cooldown = std::max(w.cooldown, 0.0f);
+            /* ours: reserved host transport mode, keyed by authored category.
+             * Native 14172B810 output 0 (bit 0x01) is the first extra VM
+             * output, used by the shipped tank graphs to start recoil impulses.
+             * Other event bits remain unknown; do not manufacture them. */
+            std::vector<uint8_t> event(13, 0);
+            event[1] = w.shots != before ? 1 : 0;
+            s.state_mut().set_channel(eq.first, event, 0xFFFFFFFEu);
             if (w.capacity > 0 && !w.reloading && w.loaded == 0 && w.reserve > 0) {
                 w.reloading = true;
                 w.denom = w.remaining = w.reload + w.extra;
@@ -1354,6 +1443,17 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
      * tyre/suspension model. */
     static const bool graph_physics = bf6_env("BF6_STANDIN_PHYSICS") == nullptr;   /* the car's own graph physics; BF6_STANDIN_PHYSICS for the old stand-in */
     if (graph_physics) {
+        /* THE GRAPH ADDS TO THE BASE, ONCE PER STEP. EF8DF681 is the component's
+         * cached opening inertia, not the current body getter (7D5AFD1A).
+         * Native 1443E3C80 -> virtual +0x1E8 -> 140DDD960 copies component +0x1A0;
+         * 140E46FF0 captures that cache after the authored body overrides.
+         * SetInertia changes the current body only. Preserve it between steps:
+         * resetting the solver to the opening inertia breaks aircraft, while
+         * returning current inertia here adds the occupied rider again each tick. */
+        if (!v->base_inertia_known) {
+            for (int i = 0; i < 3; ++i) v->base_inertia_per_kg[i] = d.p.inertia_per_kg[i];
+            v->base_inertia_known = true;
+        }
         bf6::expression::WheelBody b;
         float qi[4] = {-d.quat[0], -d.quat[1], -d.quat[2], d.quat[3]};
         float vl[3], wl[3];
@@ -1362,6 +1462,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
         for (int i = 0; i < 3; ++i) {
             b.v[i] = vl[i]; b.w[i] = wl[i]; b.com[i] = d.p.com[i];
             b.inv_inertia[i] = 1.0f / (d.p.mass * d.p.inertia_per_kg[i]);
+            b.base_inertia_per_kg[i] = v->base_inertia_per_kg[i];
             b.pos[i] = d.pos[i];
         }
         for (int i = 0; i < 4; ++i) b.quat[i] = d.quat[i];
@@ -1788,4 +1889,47 @@ int32_t bf6_vehicle_set_ground(bf6_vehicle* v, const float* tris, int32_t vert_c
     v->scene = fresh;
     if (old) bf6_ray_scene_free(old);
     return added;
+}
+
+/* Read the exact scalar sent to SP_TrackOffset by the last presentation tick.
+ * slot_offset comes from the graph EBX's mesh-slot binding, not a vehicle table.
+ * The existing diagnostic trace is the only public access to VM operands. Read
+ * its bit pattern (not its rounded decimal text); never evaluate or mutate the VM.
+ * This transport is ours. The value and all its arithmetic belong to the graph. */
+int32_t bf6_vehicle_track_offset(bf6_vehicle* v, const char* graph_name,
+                                 uint32_t slot_offset, float* out) {
+    if (!v || !graph_name || !out) return 0;
+    const auto* graph = v->sim.graph_named(graph_name);
+    if (!graph) return 0;
+    for (const auto& r : graph->records) {
+        if (r.operator_key != 0x4994479Bu || r.operands.size() != 6) continue;
+        if (r.operands[1].region != 0 || r.operands[1].offset != slot_offset) continue;
+        bool track_parameter = false;
+        for (const auto& rel : graph->relocations) {
+            if (rel.pointer_field != r.operands[3].offset || rel.target >= graph->constant_pool.size()) continue;
+            const char* p = reinterpret_cast<const char*>(graph->constant_pool.data() + rel.target);
+            const size_t available = graph->constant_pool.size() - rel.target;
+            const void* end = std::memchr(p, 0, available);
+            if (end && std::string(p, static_cast<const char*>(end) - p) ==
+                    "Common/Shaders/SharedParameters/Weathering/SP_TrackOffset") track_parameter = true;
+        }
+        if (!track_parameter) continue;
+        const std::string trace = v->sim.record_info(r.offset);
+        const std::string heading = std::string(graph_name) + " rec ";
+        const size_t begin = trace.find(heading);
+        if (begin == std::string::npos) continue;
+        const size_t head_end = trace.find('\n', begin);
+        if (head_end == std::string::npos || trace.substr(begin, head_end - begin).find("ran 1") == std::string::npos) continue;
+        const size_t arg = trace.find("  op5 ", head_end);
+        if (arg == std::string::npos) continue;
+        const size_t end = trace.find('\n', arg);
+        const std::string line = trace.substr(arg, end - arg);
+        if (line.find(" KNOWN = ") == std::string::npos || line.find("not the slot") != std::string::npos) continue;
+        const size_t bits_at = line.find("(0x");
+        if (bits_at == std::string::npos) continue;
+        const uint32_t bits = static_cast<uint32_t>(std::strtoul(line.c_str() + bits_at + 3, nullptr, 16));
+        std::memcpy(out, &bits, 4);
+        return std::isfinite(*out) ? 1 : 0;
+    }
+    return 0;
 }

@@ -155,7 +155,8 @@ int main(int argc, char** argv) {
             const float ts = (float)f / 60.0f;
             bf6_vehicle_set_seat(v, 0, (ts >= exit_a && ts < exit_b) ? 0 : 1);
         }
-        float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
+        static const float step_dt = std::getenv("BF6_DT") ? (float)std::atof(std::getenv("BF6_DT")) : 1.0f / 60.0f;
+        float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, step_dt, 0.0f};
         /* BF6_SCRIPT=<until_s>:<throttle>,<brake>,<steer>;...: the inputs by phase, in
          * place of throttle-then-brake - reverse a little, then throttle while
          * steering, the way a player drives. */

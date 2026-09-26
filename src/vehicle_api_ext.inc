@@ -612,6 +612,20 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
             std::vector<std::string> found;
             std::set<std::string> seen;
             std::vector<std::string> todo = {gdir + "/featureex_veh_" + gcls + "_" + gveh};
+            /* AND THE VEHICLE'S CONTROLLER FEATURES. dicefeature_controller_<class>_<veh>
+             * imports the SHARED derived graph for its class (locomotion/derivedex_vehicle_
+             * motorcycle, _airplane, _car_4wd), which publishes the drivetrain's state as
+             * channels: a bike's SteeringAngle, RPM and GearNumber, a jet's AutoThrottle.
+             * It is not reached from the featureex list. */
+            {
+                const std::string pre = gdir + "/dicefeature_controller_";
+                const int n = bf6_list_ebx(c, pre.c_str(), nullptr, 0);
+                std::vector<bf6_asset> rows((size_t)std::max(n, 0));
+                const int got = n > 0 ? std::clamp(bf6_list_ebx(c, pre.c_str(), rows.data(), n), 0, n) : 0;
+                for (int i = 0; i < got; ++i)
+                    if (rows[(size_t)i].name && std::string(rows[(size_t)i].name).compare(0, pre.size(), pre) == 0)
+                        todo.push_back(rows[(size_t)i].name);
+            }
             while (!todo.empty()) {
                 const std::string a = todo.back();
                 todo.pop_back();
@@ -641,7 +655,11 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
             }
             for (const auto* l : {&fs, &fd, &fp})
                 for (const std::string& gname : *l)
-                    if (gname.compare(0, gdir.size() + 1, gdir + "/") != 0) feature_graphs.push_back(gname);
+                    /* a derived graph republishes the drivetrain's own state, so it shares
+                     * the drivetrain's root state rather than getting an owner of its own */
+                    if (gname.compare(0, gdir.size() + 1, gdir + "/") != 0 &&
+                        gname.substr(gname.rfind('/') + 1).rfind("derivedex_", 0) != 0)
+                        feature_graphs.push_back(gname);
             graphs.insert(graphs.begin() + (std::ptrdiff_t)der_end, fd.begin(), fd.end());
             graphs.insert(graphs.begin() + (std::ptrdiff_t)sim_end, fs.begin(), fs.end());
             graphs.insert(graphs.end(), fp.begin(), fp.end());

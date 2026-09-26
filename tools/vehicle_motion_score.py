@@ -64,6 +64,20 @@ def run(veh, out_dir):
         return veh, {"error": "probe wrote nothing (%s): %s" % (e, (r.stderr or r.stdout)[-300:])}
 
 
+# NOT A MOVING PART, though the MOVING regex fires on it: destruction-state duplicates,
+# glass, cables and chains, HUD tick marks, lockers and interior dressing, static
+# brackets and braces. From a fleet classification of every orphan (2026-09-25); these
+# are listed as "not parts" and not scored. Names that are real parts elsewhere
+# (Antenna, Wiper, Piston, Door, Hatch, Hook) are deliberately not here.
+NONPART = re.compile(
+    r"_state0$|_Glass$|Bracket|Spacer|Rail_|_Pylon|"
+    r"Cable|Wires|Chain|Rope|Tube$|_Target$|^Arrow\d*$|Mine_wheel_\d+_\d+|"
+    r"Mudflaps?(_State0)?$|TurretInterior|FuselageInterior|TurretDome_(Interior|Pieces)|"
+    r"Turret_Fabric|InteriorDamage$|Locker\d+$|_Inner$|^FrontDoorStep$|FuselageDetails|"
+    r"Panel_.*Handle|^Handle_\d+$|^SpareWheel$|^Wheel$|BarrelBrace|"
+    r"RudderTail_Parent$|^LandingGear$|^RotorBase$", re.I)
+NONPART_STATIONARY = re.compile(r"ControlArm|SteeringKnuckle", re.I)
+
 SOCKET = re.compile(r"^Attach |Locator|(^|[ _])(Muzzle[ _])?FX$|^AITrajectory$|External Force$")
 
 
@@ -87,8 +101,12 @@ def score(veh, data):
             continue
         bound_rig.add(b["bone"])
         (bones_ok if (b["rot_deg"] > 0.05 or b["move_m"] > 1e-4 or b.get("scale", 0) > 1e-3) else bones_still).append(b["bone"])
-    orphans = sorted(n for n in rep["rig"]
-                     if MOVING.search(n) and not STATIC.search(n) and n not in bound_rig)
+    candidates = [n for n in rep["rig"]
+                  if MOVING.search(n) and not STATIC.search(n) and n not in bound_rig]
+    stationary = veh.startswith("stationary/")
+    nonparts = sorted(n for n in candidates
+                      if NONPART.search(n) or (stationary and NONPART_STATIONARY.search(n)))
+    orphans = sorted(n for n in candidates if n not in set(nonparts))
     # CARRIED: an orphan rigidly attached under a bone that moved (a rotor blade under
     # its hub, a gear link under its leg) moves exactly as its parent does, so it is
     # solved - but counted in its own column, never folded into the bone count.
@@ -112,7 +130,7 @@ def score(veh, data):
             "inputs_ok": inputs_ok, "inputs_missing": inputs_missing,
             "bones_ok": sorted(bones_ok), "bones_still": sorted(bones_still),
             "bones_unmapped": sorted(bones_unmapped), "orphans": orphans, "carried": sorted(carried),
-            "sockets": sorted(sockets),
+            "sockets": sorted(sockets), "nonparts": nonparts,
             "parts_unsupplied": rep["parts_unsupplied"], "solved": solved, "total": total}
 
 
@@ -132,7 +150,7 @@ def main():
     lines = ["# Vehicle motion scoreboard", "",
              "**%d / %d motion pieces solved** across %d vehicles "
              "(inputs supplied + bones that move, over inputs + bound bones + orphan parts; "
-             "sockets, attachment points no graph moves, are listed but not scored)." %
+             "sockets, attachment points no graph moves, and names that are not moving parts are listed but not scored)." %
              (solved, total, len(rows)), "",
              "| Vehicle | Solved | Inputs ok/missing | Bones moved/still/unmapped | Carried | Orphan parts | Sockets |",
              "|---|---|---|---|---|---|---|"]

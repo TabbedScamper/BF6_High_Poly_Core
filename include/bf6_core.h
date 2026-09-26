@@ -3275,6 +3275,10 @@ BF6_API void bf6_vehicle_set_rws_aim(bf6_vehicle*, int32_t index, float yaw, flo
 BF6_API void bf6_vehicle_set_seat(bf6_vehicle*, int32_t seat, int32_t occupied);
 /* THE DRIVER'S TEAM (TeamId; the vehicle takes its driver's). Default 1. */
 BF6_API void bf6_vehicle_set_team(bf6_vehicle*, int32_t team);
+/* WARM THE FIRST VEHICLE OPEN. Reads the executable's operator-name tables (~1.8 s)
+ * that every vehicle open needs and caches them for the process. Reads only the
+ * executable; safe to call on a worker thread while the context is in use. */
+BF6_API void bf6_vehicle_prewarm(bf6_ctx*);
 /* A HELICOPTER'S AUTO-HOVER, a player setting. Default off. */
 BF6_API void bf6_vehicle_set_autohover(bf6_vehicle*, int32_t on);
 /* THE VEHICLE'S WEAPONS, from its blueprint: each weapon component by its display name

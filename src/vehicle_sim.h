@@ -24,6 +24,7 @@
 #include "expression_pure_ops.h"
 #include "expression_state_host.h"
 #include "vehicle_wheel_ops.h"
+#include "expression_registry.h"
 
 #include <map>
 #include <array>
@@ -75,6 +76,10 @@ public:
     /* graphs whose root-level local state is their own (the feature graphs from outside
      * the vehicle's folder); the rest share owner 0 */
     void isolate_graphs(const std::vector<std::string>& names);
+    /* Warm the executable's name tables (named builtins, literal index) so the first
+     * vehicle open does not pay ~1.8 s for them. Thread-safe; touches no context. */
+    static void prewarm(const std::string& exe);
+    static const std::vector<expression::NamedBuiltin>& named_builtins_cached(const std::string& exe);
     void set_weapons(const std::map<uint32_t, bf6::expression::StateHost::WeaponView>& w) { state_.set_weapons(w); }
 
     /* Inputs by public-channel NAME (any channel any loaded graph binds). */

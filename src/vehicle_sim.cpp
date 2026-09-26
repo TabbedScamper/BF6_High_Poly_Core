@@ -1,6 +1,7 @@
 #include "vehicle_sim.h"
 #include "env_cache.h"
 #include <chrono>
+#include <mutex>
 
 #include "expression_registry.h"
 
@@ -17,6 +18,39 @@
 extern "C" uint32_t bf6__type_field_offsets_by_hash(bf6_ctx*, uint32_t, uint32_t*, uint32_t);
 
 namespace bf6 {
+
+/* THE EXECUTABLE'S NAMED BUILTINS, read once per executable (~1.4 s: the whole
+ * descriptor table). Thread-safe, so a caller can warm it on a worker thread before
+ * the first vehicle opens (bf6_vehicle_prewarm). */
+const std::vector<expression::NamedBuiltin>& VehicleSim::named_builtins_cached(const std::string& exe) {
+    static std::mutex mutex;
+    static std::map<std::string, std::vector<expression::NamedBuiltin>> cache;
+    std::lock_guard<std::mutex> guard(mutex);
+    auto it = cache.find(exe);
+    if (it == cache.end()) {
+        std::vector<expression::NamedBuiltin> rows;
+        std::string berr;
+        expression::read_named_builtins(exe, rows, berr);
+        if (bf6_env("BF6_GRAPH_DEBUG"))
+            std::fprintf(stderr, "named builtins: %zu%s%s\n", rows.size(),
+                         berr.empty() ? "" : " - ", berr.c_str());
+        it = cache.emplace(exe, std::move(rows)).first;
+    }
+    return it->second;
+}
+
+void VehicleSim::prewarm(const std::string& exe) {
+    named_builtins_cached(exe);
+    std::vector<expression::NamedOperator> none;
+    std::string why;
+    expression::resolve_named_operators(exe, {0u}, none, why);   /* builds the literal index */
+}
+
+namespace {
+/* BF6_OPEN_TIMING: where VehicleSim::open spends its time, per phase, summed over
+ * every graph of the vehicle (each mark charges the time since the previous one). */
+std::map<std::string, double> g_open_phase_ms;
+}
 
 bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<std::string>& graphs,
                       const std::string& skeleton, expression::bf6_ray_trace_fn tracer,
@@ -63,6 +97,12 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
     for (size_t gi = 0; gi < todo.size(); ++gi) {
         const std::string name = todo[gi];
         const bool required = gi < graphs.size();
+        auto ph_last = std::chrono::steady_clock::now();
+        auto mark = [&](const char* what) {
+            const auto now = std::chrono::steady_clock::now();
+            g_open_phase_ms[what] += std::chrono::duration<double, std::milli>(now - ph_last).count();
+            ph_last = now;
+        };
         std::unique_ptr<G> g(new G());
         g->name = name;
         const uint8_t* raw = nullptr;
@@ -84,6 +124,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             err = name + ": " + why; return false;
         }
         g->inst.trace_records = bf6_env("BF6_NO_TRACE") == nullptr;
+        mark("read, parse, instance");
 
         /* Each relocated pool pointer that lands on a printable run is an asset
          * reference the loader resolves: "[[guid/guid|Path/To/Expression]]". The
@@ -106,6 +147,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
         /* Bindings, patched into the pool the way the engine does at load. */
         g->binds.assign(256, bf6_channel_binding{});
         const int nb = bf6_expression_channel_bindings(ctx, name.c_str(), g->binds.data(), 256);
+        mark("channel bindings");
         g->binds.resize(nb > 0 ? (size_t)std::min(nb, 256) : 0u);
         for (const auto& b : g->binds) {
             if (b.region == 0) g->inst.pool_patches[b.pool_offset] = b.channel_hash;
@@ -143,6 +185,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                                          " keeps its on-disk placeholder\n", want, name.c_str(), nv);
             }
         }
+        mark("pool values");
         /* Relocated pointers (e.g. a PUSH's feature-path pointer) get their pool
          * target, so each pushed feature has its own state identity.
          *
@@ -178,6 +221,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             if (std::find(v.begin(), v.end(), rl.target) == v.end()) v.push_back(rl.target);
         }
         for (auto& kv : copies) std::sort(kv.second.begin(), kv.second.end());
+        mark("frame ids");
         for (const auto& rl : g->graph.relocations) {
             uint32_t id = rl.target;
             {
@@ -235,6 +279,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                     g->inst.type_fields[grp.data_type_id].assign(offs, offs + n);
             }
         }
+        mark("type sizes and fields");
         /* Operator names from the executable. */
         std::set<uint32_t> keyset;
         for (const auto& f : g->graph.fixups) keyset.insert(f.key);
@@ -258,20 +303,11 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
                              keys.size());
         }
+        mark("operator names");
         {
-            static std::map<std::string, std::vector<expression::NamedBuiltin>> cache;
-            auto it = cache.find(exe);
-            if (it == cache.end()) {
-                std::vector<expression::NamedBuiltin> rows;
-                std::string berr;
-                expression::read_named_builtins(exe, rows, berr);
-                if (bf6_env("BF6_GRAPH_DEBUG"))
-                    std::fprintf(stderr, "named builtins: %zu%s%s\n", rows.size(),
-                                 berr.empty() ? "" : " - ", berr.c_str());
-                it = cache.emplace(exe, std::move(rows)).first;
-            }
+            const std::vector<expression::NamedBuiltin>& builtin_rows = named_builtins_cached(exe);
             std::set<uint32_t> want(keys.begin(), keys.end());
-            for (const auto& row : it->second) {
+            for (const auto& row : builtin_rows) {
                 if (!want.count(row.key)) continue;
                 g->names[row.key] = row.name;
                 g->builtins.add(row.key, row.name);
@@ -295,6 +331,7 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
                     std::fprintf(stderr, "   channel kind %d %08X %s\n", b.kind,
                                  b.channel_hash, b.channel_name);
         }
+        mark("builtins and bones");
         graphs_.push_back(std::move(g));
     }
 
@@ -331,6 +368,9 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
             bf6_free(ctx, sk);
         }
     }
+    if (bf6_env("BF6_OPEN_TIMING"))
+        for (const auto& kv : g_open_phase_ms)
+            std::fprintf(stderr, "  open phase %-28s %8.1f ms\n", kv.first.c_str(), kv.second);
     return true;
 }
 

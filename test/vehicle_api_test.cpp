@@ -28,7 +28,19 @@ int main(int argc, char** argv) {
     const float tris[18] = {-s, ground_y, -s, s, ground_y, -s, s, ground_y, s,
                             -s, ground_y, -s, s, ground_y, s, -s, ground_y, s};
     const char* dir = argc > 1 ? argv[1] : "common/hardware/vehicles/car/flyer60";
+    /* BF6_PREWARM=1: warm the executable's name tables first, then time the open
+     * alone (what a player's first vehicle entry costs once the plugin prewarms) */
+    if (std::getenv("BF6_PREWARM")) {
+        const auto w0 = std::chrono::steady_clock::now();
+        bf6_vehicle_prewarm(ctx);
+        std::fprintf(stderr, "prewarm %.1f ms\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count());
+    }
+    const auto o0 = std::chrono::steady_clock::now();
     bf6_vehicle* v = bf6_vehicle_open(ctx, dir, tris, 6, err, (int32_t)sizeof(err));
+    if (std::getenv("BF6_PREWARM"))
+        std::fprintf(stderr, "open %.1f ms\n",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - o0).count());
     if (!v) { std::fprintf(stderr, "open: %s\n", err); return 2; }
     /* BF6_WATER=<height>: the surface anything that floats reads. A boat needs it;
      * without it its hull is above water and pushes nothing, which is the same

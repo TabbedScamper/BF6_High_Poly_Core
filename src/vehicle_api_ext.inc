@@ -490,7 +490,11 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
      * refusal when the caller only wants the parts to move. Emplacements and drones
      * ship presentation graphs and no simex; a drone's live in drone/<veh>/expressions. */
     const bool presentation_only = !have(simex);
-    if (presentation_only && !(flags & BF6_VEHICLE_OPEN_PRESENTATION))
+    /* An emplacement or a drone HAS no drivetrain: it is presentation only by nature,
+     * so a plain open takes that path rather than refusing (the M2 could not be
+     * entered at all). Any other class without one is still refused. */
+    const bool no_drivetrain_by_nature = gcls == "stationary" || gcls == "drone";
+    if (presentation_only && !(flags & BF6_VEHICLE_OPEN_PRESENTATION) && !no_drivetrain_by_nature)
         return fail("no drivetrain graph: " + sim_a);
     std::unique_ptr<bf6_vehicle> v(new bf6_vehicle());
     v->name = veh;
@@ -1035,6 +1039,14 @@ int32_t bf6_vehicle_weapon_state(bf6_vehicle* v, const char* category, int32_t o
 }
 
 void bf6_vehicle_set_team(bf6_vehicle* v, int32_t team) { if (v) v->team = team; }
+
+void bf6_vehicle_prewarm(bf6_ctx* c) {
+    if (!c) return;
+    for (const std::string& exe : bf6::TypeDb::exe_candidates(c->src.game_dir())) {
+        bf6::VehicleSim::prewarm(exe);
+        break;
+    }
+}
 void bf6_vehicle_set_autohover(bf6_vehicle* v, int32_t on) { if (v) v->autohover = on != 0; }
 
 void bf6_vehicle_set_seat(bf6_vehicle* v, int32_t seat, int32_t occupied) {

@@ -64,6 +64,7 @@ struct bf6_vehicle {
     bool seat_occupied[8] = {true, false, false, false, false, false, false, false};
     int32_t team = 1;          /* bf6_vehicle_set_team */
     bool autohover = false;    /* bf6_vehicle_set_autohover */
+    float gear_ratio = 0.0f;   /* the drivetrain's GearRatio last tick; below zero is reverse */
     /* THE WEAPONS (see the loader in open) */
     struct Weapon {
         std::string name;
@@ -421,6 +422,14 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         return nullptr;
     };
     if (!c || !vehicle_dir || !*vehicle_dir) return fail("no context or vehicle");
+    /* BF6_OPEN_TIMING=1: milliseconds per stage of the open, to see what a slow
+     * vehicle entry is paying for */
+    const auto open_t0 = std::chrono::steady_clock::now();
+    auto stage = [&](const char* what) {
+        if (!std::getenv("BF6_OPEN_TIMING")) return;
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - open_t0).count();
+        std::fprintf(stderr, "open %8.1f ms  %s\n", ms, what);
+    };
     std::string dir = vehicle_dir;
     while (!dir.empty() && dir.back() == '/') dir.pop_back();
     const size_t s1 = dir.rfind('/');
@@ -582,6 +591,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         std::sort(extra.begin(), extra.end());
         graphs.insert(graphs.end(), extra.begin(), extra.end());
     }
+    stage("graph list (folder)");
     /* THE VEHICLE'S FEATURE GRAPHS. The vehicle's feature tree (featureex_veh_<class>_
      * <vehicle>, its features and feature lists, followed through imports) names every
      * expression graph the game runs for it, and most live outside its folder: the
@@ -632,6 +642,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
             graphs.insert(graphs.end(), fp.begin(), fp.end());
         }
     }
+    stage("feature graphs found");
     /* BF6_SKIP_GRAPHS=<substr>[,<substr>...]: leave matching graphs out, to test what one
      * graph contributes (a diagnostic, never a default). */
     if (const char* sk = std::getenv("BF6_SKIP_GRAPHS")) {
@@ -656,6 +667,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
         return fail(e);
     }
     v->sim.isolate_graphs(feature_graphs);
+    stage("graphs opened (sim.open)");
     /* THE SUB-SKELETONS: a tank's tracks, the Bradley's TOW launcher, a boat's mounts.
      * Their channels (Track_Joint_*, TOW_Mount) are bound by the graphs and had nowhere
      * to land. Cinematic and first-person rigs are not the vehicle's. */
@@ -729,6 +741,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
                     std::fprintf(stderr, "  hinge0 +0x%X = %g\n", kv.first, kv.second);
         }
     }
+    stage("sub-skeletons, fakehinges");
     /* THE WEAPONS. The blueprint (vb_veh_<class>_<vehicle>) lists weapon components,
      * each with a display name (0xC0D8F798) and its FiringFunctionData (0x2B04CD3B,
      * an import). Read from that data, by the offsets the natives read:
@@ -822,6 +835,7 @@ bf6_vehicle* bf6_vehicle_open_ex(bf6_ctx* c, const char* vehicle_dir, const floa
                 std::fprintf(stderr, "weapon \"%s\": %d x %d rounds, %.3f s between shots, reload %.2f s (+%.2f s empty)\n",
                              w.name.c_str(), w.capacity, w.magazines, w.interval, w.reload, w.extra);
     }
+    stage("weapons");
     if (!std::getenv("BF6_NO_CLIP_LAYERS") && cls == "airplane") {
         const char* rig = "animations/kingston/global/rigging/vehicle_airplane_common_01.rig";
         const std::string key = "." + veh + ".mmlayer";
@@ -1065,7 +1079,19 @@ void bf6_vehicle_set_pose(bf6_vehicle* v, const float pos[3], const float quat[4
 
 int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     if (!v || !in || !out) return 0;
-    const float throttle = in[0], brake = in[1], steer = in[2], dt = in[4] > 0 ? in[4] : 1.0f / 60.0f;
+    /* THE PEDALS SWAP IN REVERSE MODE. The drivetrain's clutch-and-gear machine
+     * (0xAFFD9D93) keeps a direction byte, and while it is set the graph takes its
+     * BRAKE channel as the forward pedal and its THROTTLE channel as the reverse one
+     * (the target-gear records at 0x4530 / 0x4600 on the quad). Fed the keys
+     * unswapped, a player who held S to reverse and then pressed W kept reversing:
+     * W arrived as the reverse pedal. So in reverse mode the input hands the graph S
+     * as throttle and W as brake - W then brakes to a stop and the graph selects
+     * forward, which clears the byte. The swap is the native input layer's, applied
+     * here from the byte's last value (our reading, stated). BF6_NO_PEDAL_SWAP for A/B. */
+    const bool reversing = v->sim.reverse_mode() == 1 && !std::getenv("BF6_NO_PEDAL_SWAP");
+    float throttle = in[0], brake = in[1];
+    if (reversing) { throttle = in[1]; brake = in[0]; }
+    const float steer = in[2], dt = in[4] > 0 ? in[4] : 1.0f / 60.0f;
     const bool handbrake = in[3] > 0.5f;
     bf6::VehicleSim& s = v->sim;
     bf6::VehicleDynamics& d = v->dyn;
@@ -1671,6 +1697,7 @@ int32_t bf6_vehicle_step(bf6_vehicle* v, const float* in, float* out) {
     di.throttle = s.get_float("VehicleThrottle", &k);
     di.brake = s.get_float("VehicleBrake", &k);
     di.gear_ratio = s.get_float("GearRatio", &k);
+    v->gear_ratio = k ? di.gear_ratio : 0.0f;
     di.clutch = s.get_float("Clutch", &k);
     di.steer = s.get_float("SteeringAngle", &k);
     di.handbrake = handbrake;

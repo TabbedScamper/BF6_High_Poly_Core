@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -630,26 +631,32 @@ bool read_named_builtins(const std::string& exe_path,
     return true;
 }
 
-bool resolve_named_operators(const std::string& exe_path,
-                             const std::vector<uint32_t>& query_keys,
-                             std::vector<NamedOperator>& out,
-                             std::string& error)
-{
-    out.clear(); error.clear();
-    std::set<uint32_t> wanted(query_keys.begin(), query_keys.end());
-    if (wanted.empty()) return true;
+/* THE LITERAL INDEX, built once per executable. Hashing every string literal in
+ * the 176 MB executable took ~400 ms, and it ran once PER GRAPH: a vehicle hosting
+ * its feature graphs (thirty on the quad) spent twelve seconds opening. The index
+ * keeps (key, offset, length) for every NUL-terminated literal, sorted by key; names
+ * are read back from the file only for the keys a graph actually asks about. */
+namespace {
+struct LiteralEntry { uint32_t key; uint32_t offset; uint8_t length; };
+struct LiteralIndex { std::vector<LiteralEntry> entries; bool ok = false; std::string error; };
+
+const LiteralIndex& literal_index(const std::string& exe_path) {
+    static std::mutex mutex;
+    static std::map<std::string, LiteralIndex> cache;
+    std::lock_guard<std::mutex> guard(mutex);
+    auto it = cache.find(exe_path);
+    if (it != cache.end()) return it->second;
+    LiteralIndex& ix = cache[exe_path];
     FILE* f = fopen_binary_read(exe_path.c_str());
-    if (!f) { error = "cannot open " + exe_path; return false; }
+    if (!f) { ix.error = "cannot open " + exe_path; return ix; }
     std::fseek(f, 0, SEEK_END);
     const long file_size = std::ftell(f);
     std::fseek(f, 0, SEEK_SET);
-    if (file_size <= 0) { std::fclose(f); error = "empty executable"; return false; }
+    if (file_size <= 0) { std::fclose(f); ix.error = "empty executable"; return ix; }
     std::vector<uint8_t> data((size_t)file_size);
     const size_t got = std::fread(data.data(), 1, data.size(), f);
     std::fclose(f);
-    if (got != data.size()) { error = "short executable read"; return false; }
-
-    std::map<uint32_t, std::set<std::string>> matches;
+    if (got != data.size()) { ix.error = "short executable read"; return ix; }
     size_t at = 0;
     while (at < data.size()) {
         if (data[at] < 0x20 || data[at] > 0x7e) { ++at; continue; }
@@ -659,25 +666,51 @@ bool resolve_named_operators(const std::string& exe_path,
         const size_t length = at - begin;
         // Registration names are ordinary C literals. Requiring the NUL is a
         // rejection gate against hashing instruction/data fragments.
-        if (length >= 2 && length <= 127 && at < data.size() && data[at] == 0) {
-            const uint32_t key = operator_name_crc32(data.data() + begin, length);
-            if (wanted.find(key) != wanted.end())
-                matches[key].insert(std::string((const char*)data.data() + begin, length));
-        }
+        if (length >= 2 && length <= 127 && at < data.size() && data[at] == 0)
+            ix.entries.push_back({operator_name_crc32(data.data() + begin, length),
+                                  (uint32_t)begin, (uint8_t)length});
         // A run longer than 127 was deliberately not accepted. Advance past
         // the rest of it so suffixes cannot masquerade as separate literals.
         while (at < data.size() && data[at] >= 0x20 && data[at] <= 0x7e) ++at;
         if (at < data.size()) ++at;
     }
+    std::sort(ix.entries.begin(), ix.entries.end(),
+              [](const LiteralEntry& a, const LiteralEntry& b) { return a.key < b.key; });
+    ix.ok = true;
+    return ix;
+}
+} // namespace
+
+bool resolve_named_operators(const std::string& exe_path,
+                             const std::vector<uint32_t>& query_keys,
+                             std::vector<NamedOperator>& out,
+                             std::string& error)
+{
+    out.clear(); error.clear();
+    std::set<uint32_t> wanted(query_keys.begin(), query_keys.end());
+    if (wanted.empty()) return true;
+    const LiteralIndex& ix = literal_index(exe_path);
+    if (!ix.ok) { error = ix.error; return false; }
+    FILE* f = fopen_binary_read(exe_path.c_str());
+    if (!f) { error = "cannot open " + exe_path; return false; }
     for (uint32_t key : wanted) {
-        const auto it = matches.find(key);
-        if (it == matches.end()) continue;
+        auto lo = std::lower_bound(ix.entries.begin(), ix.entries.end(), key,
+                                   [](const LiteralEntry& e, uint32_t k) { return e.key < k; });
+        std::set<std::string> names;
+        for (auto e = lo; e != ix.entries.end() && e->key == key; ++e) {
+            char buf[128] = {};
+            std::fseek(f, (long)e->offset, SEEK_SET);
+            if (std::fread(buf, 1, e->length, f) == e->length)
+                names.insert(std::string(buf, e->length));
+        }
+        if (names.empty()) continue;
         NamedOperator row;
         row.key = key;
-        row.match_count = (uint32_t)it->second.size();
-        if (row.match_count == 1) row.name = *it->second.begin();
+        row.match_count = (uint32_t)names.size();
+        if (row.match_count == 1) row.name = *names.begin();
         out.push_back(std::move(row));
     }
+    std::fclose(f);
     return true;
 }
 

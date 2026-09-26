@@ -143,7 +143,22 @@ int main(int argc, char** argv) {
             const float ts = (float)f / 60.0f;
             bf6_vehicle_set_seat(v, 0, (ts >= exit_a && ts < exit_b) ? 0 : 1);
         }
-        const float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
+        float in[6] = {braking ? 0.0f : 1.0f, braking ? 1.0f : 0.0f, yaw, 0.0f, 1.0f / 60.0f, 0.0f};
+        /* BF6_SCRIPT=<until_s>:<throttle>,<brake>,<steer>;...: the inputs by phase, in
+         * place of throttle-then-brake - reverse a little, then throttle while
+         * steering, the way a player drives. */
+        if (const char* sc = std::getenv("BF6_SCRIPT")) {
+            const float ts = (float)f / 60.0f;
+            for (const char* p = sc; p && *p;) {
+                float until = 0, th = 0, br = 0, st = 0;
+                if (std::sscanf(p, "%f:%f,%f,%f", &until, &th, &br, &st) == 4 && ts < until) {
+                    in[0] = th; in[1] = br; in[2] = st;
+                    break;
+                }
+                p = std::strchr(p, ';');
+                if (p) ++p;
+            }
+        }
         /* BF6_TIMING=1: the slowest step and the total, per simulated second - whether a
          * phase of flight (lift-off, say) makes the core itself stall the caller. */
         static double t_sum = 0.0, t_max = 0.0;

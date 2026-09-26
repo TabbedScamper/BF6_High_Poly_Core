@@ -1591,6 +1591,7 @@ bool RecoveredOps::invoke(uint32_t key, const std::vector<Value>& args, Value& o
             o13 = f6;
             o14 = p8;
         }
+        reverse_mode_ = o14 != 0 ? 1 : 0;
         out.bytes.assign(17, 0);
         out.bytes[0] = o14;                                  /* primary: dir byte */
         std::memcpy(out.bytes.data() + 1, &o10, 4);          /* extras, in order  */

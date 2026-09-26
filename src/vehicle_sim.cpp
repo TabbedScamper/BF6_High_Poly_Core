@@ -1,4 +1,5 @@
 #include "vehicle_sim.h"
+#include <chrono>
 
 #include "expression_registry.h"
 
@@ -247,7 +248,15 @@ bool VehicleSim::open(bf6_ctx* ctx, const std::string& exe, const std::vector<st
          * whatever the descriptors do not cover. */
         std::vector<expression::NamedOperator> names;
         std::string scan_why;
-        expression::resolve_named_operators(exe, keys, names, scan_why);
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            expression::resolve_named_operators(exe, keys, names, scan_why);
+            if (std::getenv("BF6_OPEN_TIMING"))
+                std::fprintf(stderr, "  resolve_named_operators %s: %.1f ms (%zu keys)\n",
+                             name.substr(name.rfind('/') + 1).c_str(),
+                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                             keys.size());
+        }
         {
             static std::map<std::string, std::vector<expression::NamedBuiltin>> cache;
             auto it = cache.find(exe);

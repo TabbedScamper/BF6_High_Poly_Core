@@ -84,8 +84,12 @@ public:
                        OperatorSignature& out) override;
     bool invoke(uint32_t key, const std::vector<Value>& args, Value& out) override;
     const std::map<uint32_t, uint32_t>& served() const { return served_; }
+    /* The clutch-and-gear machine's direction byte (0xAFFD9D93, FUN_1443E6CB0) from its
+     * last call: 1 while the drivetrain is in reverse mode, 0 forward, -1 never called. */
+    int reverse_mode() const { return reverse_mode_; }
 private:
     std::map<uint32_t, uint32_t> served_;
+    int reverse_mode_ = -1;
 };
 
 /* Chain several hosts. The VM takes one, and a vehicle graph needs the pure

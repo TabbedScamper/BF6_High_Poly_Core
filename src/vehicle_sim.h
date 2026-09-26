@@ -70,6 +70,8 @@ public:
     }
     void publish_bones();
     void set_seats(const std::vector<uint32_t>& s) { state_.set_seats(s); }
+    /* the drivetrain's reverse mode (see RecoveredOps::reverse_mode) */
+    int reverse_mode() const { return recovered_.reverse_mode(); }
     /* graphs whose root-level local state is their own (the feature graphs from outside
      * the vehicle's folder); the rest share owner 0 */
     void isolate_graphs(const std::vector<std::string>& names);

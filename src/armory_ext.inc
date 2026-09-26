@@ -3496,3 +3496,102 @@ int bf6_melee_ui_metadata_rows(
 }
 
 #include "optics_ext.inc"
+
+/* Read-only recoil evidence. Use the bounded armory GUID index here: the
+ * general ANT graph's full partition index needlessly visits level packages. */
+int64_t bf6_weapon_recoil_read(bf6_ctx* c, const char* item, char* out, int out_len)
+{
+    if (!c || !item) return -1;
+    auto fail = [&](const std::string& reason) -> int64_t {
+        const std::string json = "{\"error\":" + bf6optics::quote(reason) + "}";
+        if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", json.c_str());
+        return (int64_t)json.size();
+    };
+    std::string why;
+    if (!ensure_types(c, why)) return fail(why);
+    const std::string folder = "/" + std::string(item) + "/";
+    const std::string leaf = bf6__aam_stem(item) + "_wb";
+    const int count = bf6_list_ebx(c, folder.c_str(), nullptr, 0);
+    if (count <= 0) return fail("no weapon folder");
+    std::vector<bf6_asset> assets((size_t)count);
+    const int got = bf6_list_ebx(c, folder.c_str(), assets.data(), count);
+    std::string blueprint;
+    for (int i = 0; i < got; ++i) {
+        const std::string name = assets[(size_t)i].name;
+        if (bf6__aam_stem(name) == leaf) {
+            if (!blueprint.empty()) return fail("ambiguous weapon blueprint");
+            blueprint = name;
+        }
+    }
+    if (blueprint.empty()) return fail("no weapon blueprint");
+    std::map<std::string, std::unique_ptr<bf6::Ebx>> parts;
+    auto part = [&](const std::string& path) -> bf6::Ebx* {
+        auto it = parts.find(path);
+        if (it != parts.end()) return it->second.get();
+        auto bytes = c->src.get_ebx(path + ".ebx", why);
+        if (bytes.empty()) bytes = c->src.get_ebx(path, why);
+        auto ebx = std::make_unique<bf6::Ebx>(*c->types);
+        ebx->set_guid_index(&c->src.armory_partition_index());
+        if (bytes.empty() || !ebx->parse(std::move(bytes), why)) return nullptr;
+        auto* result = ebx.get(); parts[path] = std::move(ebx); return result;
+    };
+    auto resolve = [&](const bf6::EbxValue* ref, bf6::Ebx* from,
+                       bf6::Ebx*& owner, bf6::EbxValue& value) -> bool {
+        if (!ref) return false;
+        owner = from;
+        if (ref->kind == bf6::EbxValue::Kind::InstanceRef && ref->instance >= 0 &&
+            (size_t)ref->instance < from->instance_count()) {
+            value = from->read_instance((size_t)ref->instance); return true;
+        }
+        if (ref->kind != bf6::EbxValue::Kind::ImportRef) return false;
+        owner = part(bf6optics::path(ref->import_path));
+        if (!owner) return false;
+        for (size_t i = 0; i < owner->instance_count(); ++i)
+            if (owner->instance_guid(i) == ref->import_instance) {
+                value = owner->read_instance(i); return true;
+            }
+        return false; // An unresolved instance is not the partition's first object.
+    };
+    bf6::Ebx* wb = part(blueprint);
+    if (!wb) return fail(why);
+    bf6::EbxValue weapon, sway;
+    bf6::Ebx* sway_owner = nullptr;
+    std::string sway_path;
+    /* WeaponFiringData.GunSwayData (0x775480e0). Resolve the actual import,
+     * including its instance GUID, instead of guessing a GS_<weapon> path. */
+    for (size_t i = 0; i < wb->instance_count(); ++i) {
+        const auto v = wb->read_instance(i);
+        const std::string type = bf6::TypeDb::guid_str(wb->instance_type(i));
+        if (type == "4c01cee3-9af9-0b6e-04d7-e0c7c562a393") weapon = v;
+        if (type != "fb91cf4c-5b60-3f52-acc7-db31cf87c0aa") continue;
+        const auto* ref = v.field(0x775480e0u);
+        if (!ref) continue;
+        if (sway_owner) return fail("ambiguous firing mode");
+        if (!resolve(ref, wb, sway_owner, sway)) return fail("unresolved GunSwayData");
+        sway_path = bf6optics::path(ref->import_path);
+    }
+    if (!sway_owner) return fail("no GunSwayData");
+    const auto* recoil = sway.field(0xc5d1c8feu);
+    bf6::EbxValue camera;
+    bf6::Ebx* camera_owner = nullptr;
+    if (!recoil || !resolve(sway.field(0x718d43cau), sway_owner, camera_owner, camera))
+        return fail("no recoil or camera data");
+    std::string json = "{\"source\":" + bf6optics::quote(sway_path) +
+        ",\"recoil\":" + bf6optics::value(*recoil) +
+        ",\"camera\":" + bf6optics::value(camera) +
+        ",\"sway\":" + bf6optics::value(sway) + ",\"zoom\":[";
+    const auto* levels = weapon.field(0xd96e9943u);
+    if (!levels) return fail("no zoom levels");
+    for (size_t i = 0; i < levels->items.size(); ++i) {
+        bf6::EbxValue zoom;
+        bf6::Ebx* zoom_owner = nullptr;
+        if (!resolve(&levels->items[i], wb, zoom_owner, zoom)) return fail("unresolved zoom level");
+        const auto* proc = zoom.field(0xf2d603deu);
+        if (!proc) return fail("no procedural zoom data");
+        if (i) json += ',';
+        json += bf6optics::value(*proc);
+    }
+    json += "]}";
+    if (out && out_len > 0) std::snprintf(out, (size_t)out_len, "%s", json.c_str());
+    return (int64_t)json.size();
+}

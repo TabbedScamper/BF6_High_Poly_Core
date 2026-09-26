@@ -7372,6 +7372,11 @@ BF6_API int bf6_renderbone_sim_step(uint64_t handle, const float* world,
 BF6_API const char* bf6_renderbone_sim_error(void);
 BF6_API void bf6_renderbone_sim_close(uint64_t handle);
 
+/* Installed base GunSway recoil, camera spring and procedural zoom data as JSON.
+ * Field hashes are retained. Returns required bytes excluding NUL; unavailable
+ * data returns an error object, invalid arguments -1. No player state is mutated. */
+BF6_API int64_t bf6_weapon_recoil_read(bf6_ctx*, const char* item, char* out, int out_len);
+
 #ifdef __cplusplus
 }
 #endif

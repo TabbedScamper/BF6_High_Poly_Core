@@ -1819,7 +1819,10 @@ extern "C" int bf6_loadout_md_states(bf6_ctx* c, const char* item_id, const char
     }
     std::vector<bf6_weapon_fit> fits(pairs.size());
     for (size_t i = 0; i < pairs.size(); ++i) fits[i] = { pairs[i].first.c_str(), pairs[i].second.c_str() };
-    return bf6_weapon_md_states(c, md.c_str(), fits.data(), (int)fits.size(), out, out_len);
+    const int result = bf6_weapon_md_states(c, md.c_str(), fits.data(), (int)fits.size(), out, out_len);
+    if (result < 0 && error_out && error_len > 0)
+        std::snprintf(error_out, (size_t)error_len, "The fitted weapon's md states or optic sight type are unknown.");
+    return result;
 }
 
 extern "C" int64_t bf6_loadout_soldier(bf6_ctx* c, const char* request_json, const char* portal_enums, uint8_t** out)

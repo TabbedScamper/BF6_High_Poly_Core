@@ -1238,7 +1238,8 @@ static int bf6__weapon_configured_parts(bf6_ctx* c, const char* md_partition,
                                         bf6_bone_xform* skin_out = nullptr,
                                         int skin_max = 0,
                                         int* bone_count_out = nullptr,
-                                        std::vector<BfMdWrite>* md_out = nullptr)
+                                        std::vector<BfMdWrite>* md_out = nullptr,
+                                        std::string* main_sight_bundle = nullptr)
 {
     if (!c || !md_partition) return -1;
     std::string terr;
@@ -1506,6 +1507,10 @@ static int bf6__weapon_configured_parts(bf6_ctx* c, const char* md_partition,
     }
 
     if (md_out) bf6__md_writes(c, e, bundles, *md_out);
+    if (main_sight_bundle)
+        for (const BfPartChoice& part : bundles)
+            if (bf6__slot_group_matches("scp", part.slot_group) && bf6__optional_group(part.slot_group))
+                *main_sight_bundle = part.bundle;
     c->part_meshes.clear();
     c->part_bundles.clear();
     c->part_attach_offsets.clear();
@@ -1626,9 +1631,58 @@ int bf6_weapon_md_states(bf6_ctx* c, const char* md_partition,
 {
     if (fit_count < 0 || (fit_count > 0 && !fits)) return -1;
     std::vector<BfMdWrite> w;
-    static bf6_weapon_part scratch[256];
-    if (bf6__weapon_configured_parts(c, md_partition, fits, fit_count, true, nullptr, scratch, 256,
-                                     nullptr, nullptr, 0, nullptr, &w) < 0) return -1;
+    std::string main_sight_bundle;
+    bf6_weapon_part scratch[256];
+    const int parts = bf6__weapon_configured_parts(c, md_partition, fits, fit_count, true, nullptr, scratch, 256,
+                                     nullptr, nullptr, 0, nullptr, &w, &main_sight_bundle);
+    if (parts < 0) return -1;
+    /* Resolve the aimed SightType from the fitted mesh's asset family, as the
+     * optics reader does, not from dpf_<name>: skin bundle names and module
+     * names are independent. The EX program, not this writer, adds the mount
+     * translation for non-iron sights. Never bake Wep_Scope_ATT into md.sight.
+     * Multiple modules in one family must agree; no arbitrary first match.
+     * This is an adapter join by asset directory, not an unlock evaluator. */
+    std::set<std::string> optic_folders;
+    for (int i = 0; i < parts && i < 256; ++i) {
+        if (!scratch[i].bundle || main_sight_bundle != scratch[i].bundle) continue;
+        const std::string mesh = scratch[i].mesh ? scratch[i].mesh : "";
+        const size_t art = mesh.find("/art/");
+        const size_t folder_end = art == std::string::npos ? mesh.find_last_of('/') : art;
+        if (folder_end != std::string::npos && mesh.find("/_attachments/") != std::string::npos)
+            optic_folders.insert(mesh.substr(0, folder_end + 1));
+    }
+    std::set<int> sight_types;
+    for (const std::string& folder : optic_folders) {
+        const int n = bf6_list_ebx(c, folder.c_str(), nullptr, 0);
+        if (n <= 0) continue;
+        std::vector<bf6_asset> assets((size_t)n);
+        const int got = bf6_list_ebx(c, folder.c_str(), assets.data(), n);
+        for (int i = 0; i < got; ++i) {
+            const std::string path = assets[(size_t)i].name;
+            if (path.substr(0, path.find_last_of('/') + 1) != folder) continue;
+            std::string err;
+            auto raw = c->src.get_ebx(path + ".ebx", err);
+            if (raw.empty()) raw = c->src.get_ebx(path, err);
+            bf6::Ebx module(*c->types);
+            if (raw.empty() || !module.parse(std::move(raw), err)) continue;
+            for (size_t k = 0; k < module.instance_count(); ++k) {
+                if (bf6::TypeDb::guid_str(module.instance_type(k)) != "d26efbcf-aadd-7798-c455-a99811304738") continue;
+                const auto optic = module.read_instance(k);
+                if (const auto* st = optic.field(0xE5B5C7DBu)) sight_types.insert((int)bf6__md_num(st));
+            }
+        }
+    }
+    if (!optic_folders.empty() && sight_types.size() != 1) {
+        std::fprintf(stderr, "weapon md sight type unknown: %s has %zu distinct modifier types\n",
+                     main_sight_bundle.c_str(), sight_types.size());
+        return -1;
+    }
+    if (sight_types.size() == 1) {
+        BfMdWrite m;
+        m.state = "animations/glacier/global/gamestates/fb.wep.sighttype.enumgs";
+        m.kind = 'i'; m.v[0] = (float)*sight_types.begin();
+        w.push_back(m); // Binding applies this to aimed levels, retaining the hip type.
+    }
     std::string s;
     char b[512];
     for (const BfMdWrite& m : w) {
